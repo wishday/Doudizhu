@@ -22,6 +22,8 @@ object AIDecision {
      * @param lastPlayerIndex 上一手出牌的玩家索引
      * @param myIndex 自己的玩家索引
      * @param opponentCardCounts 对手手牌数列表 [右AI, 人类, 左AI]
+     * @param landlordIndex 地主玩家索引（用于判断队友）
+     * @param unseenCounts 各rank在对手手中的剩余张数（长度18，下标即rank，用于牌池判断）
      * @return 选择的出牌组合，null表示不出
      */
     fun decide(
@@ -32,34 +34,68 @@ object AIDecision {
         teammateCardCount: Int = 0,
         lastPlayerIndex: Int = -1,
         myIndex: Int = -1,
-        opponentCardCounts: IntArray = intArrayOf()
+        opponentCardCounts: IntArray = intArrayOf(),
+        landlordIndex: Int = -1,
+        unseenCounts: IntArray = intArrayOf()
     ): CardGroup? {
+        // 本轮首家：上一手为空，或上一手就是自己出的牌（即轮转回自己，应重新自由出牌）
+        val isFreeLead = lastPlay == null || lastPlay.type == CardType.INVALID ||
+            (myIndex >= 0 && lastPlayerIndex == myIndex)
+
+        // 本轮首家必须出牌（自由续出），绝不压自己的牌，也绝不跳过
         return when (difficulty) {
-            Difficulty.EASY -> easyDecision(hand, lastPlay)
-            Difficulty.NORMAL -> normalDecision(hand, lastPlay, role, teammateCardCount, lastPlayerIndex, myIndex, opponentCardCounts)
+            Difficulty.EASY -> if (isFreeLead) easyFreePlay(hand) else easyDecision(hand, lastPlay)
+            Difficulty.NORMAL -> if (isFreeLead) {
+                freePlayStrategy(
+                    hand, CardRuleEngine.findAllValidPlays(hand, null), role, teammateCardCount,
+                    opponentCardCounts, unseenCounts
+                )
+            } else {
+                normalDecision(hand, lastPlay, role, teammateCardCount, lastPlayerIndex, myIndex,
+                    opponentCardCounts, landlordIndex, unseenCounts)
+            }
         }
     }
 
     /**
+     * 简单难度：自由出牌先出最小的单张，其次对子，保持简单但合理
+     */
+    private fun easyFreePlay(hand: List<Card>): CardGroup? {
+        val plays = CardRuleEngine.findAllValidPlays(hand, null)
+        val singles = plays.filter { it.type == CardType.SINGLE }
+        if (singles.isNotEmpty()) return singles.minByOrNull { it.mainRank }
+        val pairs = plays.filter { it.type == CardType.PAIR }
+        if (pairs.isNotEmpty()) return pairs.minByOrNull { it.mainRank }
+        return plays.randomOrNull()
+    }
+
+    /**
      * AI智能叫分决策
-     * 根据手牌强度决定是否积极抢地主
+     * 根据手牌强度、AI难度和当前最高叫分决定叫分
+     * 简单AI更保守，普通AI更激进
      * @param hand 初始手牌（17张）
      * @param currentMaxBid 当前最高叫分
+     * @param difficulty AI难度
      * @return 叫分（0-3），0表示不叫
      */
-    fun decideBid(hand: List<Card>, currentMaxBid: Int): Int {
-        val strength = evaluateHandStrength(hand)
-        
-        // 根据手牌强度决定叫分
-        return when {
-            // 超强牌：直接叫3分
-            strength >= 85 -> 3
-            // 强牌：叫2分
-            strength >= 70 && currentMaxBid < 2 -> 2
-            // 中等偏上：叫1分
-            strength >= 55 && currentMaxBid < 1 -> 1
-            // 弱牌：不叫
-            else -> 0
+    fun decideBid(hand: List<Card>, currentMaxBid: Int, difficulty: Difficulty): Int {
+        val strength = evaluateHandStrength(hand) + (0..4).random()
+
+        return when (difficulty) {
+            // 简单AI：非常保守，只有极强才叫，几乎不抢3分
+            Difficulty.EASY -> when {
+                strength >= 88 -> 3
+                strength >= 72 && currentMaxBid < 2 -> 2
+                strength >= 60 && currentMaxBid < 1 -> 1
+                else -> 0
+            }
+            // 普通AI：适度积极，牌好就抢
+            Difficulty.NORMAL -> when {
+                strength >= 80 -> 3
+                strength >= 62 && currentMaxBid < 2 -> 2
+                strength >= 48 && currentMaxBid < 1 -> 1
+                else -> 0
+            }
         }
     }
 
@@ -69,29 +105,31 @@ object AIDecision {
      */
     private fun evaluateHandStrength(hand: List<Card>): Int {
         var score = 0
-        
-        // 1. 统计大牌（2、小王、大王）
+
+        // 1. 统计大牌（A、2、小王、大王）
+        val aces = hand.count { it.rank == 14 }
         val twos = hand.count { it.rank == 15 }  // 2
         val smallJoker = hand.count { it.rank == 16 }
         val bigJoker = hand.count { it.rank == 17 }
-        
+
         // 大王 +25分，小王 +20分
         score += bigJoker * 25
         score += smallJoker * 20
-        
-        // 2的数量：每张 +8分
+
+        // 2的数量：每张 +8分；A +4分
         score += twos * 8
-        
+        score += aces * 4
+
         // 2. 统计炸弹
         val rankCounts = hand.groupBy { it.rank }.mapValues { it.value.size }
         val bombs = rankCounts.count { it.value == 4 }
-        score += bombs * 20  // 每个炸弹 +20分
-        
+        score += bombs * 22  // 每个炸弹 +22分
+
         // 火箭（双王）
         if (smallJoker > 0 && bigJoker > 0) {
             score += 15  // 额外加分
         }
-        
+
         // 3. 牌型连贯性（顺子潜力）
         val ranks = hand.map { it.rank }.filter { it in 3..14 }.distinct().sorted()
         var straightLength = 1
@@ -106,38 +144,40 @@ object AIDecision {
         }
         // 长顺子加分
         if (maxStraight >= 5) score += (maxStraight - 4) * 5
-        
+
         // 4. 三张数量（三带潜力）
         val triples = rankCounts.count { it.value == 3 }
         score += triples * 6
-        
+
         // 5. 对子数量
         val pairs = rankCounts.count { it.value == 2 }
         score += pairs * 2
-        
+
         return score.coerceIn(0, 100)
     }
 
     /**
-     * 简单难度：随机出牌，能管就管
+     * 简单难度：随机出牌，能管就管（比纯随机多一份克制：不随意拆结构、少用炸弹）
      */
     private fun easyDecision(hand: List<Card>, lastPlay: CardGroup?): CardGroup? {
         val validPlays = CardRuleEngine.findAllValidPlays(hand, lastPlay)
         if (validPlays.isEmpty()) return null
 
-        // 如果是自由出牌，随机选一个
+        // 自由出牌走 easyFreePlay
         if (lastPlay == null || lastPlay.type == CardType.INVALID) {
-            return validPlays.randomOrNull()
+            return easyFreePlay(hand)
         }
 
-        // 需要管牌时，随机选一个能管的（不优先用炸弹）
+        // 需要管牌时：70%概率用最小的普通牌管，40%概率用炸弹
         val nonBombPlays = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-        if (nonBombPlays.isNotEmpty()) {
-            return nonBombPlays.random()
+        if (nonBombPlays.isNotEmpty() && Math.random() < 0.7) {
+            return nonBombPlays.minByOrNull { it.mainRank }
         }
-
-        // 只有炸弹/火箭能管，50%概率出
-        return if (Math.random() < 0.5) validPlays.random() else null
+        val bombs = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+        if (bombs.isNotEmpty() && Math.random() < 0.4) {
+            return bombs.minByOrNull { it.mainRank }
+        }
+        return null
     }
 
     /**
@@ -150,31 +190,37 @@ object AIDecision {
         teammateCardCount: Int,
         lastPlayerIndex: Int,
         myIndex: Int,
-        opponentCardCounts: IntArray
+        opponentCardCounts: IntArray,
+        landlordIndex: Int,
+        unseenCounts: IntArray
     ): CardGroup? {
         val validPlays = CardRuleEngine.findAllValidPlays(hand, lastPlay)
         if (validPlays.isEmpty()) return null
 
         // 自由出牌策略
         if (lastPlay == null || lastPlay.type == CardType.INVALID) {
-            return freePlayStrategy(hand, validPlays, role, teammateCardCount, opponentCardCounts)
+            return freePlayStrategy(hand, validPlays, role, teammateCardCount, opponentCardCounts, unseenCounts)
         }
 
         // 跟牌策略（考虑竞合关系）
-        return followPlayStrategy(hand, validPlays, lastPlay, role, teammateCardCount, lastPlayerIndex, myIndex, opponentCardCounts)
+        return followPlayStrategy(hand, validPlays, lastPlay, role, lastPlayerIndex, myIndex, opponentCardCounts, landlordIndex, unseenCounts)
     }
 
     /**
      * 自由出牌策略（增强版）
-     * 考虑身份、队友状态、对手状态
+     * 考虑身份、队友状态、对手状态、牌池信息
      */
     private fun freePlayStrategy(
         hand: List<Card>,
         validPlays: List<CardGroup>,
         role: PlayerRole,
         teammateCardCount: Int,
-        opponentCardCounts: IntArray
+        opponentCardCounts: IntArray,
+        unseenCounts: IntArray
     ): CardGroup {
+        // 手牌各rank数量（用于判断零散牌，避免拆结构）
+        val handCounts = hand.groupBy { it.rank }.mapValues { it.value.size }
+
         // 如果手牌只剩一手，直接出完
         val fullHand = CardRuleEngine.identify(hand)
         if (fullHand.type != CardType.INVALID) {
@@ -200,10 +246,12 @@ object AIDecision {
         // 对手牌少时，出大牌压制
         val minOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
         if (minOpponentCards <= 3) {
-            // 对手快出完了，出大牌压制
+            // 若2/王等控牌全部已出（对手手里没有），则小牌也能控场，优先出最小的
+            val controlUnseen = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
             val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
             if (bigPlays.isNotEmpty()) {
-                return bigPlays.maxByOrNull { it.mainRank }!!
+                return if (controlUnseen == 0) bigPlays.minByOrNull { it.mainRank }!!
+                else bigPlays.maxByOrNull { it.mainRank }!!
             }
         }
 
@@ -217,6 +265,11 @@ object AIDecision {
         for (type in priority) {
             val plays = validPlays.filter { it.type == type }
             if (plays.isNotEmpty()) {
+                if (type == CardType.SINGLE) {
+                    // 单张优先用零散牌（手牌中只有1张的rank），避免拆对子/三张
+                    val loose = plays.filter { handCounts[it.mainRank] == 1 }
+                    return (if (loose.isNotEmpty()) loose else plays).minByOrNull { it.mainRank }!!
+                }
                 // 出最小的
                 return plays.minByOrNull { it.mainRank }!!
             }
@@ -235,23 +288,27 @@ object AIDecision {
         validPlays: List<CardGroup>,
         lastPlay: CardGroup,
         role: PlayerRole,
-        teammateCardCount: Int,
         lastPlayerIndex: Int,
         myIndex: Int,
-        opponentCardCounts: IntArray
+        opponentCardCounts: IntArray,
+        landlordIndex: Int,
+        unseenCounts: IntArray
     ): CardGroup? {
+        // 手牌各rank数量（用于跟牌时优先使用零散牌，避免拆结构）
+        val handCounts = hand.groupBy { it.rank }.mapValues { it.value.size }
+
         // 如果手牌数量 <= 出牌数量，考虑直接出完
         val fullHand = CardRuleEngine.identify(hand)
-        if (fullHand.type != CardType.INVALID && CardRuleEngine.isValidPlay(fullHand, lastPlay)) {
+        val canFinishNow = fullHand.type != CardType.INVALID && CardRuleEngine.isValidPlay(fullHand, lastPlay)
+        if (canFinishNow) {
             return fullHand
         }
 
         // 判断上一手是否是队友出的
-        val isTeammatePlayed = isTeammate(lastPlayerIndex, myIndex, role)
-        
-        // 农民不压队友（除非队友快出完了可以送）
-        if (role == PlayerRole.FARMER && isTeammatePlayed && teammateCardCount > 2) {
-            // 队友出的牌，不压（除非能出完）
+        val isTeammatePlayed = isTeammate(lastPlayerIndex, myIndex, role, landlordIndex)
+
+        // 农民绝不压队友（除非自己能一手出完）；地主没有队友
+        if (role == PlayerRole.FARMER && isTeammatePlayed) {
             return null
         }
 
@@ -260,50 +317,67 @@ object AIDecision {
 
         // 对手牌少时，积极出牌压制
         val minOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
-        
+
         if (normalPlays.isNotEmpty()) {
             // 对手快出完时，出最大的能管的牌
             if (minOpponentCards <= 3) {
                 return normalPlays.maxByOrNull { it.mainRank }
             }
-            // 正常情况：出最小的能管的牌
-            return normalPlays.minByOrNull { it.mainRank }
+            // 正常情况：优先用零散牌，出最小的能管的牌
+            return chooseFollowPlay(normalPlays, lastPlay, handCounts)
         }
 
         // 考虑用炸弹
         val bombs = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
-        if (bombs.isNotEmpty()) {
+        if (bombs.isNotEmpty() && !isTeammatePlayed) {
+            // 若对方刚出的那张 rank 已在场外打光，说明没有相同 rank 会压过来，不必急于动炸
+            val rankGone = lastPlay.mainRank < unseenCounts.size && unseenCounts[lastPlay.mainRank] == 0 &&
+                lastPlay.type != CardType.BOMB && lastPlay.type != CardType.ROCKET
             // 自己手牌少于5张时使用炸弹
-            if (hand.size <= 5) {
+            if (hand.size <= 5 && !rankGone) {
                 return bombs.minByOrNull { it.mainRank }
             }
             // 对手快出完时使用炸弹
-            if (minOpponentCards <= 3) {
+            if (minOpponentCards <= 3 && !rankGone) {
                 return bombs.minByOrNull { it.mainRank }
             }
             // 50%概率出炸弹
-            return if (Math.random() < 0.5) bombs.minByOrNull { it.mainRank } else null
+            return if (!rankGone && Math.random() < 0.5) bombs.minByOrNull { it.mainRank } else null
         }
 
         return null  // 不出
     }
 
     /**
+     * 从能管的普通牌中选最合适的一手：
+     * 单张优先用零散牌（该rank手牌只有1张），对子优先用独立对子（该rank只有2张），避免拆结构
+     */
+    private fun chooseFollowPlay(
+        normalPlays: List<CardGroup>,
+        lastPlay: CardGroup,
+        handCounts: Map<Int, Int>
+    ): CardGroup? {
+        val candidates = normalPlays.filter { it.type == lastPlay.type }
+        if (candidates.isEmpty()) return normalPlays.minByOrNull { it.mainRank }
+
+        val loose = when (lastPlay.type) {
+            CardType.SINGLE -> candidates.filter { handCounts[it.mainRank] == 1 }
+            CardType.PAIR -> candidates.filter { handCounts[it.mainRank] == 2 }
+            else -> emptyList()
+        }
+        return (if (loose.isNotEmpty()) loose else candidates).minByOrNull { it.mainRank }
+    }
+
+    /**
      * 判断上一手出牌的玩家是否是队友
      * 地主：没有队友
-     * 农民：另一个农民是队友
+     * 农民：另一个农民是队友（即不是我、也不是地主的那个玩家）
      */
-    private fun isTeammate(lastPlayerIndex: Int, myIndex: Int, role: PlayerRole): Boolean {
+    private fun isTeammate(lastPlayerIndex: Int, myIndex: Int, role: PlayerRole, landlordIndex: Int): Boolean {
         if (role == PlayerRole.LANDLORD) return false
         if (lastPlayerIndex < 0 || myIndex < 0) return false
-        
-        // 农民索引：0, 1, 2 中，地主占一个，另外两个是农民
-        // 假设地主是索引 X，则农民是 (X+1)%3 和 (X+2)%3
-        // 如果 lastPlayerIndex 不是 myIndex，且 lastPlayerIndex 不是地主，则是队友
-        // 简化判断：如果 lastPlayerIndex 和 myIndex 不同，且都不是地主，则是队友
-        // 这里需要知道谁是地主，但函数签名没有传入，所以用简化逻辑
-        // 假设：如果 lastPlayerIndex 和 myIndex 的差是 2（即隔一个人），则是队友
-        val diff = Math.abs(lastPlayerIndex - myIndex)
-        return diff == 2 || diff == 1  // 简化：只要不是自己，都可能是队友（需要更精确的判断）
+        if (lastPlayerIndex == myIndex) return false
+        // 如果上家既不是我，也不是地主，则必为另一个农民（队友）
+        return lastPlayerIndex != landlordIndex
     }
 }

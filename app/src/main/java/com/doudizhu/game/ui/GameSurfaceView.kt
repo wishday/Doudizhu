@@ -106,11 +106,33 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         color = Color.parseColor("#30FFEB3B")
     }
 
-    /** 按钮区域 */
+    // ====== 缓存的装饰画笔（避免每帧分配 Paint 对象） ======
+    private val ovalPaint = Paint().apply {
+        color = Color.parseColor("#15491A"); style = Paint.Style.FILL; isAntiAlias = true
+    }
+    private val topBarPaint = Paint().apply { color = Color.parseColor("#80000000"); style = Paint.Style.FILL }
+    private val aiInfoPaint = Paint().apply { color = Color.parseColor("#60000000"); style = Paint.Style.FILL }
+    private val buttonOverlayPaint = Paint().apply {
+        color = Color.parseColor("#30000000"); style = Paint.Style.FILL
+    }
+    private val buttonHighlightPaint = Paint().apply {
+        color = Color.parseColor("#20FFFFFF"); style = Paint.Style.FILL
+    }
+    private val msgBgPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
+    private val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
+    private val aiHighlightPaint = Paint().apply {
+        color = Color.argb(120, 255, 152, 0); style = Paint.Style.FILL
+    }
+    /** 背景渐变缓存（仅尺寸变化时重建） */
+    private var bgGradient: LinearGradient? = null
+    private var bgGradientW = 0f
+    private var bgGradientH = 0f
+
+    /** 按钮区域（CopyOnWrite：绘制线程每帧重建，触摸线程并发读取安全） */
     data class ButtonRect(val text: String, val rect: RectF, val color: Int, val pressedColor: Int, val action: String)
-    private val buttons = mutableListOf<ButtonRect>()
-    /** 当前按下的按钮 */
-    private var pressedButtonIndex = -1
+    private val buttons = java.util.concurrent.CopyOnWriteArrayList<ButtonRect>()
+    /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
+    private var pressedAction: String? = null
 
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
@@ -125,8 +147,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 滑动选牌状态 */
     private var isDragging = false
-    private var lastDragX = 0f
-    private var lastDragY = 0f
+    /** 按下时的起始坐标（用于区分点击/滑动、防误触） */
+    private var downX = 0f
+    private var downY = 0f
+    /** 点击与滑动的位移阈值（防误触：小于该距离视为点击） */
+    private val tapSlop = 24f
 
     /** 计分系统 */
     private var totalScore = 0
@@ -141,9 +166,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     init {
         holder.addCallback(this)
         isFocusable = true
-        // 初始化音效
+        initAudio()
+    }
+
+    /** 初始化音效/振动（surface 重建后也会重新调用） */
+    private fun initAudio() {
         try {
-            toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
+            if (toneGenerator == null) {
+                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
+            }
             vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
         } catch (_: Exception) {}
     }
@@ -182,6 +213,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         screenWidth = width
         screenHeight = height
         recalcSizes()
+        initAudio()
         startDrawThread()
     }
 
@@ -206,7 +238,26 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         drawThread = null
     }
 
-    fun refresh() { /* 绘制线程持续刷新 */ }
+    /** 待重绘请求计数（AtomicInteger：避免绘制期间发生的 refresh 被 onFrameDrawn 丢失） */
+    private val redrawRequests = java.util.concurrent.atomic.AtomicInteger(1)
+
+    /** 请求重绘：状态变化时由引擎回调/触摸事件调用 */
+    fun refresh() {
+        redrawRequests.incrementAndGet()
+    }
+
+    /** 绘制线程是否需要绘制（有变化，或存在动画/消息需要持续刷新） */
+    fun shouldDraw(): Boolean {
+        if (redrawRequests.get() > 0) return true
+        if (!::gameEngine.isInitialized) return false
+        if (gameEngine.stateMachine.phase == GamePhase.PLAYING) return true
+        return messageText.isNotEmpty() || errorText.isNotEmpty()
+    }
+
+    /** 本帧已绘制完成（仅当恰好有一个待处理请求时清空，避免丢失绘制期间新到达的 refresh） */
+    fun onFrameDrawn() {
+        redrawRequests.compareAndSet(1, 0)
+    }
 
     fun showMessage(msg: String, durationMs: Long = 2000) {
         messageText = msg
@@ -244,64 +295,57 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
-                // 检查按钮点击
-                for ((idx, btn) in buttons.withIndex()) {
+                downX = x
+                downY = y
+                // 检查按钮点击（记录动作而非索引，防止绘制线程重建按钮导致错位）
+                for (btn in buttons) {
                     if (btn.rect.contains(x, y)) {
-                        pressedButtonIndex = idx
+                        pressedAction = btn.action
                         vibrate(20)
                         refresh()
                         return true
                     }
                 }
-                pressedButtonIndex = -1
-                // 开始滑动选牌
+                pressedAction = null
+                // 记录起点，先不切换选中，等 UP 时判断是点击还是滑动
                 if (gameEngine.stateMachine.phase == GamePhase.PLAYING
                     && gameEngine.stateMachine.currentPlayerIndex == 0) {
                     isDragging = true
-                    lastDragX = x
-                    lastDragY = y
-                    handleCardTouch(x, y, isStartOfDrag = true)
                 }
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                // 滑动选牌：位移超过阈值后持续添加选中的牌（只加不删，避免误取消）
                 if (isDragging && gameEngine.stateMachine.phase == GamePhase.PLAYING
-                    && gameEngine.stateMachine.currentPlayerIndex == 0) {
-                    // 滑动过程中持续选牌
-                    handleCardTouch(x, y, isStartOfDrag = false)
-                    lastDragX = x
-                    lastDragY = y
-                }
-                // 检查是否移出按钮区域
-                if (pressedButtonIndex >= 0) {
-                    val btn = buttons.getOrNull(pressedButtonIndex)
-                    if (btn != null && !btn.rect.contains(x, y)) {
-                        pressedButtonIndex = -1
-                        refresh()
-                    }
+                    && gameEngine.stateMachine.currentPlayerIndex == 0
+                    && movedBeyondSlop(x, y)) {
+                    addCardFromTouch(x, y)
                 }
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                // 处理按钮释放
-                if (pressedButtonIndex >= 0) {
-                    val btn = buttons.getOrNull(pressedButtonIndex)
-                    if (btn != null && btn.rect.contains(x, y)) {
-                        handleButtonAction(btn.action)
-                        vibrate(20)
-                    }
-                    pressedButtonIndex = -1
+                // 处理按钮释放（允许轻微偏移，防误触）
+                val action = pressedAction
+                if (action != null) {
+                    handleButtonAction(action)
+                    vibrate(20)
+                    pressedAction = null
                     refresh()
                     return true
                 }
+                // 处理选牌：未滑动视为点击，切换选中状态（可取消选牌）
                 if (isDragging) {
+                    if (!movedBeyondSlop(x, y)) {
+                        toggleCardAt(x, y)
+                    }
                     isDragging = false
+                    refresh()
                 }
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 isDragging = false
-                pressedButtonIndex = -1
+                pressedAction = null
                 refresh()
                 return true
             }
@@ -309,48 +353,65 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         return true
     }
 
-    /** 处理手牌触摸（支持滑动选牌，优化取消选牌灵敏度） */
-    private fun handleCardTouch(touchX: Float, touchY: Float, isStartOfDrag: Boolean) {
-        val hand = gameEngine.players[0].handCards
-        if (hand.isEmpty()) return
+    /** 判断移动距离是否超过点击阈值 */
+    private fun movedBeyondSlop(x: Float, y: Float): Boolean {
+        val dx = x - downX
+        val dy = y - downY
+        return (dx * dx + dy * dy) > tapSlop * tapSlop
+    }
 
-        val totalWidth = handSpacing * (hand.size - 1) + cardW
+    /** 点击：切换某张牌的选中状态（支持取消选牌） */
+    private fun toggleCardAt(touchX: Float, touchY: Float) {
+        val idx = hitTestCard(touchX, touchY)
+        if (idx < 0) return
+        if (idx in gameEngine.selectedCardIndices) {
+            gameEngine.selectedCardIndices.remove(idx)
+        } else {
+            gameEngine.selectedCardIndices.add(idx)
+            playTone(ToneGenerator.TONE_PROP_ACK, 30)
+        }
+        refresh()
+    }
+
+    /** 滑动：向滑动经过的牌追加选中 */
+    private fun addCardFromTouch(touchX: Float, touchY: Float) {
+        val idx = hitTestCard(touchX, touchY)
+        if (idx < 0) return
+        if (idx !in gameEngine.selectedCardIndices) {
+            gameEngine.selectedCardIndices.add(idx)
+            playTone(ToneGenerator.TONE_PROP_ACK, 30)
+        }
+        refresh()
+    }
+
+    /**
+     * 命中测试：根据相邻牌中点分界 + 垂直带判定点中的牌
+     * 解决手牌重叠时难以精确选中的问题（左侧露出部分也能点到）
+     */
+    private fun hitTestCard(touchX: Float, touchY: Float): Int {
+        val hand = gameEngine.players[0].handCards
+        if (hand.isEmpty()) return -1
+
+        val n = hand.size
+        val totalWidth = handSpacing * (n - 1) + cardW
         val startX = (screenWidth - totalWidth) / 2
         val baseY = screenHeight - cardH - 40f
 
-        // 从右到左遍历（后出的牌在上层），增大触摸区域
-        val touchPadding = cardW * 0.15f  // 扩大触摸区域
-        for (i in hand.indices.reversed()) {
+        // 垂直判定带（含选中上移 60f 和微弧偏移的容差）
+        val minY = baseY - 70f - 24f
+        val maxY = baseY + cardH + 24f
+        if (touchY < minY || touchY > maxY) return -1
+
+        // 用相邻牌中点作为左右分界，命中最近的牌
+        for (i in 0 until n) {
             val cx = startX + i * handSpacing
-            val isSelected = i in gameEngine.selectedCardIndices
-            val cy = baseY - (if (isSelected) 60f else 0f)
-
-            // 扩大触摸判定区域，解决重叠牌难以点中的问题
-            val touchLeft = cx - touchPadding
-            val touchRight = cx + cardW + touchPadding
-            val touchTop = cy - 30f
-            val touchBottom = cy + cardH + 10f
-
-            if (touchX in touchLeft..touchRight && touchY in touchTop..touchBottom) {
-                if (isStartOfDrag) {
-                    // 点击：切换选中状态
-                    if (i in gameEngine.selectedCardIndices) {
-                        gameEngine.selectedCardIndices.remove(i)
-                    } else {
-                        gameEngine.selectedCardIndices.add(i)
-                        playTone(ToneGenerator.TONE_PROP_ACK, 30)
-                    }
-                } else {
-                    // 滑动：只添加不取消（避免滑动时误取消）
-                    if (i !in gameEngine.selectedCardIndices) {
-                        gameEngine.selectedCardIndices.add(i)
-                        playTone(ToneGenerator.TONE_PROP_ACK, 30)
-                    }
-                }
-                refresh()
-                return
-            }
+            var leftBound = Float.NEGATIVE_INFINITY
+            var rightBound = Float.POSITIVE_INFINITY
+            if (i > 0) leftBound = (startX + (i - 1) * handSpacing + cx) / 2f
+            if (i < n - 1) rightBound = (cx + startX + (i + 1) * handSpacing) / 2f
+            if (touchX >= leftBound && touchX <= rightBound) return i
         }
+        return -1
     }
 
     private fun handleButtonAction(action: String) {
@@ -362,7 +423,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 if (selectedCards.isNotEmpty()) {
                     // 先校验牌型合法性，不合法则提示且不清空桌面
                     val group = com.doudizhu.game.logic.CardRuleEngine.identify(selectedCards)
-                    if (group == null) {
+                    if (group.type == CardType.INVALID) {
                         showError("牌型不合法，请重新选择", 2000)
                         return
                     }
@@ -457,19 +518,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     private fun drawBackground(canvas: Canvas) {
-        val gradient = LinearGradient(
-            0f, 0f, 0f, screenHeight.toFloat(),
-            Color.parseColor("#0D3B0D"), Color.parseColor("#1B5E20"),
-            Shader.TileMode.CLAMP
-        )
-        bgPaint.shader = gradient
+        if (bgGradient == null || bgGradientW != screenWidth || bgGradientH != screenHeight) {
+            bgGradient = LinearGradient(
+                0f, 0f, 0f, screenHeight.toFloat(),
+                Color.parseColor("#0D3B0D"), Color.parseColor("#1B5E20"),
+                Shader.TileMode.CLAMP
+            )
+            bgGradientW = screenWidth.toFloat()
+            bgGradientH = screenHeight.toFloat()
+        }
+        bgPaint.shader = bgGradient
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), bgPaint)
         bgPaint.shader = null
 
         // 桌面中央椭圆装饰
-        val ovalPaint = Paint().apply {
-            color = Color.parseColor("#15491A"); style = Paint.Style.FILL; isAntiAlias = true
-        }
         val cx = screenWidth / 2f
         val cy = screenHeight * 0.40f
         canvas.drawOval(
@@ -481,8 +543,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     private fun drawTopBar(canvas: Canvas) {
         val barH = 80f
-        val barPaint = Paint().apply { color = Color.parseColor("#80000000"); style = Paint.Style.FILL }
-        canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH, barPaint)
+        canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH, topBarPaint)
         textPaint.textSize = 52f
         textPaint.color = Color.WHITE
         canvas.drawText("斗地主", screenWidth / 2f, 58f, textPaint)
@@ -522,15 +583,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 当前回合高亮背景
         if (isCurrentTurn) {
             val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 100 + 60).toInt()
-            val hlPaint = Paint().apply {
-                color = Color.argb(pulseAlpha, 255, 235, 59); style = Paint.Style.FILL
-            }
+            aiHighlightPaint.color = Color.argb(pulseAlpha, 255, 235, 59)
             canvas.drawRoundRect(RectF(panelX - 10f, topY - 10f, panelX + panelW + 10f, topY + panelH + 10f),
-                22f, 22f, hlPaint)
+                22f, 22f, aiHighlightPaint)
         }
 
-        val infoPaint = Paint().apply { color = Color.parseColor("#60000000"); style = Paint.Style.FILL }
-        canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, infoPaint)
+        canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, aiInfoPaint)
 
         // 名称（放大2.5倍: 32*2.5=80 -> 用60f合适）
         textPaint.textSize = 50f
@@ -821,25 +879,39 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val currentPlayer = gameEngine.stateMachine.currentPlayerIndex
 
         // 按钮尺寸（放大2倍）
-        val btnW = 300f
+        var btnW = 300f
         val btnH = 110f
         val gap = 36f
 
         when {
             // 叫地主阶段
             phase == GamePhase.BIDDING && currentPlayer == 0 -> {
-                val totalW = btnW * 4 + gap * 3
+                // 只显示允许的分数（必须高于当前最高分，否则不叫）
+                val maxBid = gameEngine.stateMachine.currentMaxBid
+                val allowedScores = listOf(0, 1, 2, 3).filter { it == 0 || it > maxBid }
+                // 按钮数量多时按屏幕宽度缩小，避免溢出屏幕
+                val bidCount = allowedScores.size
+                val rawTotal = btnW * bidCount + gap * (bidCount - 1)
+                if (rawTotal > screenWidth) {
+                    btnW = ((screenWidth - gap * (bidCount - 1)) / bidCount).coerceAtLeast(120f)
+                }
+                val totalW = btnW * bidCount + gap * (bidCount - 1)
                 val startX = (screenWidth - totalW) / 2
                 val y = screenHeight - cardH - 220f  // 位置上移
 
-                addButton(canvas, "不叫", startX, y, btnW, btnH, Color.parseColor("#616161"), 
-                    Color.parseColor("#424242"), "bid_0")
-                addButton(canvas, "1分", startX + (btnW + gap), y, btnW, btnH, Color.parseColor("#1976D2"),
-                    Color.parseColor("#0D47A1"), "bid_1")
-                addButton(canvas, "2分", startX + (btnW + gap) * 2, y, btnW, btnH, Color.parseColor("#F57C00"),
-                    Color.parseColor("#E65100"), "bid_2")
-                addButton(canvas, "3分", startX + (btnW + gap) * 3, y, btnW, btnH, Color.parseColor("#D32F2F"),
-                    Color.parseColor("#B71C1C"), "bid_3")
+                val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
+                val colors = mapOf(
+                    0 to Color.parseColor("#616161"), 1 to Color.parseColor("#1976D2"),
+                    2 to Color.parseColor("#F57C00"), 3 to Color.parseColor("#D32F2F")
+                )
+                val pressedColors = mapOf(
+                    0 to Color.parseColor("#424242"), 1 to Color.parseColor("#0D47A1"),
+                    2 to Color.parseColor("#E65100"), 3 to Color.parseColor("#B71C1C")
+                )
+                allowedScores.forEachIndexed { i, s ->
+                    addButton(canvas, labels[s]!!, startX + i * (btnW + gap), y, btnW, btnH,
+                        colors[s]!!, pressedColors[s]!!, "bid_$s")
+                }
             }
             // 出牌阶段
             phase == GamePhase.PLAYING && currentPlayer == 0 -> {
@@ -877,27 +949,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun addButton(canvas: Canvas, text: String, x: Float, y: Float,
                           w: Float, h: Float, color: Int, pressedColor: Int, action: String) {
         val rect = RectF(x, y, x + w, y + h)
-        val idx = buttons.size
         buttons.add(ButtonRect(text, rect, color, pressedColor, action))
-        
-        // 判断是否被按下
-        val isPressed = pressedButtonIndex == idx
+
+        // 判断是否被按下（按动作匹配，按钮列表重建也不会错位）
+        val isPressed = action == pressedAction
         buttonPaint.color = if (isPressed) pressedColor else color
         canvas.drawRoundRect(rect, 22f, 22f, buttonPaint)
         
         // 按下时添加深色覆盖层
         if (isPressed) {
-            val overlayPaint = Paint().apply { 
-                this.color = Color.parseColor("#30000000"); style = Paint.Style.FILL 
-            }
-            canvas.drawRoundRect(rect, 22f, 22f, overlayPaint)
+            canvas.drawRoundRect(rect, 22f, 22f, buttonOverlayPaint)
         }
         
         // 按钮高光
-        val hlPaint = Paint().apply {
-            this.color = Color.parseColor("#20FFFFFF"); style = Paint.Style.FILL
-        }
-        canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, hlPaint)
+        canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
 
         buttonTextPaint.textSize = 52f
         canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
@@ -912,7 +977,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.color = Color.parseColor("#FFD600")
         textPaint.textAlign = Paint.Align.CENTER
 
-        val msgBgPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
         val tw = textPaint.measureText(messageText)
         val msgRect = RectF(
             screenWidth / 2 - tw / 2 - 40f, screenHeight * 0.18f,
@@ -931,7 +995,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.color = Color.parseColor("#FF5252")
         textPaint.textAlign = Paint.Align.CENTER
 
-        val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
         val tw = textPaint.measureText(errorText)
         val errRect = RectF(
             screenWidth / 2 - tw / 2 - 40f, screenHeight * 0.26f,
@@ -958,11 +1021,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         @Volatile var running = true
         override fun run() {
             while (running) {
+                // 空闲时（无变化、无动画）进入低频等待，节省 CPU/电量
+                if (!view.shouldDraw()) {
+                    try { sleep(50) } catch (_: InterruptedException) { break }
+                    continue
+                }
                 var canvas: Canvas? = null
                 try {
                     canvas = holder.lockCanvas()
                     if (canvas != null) {
                         synchronized(holder) { view.drawGame(canvas) }
+                        view.onFrameDrawn()
                     }
                 } catch (_: Exception) {} finally {
                     canvas?.let { holder.unlockCanvasAndPost(it) }

@@ -128,7 +128,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
             // 计算本局得分
             val baseScore = gameEngine.stateMachine.currentBidScore
-            val bombCount = 0 // 简化：暂不计算炸弹倍数
+            val bombCount = gameEngine.stateMachine.bombCount
             val multiplier = Math.pow(2.0, bombCount.toDouble()).toInt()
             val roundScore = baseScore * multiplier
 

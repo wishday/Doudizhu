@@ -112,20 +112,23 @@ object CardRuleEngine {
                 CardGroup(CardType.PLANE, planeRanks[0], bestLen, cards)
             }
             bestLen -> {
-                // 飞机带单翼：翼牌数量 == 飞机长度
-                // 检查翼牌不能组成炸弹（简化规则：允许任意单张）
-                CardGroup(CardType.PLANE_SINGLE, planeRanks[0], bestLen, sorted)
+                // 飞机带单翼：翼牌数量 == 飞机长度，且每张翼牌都必须是单张（不允许对子/三张混入）
+                val nonPlane = sorted.filter { it.rank !in planeRanks }
+                val nonPlaneCounts = nonPlane.groupBy { it.rank }.mapValues { it.value.size }
+                if (nonPlaneCounts.values.all { it == 1 } && nonPlaneCounts.size == bestLen) {
+                    CardGroup(CardType.PLANE_SINGLE, planeRanks[0], bestLen, sorted)
+                } else {
+                    CardGroup.INVALID
+                }
             }
             bestLen * 2 -> {
-                // 飞机带双翼：翼牌必须都是对子
-                val nonPlaneCards = sorted.filter { it.rank !in planeRanks }
-                val nonPlaneCounts = nonPlaneCards.groupBy { it.rank }.mapValues { it.value.size }
-                if (nonPlaneCounts.all { it.value == 2 } && nonPlaneCounts.size == bestLen) {
+                // 飞机带双翼：翼牌必须是 bestLen 个对子
+                val nonPlane = sorted.filter { it.rank !in planeRanks }
+                val nonPlaneCounts = nonPlane.groupBy { it.rank }.mapValues { it.value.size }
+                if (nonPlaneCounts.size == bestLen && nonPlaneCounts.values.all { it == 2 }) {
                     CardGroup(CardType.PLANE_PAIR, planeRanks[0], bestLen, sorted)
                 } else {
-                    // 也允许三张作为翼（如四个三带两个三）
-                    // 简化：只要数量对就行
-                    CardGroup(CardType.PLANE_PAIR, planeRanks[0], bestLen, sorted)
+                    CardGroup.INVALID
                 }
             }
             else -> CardGroup.INVALID
@@ -338,8 +341,7 @@ object CardRuleEngine {
         val results = mutableListOf<CardGroup>()
 
         // 单张
-        val distinctRanks = countMap.keys.sorted()
-        for (rank in distinctRanks) {
+        for (rank in countMap.keys.sorted()) {
             val card = sorted.first { it.rank == rank }
             results.add(CardGroup(CardType.SINGLE, rank, 1, listOf(card)))
         }
@@ -349,6 +351,26 @@ object CardRuleEngine {
             if (count >= 2) {
                 val cards = sorted.filter { it.rank == rank }.take(2)
                 results.add(CardGroup(CardType.PAIR, rank, 1, cards))
+            }
+        }
+
+        // 三张 / 三带一 / 三带二
+        for ((rank, count) in countMap) {
+            if (count >= 3) {
+                val triple = sorted.filter { it.rank == rank }.take(3)
+                results.add(CardGroup(CardType.TRIPLE, rank, 1, triple))
+                // 三带一：找一张其他牌作为附带
+                val kicker = countMap.keys.firstOrNull { it != rank }
+                if (kicker != null) {
+                    val k = sorted.first { it.rank == kicker }
+                    results.add(CardGroup(CardType.TRIPLE_ONE, rank, 1, triple + k))
+                }
+                // 三带二：找一对其他牌作为附带
+                val pairKicker = countMap.entries.firstOrNull { it.key != rank && it.value >= 2 }
+                if (pairKicker != null) {
+                    val k2 = sorted.filter { it.rank == pairKicker.key }.take(2)
+                    results.add(CardGroup(CardType.TRIPLE_TWO, rank, 1, triple + k2))
+                }
             }
         }
 
@@ -367,9 +389,62 @@ object CardRuleEngine {
             results.add(CardGroup(CardType.ROCKET, 17, 1, sorted.filter { it.rank >= 16 }))
         }
 
-        // 顺子（只找最小的几个，避免组合爆炸）
-        findStraights(sorted, countMap, 5, 0).forEach { results.add(it) }
+        // 顺子（只生成最短5连，避免AI开局就把长顺子打光失去控制）
+        findShortStraights(sorted, countMap).forEach { results.add(it) }
 
+        // 连对（只生成最短3连对）
+        findShortStraightPairs(sorted, countMap).forEach { results.add(it) }
+
+        return results
+    }
+
+    /**
+     * 查找所有长度==5 的最短顺子（自由出牌用，避免一次打光长顺子失去控牌权）
+     */
+    private fun findShortStraights(
+        sorted: List<Card>,
+        countMap: Map<Int, Int>
+    ): List<CardGroup> {
+        val results = mutableListOf<CardGroup>()
+        val ranks = countMap.keys.filter { it in 3..14 }.sorted()
+        var i = 0
+        while (i < ranks.size) {
+            var j = i
+            while (j + 1 < ranks.size && ranks[j + 1] == ranks[j] + 1) j++
+            val runLen = j - i + 1
+            if (runLen >= 5) {
+                for (start in ranks[i] until (ranks[i] + runLen - 4)) {
+                    val cards = (start until start + 5).map { r -> sorted.first { it.rank == r } }
+                    results.add(CardGroup(CardType.STRAIGHT, start, 5, cards))
+                }
+            }
+            i = j + 1
+        }
+        return results
+    }
+
+    /**
+     * 查找所有长度==3 的最短连对（自由出牌用）
+     */
+    private fun findShortStraightPairs(
+        sorted: List<Card>,
+        countMap: Map<Int, Int>
+    ): List<CardGroup> {
+        val results = mutableListOf<CardGroup>()
+        val pairRanks = countMap.filter { it.value >= 2 }.keys.filter { it in 3..14 }.sorted()
+        var i = 0
+        while (i < pairRanks.size) {
+            var j = i
+            while (j + 1 < pairRanks.size && pairRanks[j + 1] == pairRanks[j] + 1) j++
+            val runLen = j - i + 1
+            if (runLen >= 3) {
+                for (start in pairRanks[i] until (pairRanks[i] + runLen - 2)) {
+                    val cards = (start until start + 3).flatMap { r -> sorted.filter { it.rank == r }.take(2) }
+                    results.add(CardGroup(CardType.STRAIGHT_PAIR, start, 3, cards))
+                }
+            }
+            i = j + 1
+        }
         return results
     }
 

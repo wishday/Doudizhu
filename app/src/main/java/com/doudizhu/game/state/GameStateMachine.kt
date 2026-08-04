@@ -45,8 +45,8 @@ class GameStateMachine {
     /** 连续不出的人数 */
     var passCount: Int = 0
 
-    /** 底牌（3张） */
-    val bottomCards: MutableList<com.doudizhu.game.model.Card> = mutableListOf()
+    /** 底牌（3张）（CopyOnWrite：绘制线程与UI线程并发读写安全） */
+    val bottomCards: MutableList<com.doudizhu.game.model.Card> = java.util.concurrent.CopyOnWriteArrayList()
 
     /** 地主玩家索引 */
     var landlordIndex: Int = -1
@@ -59,6 +59,9 @@ class GameStateMachine {
 
     /** 本局底分（叫地主最终分数） */
     var currentBidScore: Int = 0
+
+    /** 本局炸弹/火箭次数（不计入倍数） */
+    var bombCount: Int = 0
 
     /**
      * 转换到发牌阶段
@@ -76,6 +79,7 @@ class GameStateMachine {
         bidRoundCount = 0
         hasLandlord = false
         playHistory.clear()
+        bombCount = 0
     }
 
     /**
@@ -95,14 +99,16 @@ class GameStateMachine {
      * @return true表示叫地主阶段结束
      */
     fun processBid(playerIndex: Int, score: Int): Boolean {
-        if (score > 0) {
-            currentMaxBid = score
+        // 叫分必须高于当前最高分，否则视为不叫（防止越叫越低）
+        val realScore = if (score > 0 && score <= currentMaxBid) 0 else score
+        if (realScore > 0) {
+            currentMaxBid = realScore
             maxBidPlayerIndex = playerIndex
         }
         bidRoundCount++
 
         // 如果有人叫3分，直接结束
-        if (score == 3) {
+        if (realScore == 3) {
             return finalizeBidding()
         }
 
@@ -149,6 +155,11 @@ class GameStateMachine {
         lastPlayedGroup = cards
         lastPlayedPlayerIndex = playerIndex
         passCount = 0
+        // 统计炸弹/火箭，用于结算倍数
+        if (cards.type == com.doudizhu.game.model.CardType.BOMB ||
+            cards.type == com.doudizhu.game.model.CardType.ROCKET) {
+            bombCount++
+        }
         playHistory.add(Pair(playerIndex, cards.cards))
         return nextPlayer(playerIndex)
     }

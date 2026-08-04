@@ -54,8 +54,8 @@ class GameEngine {
     /** 回调接口 */
     var callback: GameEngineCallback? = null
 
-    /** 当前选中的手牌索引集合 */
-    val selectedCardIndices = mutableSetOf<Int>()
+    /** 当前选中的手牌索引集合（CopyOnWrite：绘制线程与UI线程并发读写安全） */
+    val selectedCardIndices = java.util.concurrent.CopyOnWriteArraySet<Int>()
 
     /**
      * 开始新游戏
@@ -143,18 +143,20 @@ class GameEngine {
     private fun calculateAIBid(player: Player): Int {
         val hand = player.handCards
         val currentMaxBid = stateMachine.currentMaxBid
-        // 使用AI决策引擎的智能叫分
-        return AIDecision.decideBid(hand, currentMaxBid)
+        // 使用AI决策引擎的智能叫分（区分难度、手牌强度、当前最高分）
+        return AIDecision.decideBid(hand, currentMaxBid, player.difficulty)
     }
 
     /**
      * 处理叫分逻辑
      */
     private fun processBid(playerIndex: Int, score: Int) {
-        players[playerIndex].bidScore = score
-        callback?.onPlayerBid(playerIndex, score)
+        // 叫分必须高于当前最高分，非法叫分一律视为不叫（与状态机规则保持一致）
+        val realScore = if (score > 0 && score <= stateMachine.currentMaxBid) 0 else score
+        players[playerIndex].bidScore = realScore
+        callback?.onPlayerBid(playerIndex, realScore)
 
-        val biddingDone = stateMachine.processBid(playerIndex, score)
+        val biddingDone = stateMachine.processBid(playerIndex, realScore)
 
         if (biddingDone) {
             finalizeBidding()
@@ -298,11 +300,27 @@ class GameEngine {
                 player.handCards, lastPlay, player.difficulty, player.role, teammateCount,
                 lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
                 myIndex = playerIndex,
-                opponentCardCounts = getOpponentCardCounts(playerIndex)
+                opponentCardCounts = getOpponentCardCounts(playerIndex),
+                landlordIndex = stateMachine.landlordIndex,
+                unseenCounts = getUnseenRankCounts(playerIndex)
             )
 
+            // 本轮首家（mustPlay）时 AI 必须出牌，不允许跳过
+            val aiMustPlay = stateMachine.mustPlay()
             if (decision != null && decision.type != CardType.INVALID) {
                 processPlay(playerIndex, decision.cards, decision)
+            } else if (aiMustPlay) {
+                // 极端情况下决策异常仍兜底出最小的单张
+                val fallback = player.handCards.minByOrNull { it.rank }
+                if (fallback != null) {
+                    val single = CardGroup(
+                        CardType.SINGLE,
+                        fallback.rank, 1, listOf(fallback)
+                    )
+                    processPlay(playerIndex, listOf(fallback), single)
+                } else {
+                    processPass(playerIndex)
+                }
             } else {
                 processPass(playerIndex)
             }
@@ -311,12 +329,33 @@ class GameEngine {
 
     /**
      * 获取对手手牌数（用于AI决策）
+     * 地主：两个农民都是对手
+     * 农民：唯一对手是地主（队友不算对手）
      */
     private fun getOpponentCardCounts(myIndex: Int): IntArray {
-        return intArrayOf(
-            players[(myIndex + 1) % 3].cardCount,
-            players[(myIndex + 2) % 3].cardCount
-        )
+        val player = players[myIndex]
+        return if (player.role == PlayerRole.FARMER) {
+            val landlord = players.firstOrNull { it.role == PlayerRole.LANDLORD }
+            intArrayOf(landlord?.cardCount ?: 0)
+        } else {
+            intArrayOf(
+                players[(myIndex + 1) % 3].cardCount,
+                players[(myIndex + 2) % 3].cardCount
+            )
+        }
+    }
+
+    /**
+     * 获取 AI 未见的各点数剩余张数（即另外两位玩家当前手牌中每个 rank 的张数）
+     * 底牌已并入地主手牌，因此无需单独统计
+     * @return 长度为18的数组（下标即rank），索引0~2无意义
+     */
+    private fun getUnseenRankCounts(myIndex: Int): IntArray {
+        val counts = IntArray(18)
+        players.forEachIndexed { i, p ->
+            if (i != myIndex) p.handCards.forEach { counts[it.rank]++ }
+        }
+        return counts
     }
 
     /**
