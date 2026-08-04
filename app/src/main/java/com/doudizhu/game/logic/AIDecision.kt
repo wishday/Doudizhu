@@ -321,7 +321,7 @@ object AIDecision {
         }
 
         // 跟牌策略（考虑竞合关系）
-        return followPlayStrategy(hand, validPlays, lastPlay, role, lastPlayerIndex, myIndex, opponentCardCounts, landlordIndex, unseenCounts)
+        return followPlayStrategy(hand, validPlays, lastPlay, role, teammateCardCount, lastPlayerIndex, myIndex, opponentCardCounts, landlordIndex, unseenCounts)
     }
 
     /**
@@ -447,6 +447,7 @@ object AIDecision {
         validPlays: List<CardGroup>,
         lastPlay: CardGroup,
         role: PlayerRole,
+        teammateCardCount: Int,
         lastPlayerIndex: Int,
         myIndex: Int,
         opponentCardCounts: IntArray,
