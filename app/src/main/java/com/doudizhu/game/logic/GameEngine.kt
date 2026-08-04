@@ -45,7 +45,7 @@ class GameEngine {
     val players = listOf(
         Player(0, "你", isHuman = true),
         Player(1, "电脑A", isHuman = false, difficulty = Difficulty.NORMAL),
-        Player(2, "电脑B", isHuman = false, difficulty = Difficulty.EASY)
+        Player(2, "电脑B", isHuman = false, difficulty = Difficulty.NORMAL)
     )
 
     /** 游戏状态机 */
@@ -290,10 +290,10 @@ class GameEngine {
             val player = players[playerIndex]
             val lastPlay = stateMachine.lastPlayedGroup
 
-            // 计算队友手牌数（农民时）
+            // 计算队友手牌数（农民时，仅凭公开出牌记录推导）
             val teammateCount = if (player.role == PlayerRole.FARMER) {
                 val teammate = players.firstOrNull { it.index != playerIndex && it.role == PlayerRole.FARMER }
-                teammate?.cardCount ?: 0
+                teammate?.let { legalCardCount(it.index) } ?: 0
             } else 0
 
             val decision = AIDecision.decide(
@@ -328,7 +328,7 @@ class GameEngine {
     }
 
     /**
-     * 获取对手手牌数（用于AI决策）
+     * 获取对手手牌数（用于AI决策，仅凭公开出牌记录推导，不读对手隐藏手牌）
      * 地主：两个农民都是对手
      * 农民：唯一对手是地主（队友不算对手）
      */
@@ -336,24 +336,45 @@ class GameEngine {
         val player = players[myIndex]
         return if (player.role == PlayerRole.FARMER) {
             val landlord = players.firstOrNull { it.role == PlayerRole.LANDLORD }
-            intArrayOf(landlord?.cardCount ?: 0)
+            intArrayOf(landlord?.let { legalCardCount(it.index) } ?: 0)
         } else {
             intArrayOf(
-                players[(myIndex + 1) % 3].cardCount,
-                players[(myIndex + 2) % 3].cardCount
+                legalCardCount((myIndex + 1) % 3),
+                legalCardCount((myIndex + 2) % 3)
             )
         }
     }
 
     /**
-     * 获取 AI 未见的各点数剩余张数（即另外两位玩家当前手牌中每个 rank 的张数）
-     * 底牌已并入地主手牌，因此无需单独统计
+     * 仅凭合法信息推导某玩家当前手牌数：
+     * 初始张数（地主20/农民17）- 该玩家已打出的牌数（公共记录）
+     */
+    private fun legalCardCount(playerIndex: Int): Int {
+        val base = if (stateMachine.hasLandlord && stateMachine.landlordIndex == playerIndex) 20 else 17
+        var played = 0
+        for ((p, cards) in stateMachine.playHistory) {
+            if (p == playerIndex) played += cards.size
+        }
+        return (base - played).coerceAtLeast(0)
+    }
+
+    /**
+     * 获取 AI 未见的各点数剩余张数（仅凭合法信息推导）
+     * 推导方式：54张牌中每个rank的总数 - 自己手牌中该rank张数 - 已打出的该rank张数
+     * = 另外两位玩家手牌中该rank的张数（可被合法精确推导）
      * @return 长度为18的数组（下标即rank），索引0~2无意义
      */
     private fun getUnseenRankCounts(myIndex: Int): IntArray {
+        val known = IntArray(18)
+        // 自己手牌（合法可见）
+        players[myIndex].handCards.forEach { known[it.rank]++ }
+        // 已打出的牌（公共可见记录）
+        stateMachine.playHistory.forEach { (_, cards) -> cards.forEach { known[it.rank]++ } }
+
         val counts = IntArray(18)
-        players.forEachIndexed { i, p ->
-            if (i != myIndex) p.handCards.forEach { counts[it.rank]++ }
+        for (rank in 3..17) {
+            val total = if (rank == 16 || rank == 17) 1 else 4
+            counts[rank] = (total - known[rank]).coerceAtLeast(0)
         }
         return counts
     }

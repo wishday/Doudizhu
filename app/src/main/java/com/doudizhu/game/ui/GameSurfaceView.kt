@@ -301,7 +301,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 for (btn in buttons) {
                     if (btn.rect.contains(x, y)) {
                         pressedAction = btn.action
-                        vibrate(20)
+                        vibrate(40)
                         refresh()
                         return true
                     }
@@ -328,7 +328,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 val action = pressedAction
                 if (action != null) {
                     handleButtonAction(action)
-                    vibrate(20)
+                    vibrate(30)
                     pressedAction = null
                     refresh()
                     return true
@@ -712,7 +712,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val textColor = if (card.isRed) Color.parseColor("#D32F2F") else Color.parseColor("#212121")
 
         // 左上角花色+点数
-        smallTextPaint.textSize = cardW * 0.30f
+        smallTextPaint.textSize = cardW * 0.15f
         smallTextPaint.color = textColor
         smallTextPaint.textAlign = Paint.Align.LEFT
         canvas.drawText(card.suitSymbol, x + 14f, y + cardH * 0.18f, smallTextPaint)
@@ -726,7 +726,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText(card.displayText, x + cardW / 2, y + cardH * 0.62f, textPaint)
 
         // 右下角花色
-        smallTextPaint.textSize = cardW * 0.30f
+        smallTextPaint.textSize = cardW * 0.15f
         smallTextPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(card.suitSymbol, x + cardW - 14f, y + cardH - 24f, smallTextPaint)
 
@@ -897,7 +897,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 }
                 val totalW = btnW * bidCount + gap * (bidCount - 1)
                 val startX = (screenWidth - totalW) / 2
-                val y = screenHeight - cardH - 220f  // 位置上移
+                val y = screenHeight - cardH - 340f  // 位置上移
 
                 val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
                 val colors = mapOf(
@@ -916,7 +916,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             // 出牌阶段
             phase == GamePhase.PLAYING && currentPlayer == 0 -> {
                 val canPass = !gameEngine.stateMachine.mustPlay()
-                val y = screenHeight - cardH - 220f  // 位置上移
+                val y = screenHeight - cardH - 340f  // 位置上移
 
                 if (canPass) {
                     val totalW = btnW * 3 + gap * 2
