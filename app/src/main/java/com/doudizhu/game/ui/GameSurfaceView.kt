@@ -518,7 +518,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     private fun drawBackground(canvas: Canvas) {
-        if (bgGradient == null || bgGradientW != screenWidth || bgGradientH != screenHeight) {
+        if (bgGradient == null || bgGradientW != screenWidth.toFloat() || bgGradientH != screenHeight.toFloat()) {
             bgGradient = LinearGradient(
                 0f, 0f, 0f, screenHeight.toFloat(),
                 Color.parseColor("#0D3B0D"), Color.parseColor("#1B5E20"),
