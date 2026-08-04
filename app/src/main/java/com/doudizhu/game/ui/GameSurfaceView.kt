@@ -4,8 +4,10 @@ import android.content.Context
 import android.graphics.*
 import android.media.AudioManager
 import android.media.ToneGenerator
+import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.os.VibratorManager
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -175,7 +177,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (toneGenerator == null) {
                 toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
             }
-            vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            // Android 12+ (API 31) 使用 VibratorManager，低版本使用 Vibrator
+            vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
         } catch (_: Exception) {}
     }
 
@@ -189,7 +198,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 播放振动反馈 */
     private fun vibrate(durationMs: Long = 30) {
         try {
-            vibrator?.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+            val v = vibrator ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(VibrationEffect.createOneShot(durationMs, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(durationMs)
+            }
         } catch (_: Exception) {}
     }
 
@@ -839,7 +854,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 textPaint.textSize = 44f
                 textPaint.color = Color.parseColor("#FFEB3B")
                 textPaint.textAlign = Paint.Align.CENTER
-                canvas.drawText("轮到你出牌", screenWidth / 2f, screenHeight * 0.52f, textPaint)
+                canvas.drawText("轮到你出牌", screenWidth / 2f, screenHeight - cardH - 360f, textPaint)
             }
             1 -> {
                 // 右侧AI高亮
@@ -853,7 +868,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 textPaint.textSize = 40f
                 textPaint.color = Color.parseColor("#FFB74D")
                 textPaint.textAlign = Paint.Align.CENTER
-                canvas.drawText("电脑A思考中...", screenWidth / 2f, screenHeight * 0.52f, textPaint)
+                canvas.drawText("电脑A思考中...", screenWidth / 2f, screenHeight - cardH - 360f, textPaint)
             }
             2 -> {
                 // 左侧AI高亮
@@ -867,7 +882,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 textPaint.textSize = 40f
                 textPaint.color = Color.parseColor("#FFB74D")
                 textPaint.textAlign = Paint.Align.CENTER
-                canvas.drawText("电脑B思考中...", screenWidth / 2f, screenHeight * 0.52f, textPaint)
+                canvas.drawText("电脑B思考中...", screenWidth / 2f, screenHeight - cardH - 360f, textPaint)
             }
         }
     }
@@ -879,9 +894,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val currentPlayer = gameEngine.stateMachine.currentPlayerIndex
 
         // 按钮尺寸（放大2倍）
-        var btnW = 300f
-        val btnH = 110f
-        val gap = 36f
+        var btnW = 340f
+        val btnH = 130f
+        val gap = 48f
 
         when {
             // 叫地主阶段
@@ -897,7 +912,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 }
                 val totalW = btnW * bidCount + gap * (bidCount - 1)
                 val startX = (screenWidth - totalW) / 2
-                val y = screenHeight - cardH - 340f  // 位置上移
+                val y = screenHeight - cardH - 380f  // 位置上移
 
                 val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
                 val colors = mapOf(
@@ -916,7 +931,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             // 出牌阶段
             phase == GamePhase.PLAYING && currentPlayer == 0 -> {
                 val canPass = !gameEngine.stateMachine.mustPlay()
-                val y = screenHeight - cardH - 340f  // 位置上移
+                val y = screenHeight - cardH - 380f  // 位置上移
 
                 if (canPass) {
                     val totalW = btnW * 3 + gap * 2
@@ -964,7 +979,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 按钮高光
         canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
 
-        buttonTextPaint.textSize = 52f
+        buttonTextPaint.textSize = 56f
         canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
     }
 
