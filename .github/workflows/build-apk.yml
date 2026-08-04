@@ -1,0 +1,52 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Remove local.properties (CI uses ANDROID_HOME)
+        run: rm -f local.properties
+
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DouDiZhu-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date +%Y%m%d-%H%M)
+          TAG="build-${DATE}-${{ github.run_number }}"
+          APK="DouDiZhu-${DATE}.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "${APK}"
+          gh release create "${TAG}" "${APK}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "DouDiZhu 构建 ${DATE}" \
+            --notes "commit: ${GITHUB_SHA:0:7}"
