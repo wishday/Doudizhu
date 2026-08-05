@@ -382,21 +382,27 @@ object AIDecision {
         val teammateIsNext = myIndex >= 0 && nextIndex == teammateIndex
 
         // 农民配合 + B. 报单喂队友
-        if (role == PlayerRole.FARMER && teammateCardCount in 1..2) {
+        if (role == PlayerRole.FARMER && teammateCardCount in 1..3) {
             if (teammateCardCount == 1) {
                 // 队友报单：领出最小非控单张，让队友好接走完
-                val feed = plan.firstOrNull { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
+                val lead = plan.firstOrNull { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
                     ?: plan.firstOrNull { it.type == CardType.SINGLE }
                     ?: plan.firstOrNull { it.type == CardType.PAIR }
-                if (feed != null) {
+                if (lead != null) {
                     // 地主位于我与队友之间（队友不接牌）时，喂小单张易被地主拦截，
                     // 只有当该牌对手难压住（threat 低）才喂，否则交给常规领出
-                    val riskyToFeed = !teammateIsNext && feed.type == CardType.SINGLE &&
-                        feedDanger(feed) > 1
-                    if (!riskyToFeed) return feed
+                    val riskyToFeed = !teammateIsNext && lead.type == CardType.SINGLE &&
+                        feedDanger(lead) > 1
+                    if (!riskyToFeed) return lead
+                }
+            } else if (teammateCardCount == 2) {
+                // 队友剩2张：出大牌帮顶（同型内取最大）
+                val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
+                if (bigPlays.isNotEmpty()) {
+                    return pickSinglePairBest(bigPlays, max = true)!!
                 }
             } else {
-                // 队友剩2张：出大牌帮顶（同型内取最大）
+                // 队友剩3张：出大单张/对子帮顶，为队友铺垫
                 val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
                 if (bigPlays.isNotEmpty()) {
                     return pickSinglePairBest(bigPlays, max = true)!!
@@ -425,19 +431,34 @@ object AIDecision {
         }
 
         // A. 残局前瞻（增强）：手牌较少时枚举领出，防喂杀 + 最小剩余手数 + 优先不可被反制的牌
+        // 若出张牌后只剩炸弹/火箭且剩余能一把收走，炸弹开路是更优的路线
         if (hand.size <= 8) {
-            data class Cand(val group: CardGroup, val turns: Int, val danger: Int, val unbeatable: Boolean)
+            data class Candidate(val group: CardGroup, val turns: Int, val danger: Int, val unbeatable: Boolean)
             val cands = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
                 .map { c ->
                     val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
-                    Cand(
+                    Candidate(
                         c,
                         estimateHandTurns(remaining),
                         feedDanger(c),
                         isUnbeatableOptimistic(c)
                     )
                 }
+                .toMutableList()
+            // 炸弹开路：若出炸弹后剩余牌可一手出完（如炸弹+双王/炸弹+单张足够收），炸弹更优
+            for (bomb in validPlays) {
+                if (bomb.type != CardType.BOMB && bomb.type != CardType.ROCKET) continue
+                val rem = hand.filter { card -> bomb.cards.none { it.id == card.id } }
+                if (rem.isEmpty()) { cands.add(Candidate(bomb, 0, 0, true)); break }
+                val id = CardRuleEngine.identify(rem)
+                if (id.type != CardType.INVALID) {
+                    cands.add(Candidate(bomb, 0, 0, true))
+                    break
+                }
+            }
             if (cands.isNotEmpty()) {
+                // 炸弹候选项 danger 已置零，turns=0 且 unbeatable 强置 true，
+                // 排序规则中 danger 最低、unbeatable 优先的炸弹会天然排在前列
                 val best = cands.minWithOrNull(
                     compareBy({ it.danger }, { if (it.unbeatable) 0 else 1 }, { it.turns }, { it.group.mainRank })
                 )
@@ -573,16 +594,23 @@ object AIDecision {
                     return chooseFollowPlay(controlPlays, lastPlay, hand)
                 }
             }
-            // 5. 主动过牌（地主）：只有动用2/王等控牌才压得住、且对手出的是小牌、非紧急 → 保存控牌
-            if (role == PlayerRole.LANDLORD && lastPlay.mainRank <= 9) {
+            // 5. 主动过牌/控牌保留（地主）：评估跟牌后对手仍能反制的威胁，非紧急 → 保存控牌
+            if (role == PlayerRole.LANDLORD) {
                 val candidates = normalPlays.filter { it.type == lastPlay.type }
-                if (candidates.isNotEmpty() && candidates.all { isControlRank(it.mainRank) }) {
-                    // 紧急情况下不应被动过牌，应主动出控牌以减少手牌
-                    val isUrgent = hand.size <= 4 || minOpponentCards <= 3
-                    if (!isUrgent) {
-                        return null
+                if (candidates.isNotEmpty()) {
+                    // 先用非控牌跟，若不存在非控牌，评估动用控牌的反制威胁
+                    val nonControl = candidates.filter { !isControlRank(it.mainRank) }
+                    if (nonControl.isNotEmpty()) {
+                        return chooseFollowPlay(nonControl, lastPlay, hand)
                     }
+                    // 所有可用跟牌都需要动用控牌，评估反制风险
+                    val isUrgent = hand.size <= 4 || minOpponentCards <= 3
+                    if (higher > 1 && !isUrgent) {
+                        return null  // 对手仍有高牌能压回且非紧急，保留控牌
+                    }
+                    return chooseFollowPlay(candidates, lastPlay, hand)
                 }
+                return null // 没有合规跟牌则过牌
             }
             // B. 正常情况：成本aware选择（破坏结构最小、其次最小、控牌最后）
             return chooseFollowPlay(normalPlays, lastPlay, hand)
@@ -880,8 +908,9 @@ private fun chooseFollowPlay(
         bombs: List<CardGroup>,
         hand: List<Card>
     ): CardGroup? {
-        val b = bombs.minByOrNull { it.mainRank } ?: return null
+        val b = bombs.maxByOrNull { it.mainRank } ?: return null
         // 是否存在对手手中可反制的更高炸弹/火箭（若有，炸完未必能守住控制权）
+        // 取最大炸弹以最小化被反制风险
         val canBeCountered = hasUnseenHigherBombOrRocket(b.mainRank)
         // 1. 对手距获胜很近，必须炸阻止（即使可能被反也值得一搏）
         if (ctxMinOpponentCards <= 5) return b
