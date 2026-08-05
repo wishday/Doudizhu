@@ -225,13 +225,13 @@ object AIDecision {
             if ((counts[r] ?: 0) != 3) continue
             // 优先从非三张 rank 取对子作带牌，避免拆散其他三张
             val pairKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 2 }
-                ?: counts.entries.firstOrNull { it.key != r && it.value >= 2 }
+                ?: counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 2 }
             if (pairKicker != null) {
                 counts[pairKicker.key] = pairKicker.value - 2
                 if (counts[pairKicker.key] == 0) counts.remove(pairKicker.key)
             } else {
                 val singleKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 1 }
-                    ?: counts.entries.firstOrNull { it.key != r && it.value >= 1 }
+                    ?: counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 1 }
                 if (singleKicker != null) {
                     counts[singleKicker.key] = singleKicker.value - 1
                     if (counts[singleKicker.key] == 0) counts.remove(singleKicker.key)
@@ -354,27 +354,22 @@ object AIDecision {
                     ?: plan.firstOrNull { it.type == CardType.PAIR }
                 if (feed != null) return feed
             } else {
-                // 队友剩2张：出大牌帮顶
+                // 队友剩2张：出大牌帮顶（同型内取最大，优先对子）
                 val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
                 if (bigPlays.isNotEmpty()) {
-                    return bigPlays.maxByOrNull { it.mainRank }!!
+                    return pickSinglePairBest(bigPlays, max = true)!!
                 }
             }
         }
 
-        // 地主策略：手牌少时积极出大牌
-        if (role == PlayerRole.LANDLORD && hand.size <= 5) {
-            val bigPlays = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-            if (bigPlays.isNotEmpty()) {
-                return bigPlays.maxByOrNull { it.mainRank }!!
-            }
-        }
+        // （已移除：地主残局"出最大"分支。该分支曾在必胜/残局策略之前触发，导致地主
+        //  接近胜利时被引导先甩最大牌反而打输；手少时的正确领出交给下方残局与必胜逻辑）
 
         // 对手牌少时，出大牌压制（F：地主用2/王回手，此处保留大牌抢回控制）
         val minOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
 
         // A. 残局必胜（1 层递归）：若能必然冲完，直接连出，不做其它权衡
-        val guaranteed = canFinishGuaranteed(hand, validPlays, minOpponentCards, unseenCounts)
+        val guaranteed = canFinishGuaranteed(hand, validPlays, minOpponentCards, unseenCounts, role, teammateCardCount)
         if (guaranteed != null) return guaranteed
 
         if (minOpponentCards <= 3) {
@@ -382,8 +377,8 @@ object AIDecision {
             val controlUnseen = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
             val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
             if (bigPlays.isNotEmpty()) {
-                return if (controlUnseen == 0) bigPlays.minByOrNull { it.mainRank }!!
-                else bigPlays.maxByOrNull { it.mainRank }!!
+                return if (controlUnseen == 0) pickSinglePairBest(bigPlays, max = false)!!
+                else pickSinglePairBest(bigPlays, max = true)!!
             }
         }
 
@@ -396,8 +391,8 @@ object AIDecision {
                     Cand(
                         c,
                         estimateHandTurns(remaining),
-                        feedDanger(c, unseenCounts, minOpponentCards),
-                        isUnbeatable(c, unseenCounts)
+                        feedDanger(c, unseenCounts, minOpponentCards, role, teammateCardCount),
+                        isUnbeatableOptimistic(c, unseenCounts, role, teammateCardCount, minOpponentCards)
                     )
                 }
             if (cands.isNotEmpty()) {
@@ -430,7 +425,7 @@ object AIDecision {
         }
         if (singlePair.isNotEmpty()) {
             return singlePair.minWithOrNull(
-                compareBy({ leadThreat(it, unseenCounts) }, { it.mainRank })
+                compareBy({ leadThreat(it, unseenCounts, role, teammateCardCount, minOpponentCards) }, { it.mainRank })
             )!!
         }
         // 兜底：最小可出的普通牌
@@ -473,13 +468,10 @@ object AIDecision {
         val normalPlays = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
         val minOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
 
-        // D. 位置修正：地主刚出完，轮到我时队友（介于地主与我之间）已过且快出完 → 放过，让队友好走
+        // D. 位置修正：地主刚出完且队友（介于地主与我之间）已过牌、快出完时，
+        // 不应无条件过牌送地主免费领出，而应尽量接过控制（交由下方普通跟牌/深度合作逻辑决定）
         if (role == PlayerRole.FARMER && landlordIndex == lastPlayerIndex) {
-            val between = (lastPlayerIndex + 1) % 3
-            if (between != myIndex && between != landlordIndex && teammateCardCount in 1..2) {
-                return null
-            }
-            // 深度合作：否则若我有便宜非控牌可接过，主动接过保护队友好走
+            // 深度合作：若我有便宜非控牌可接过，主动接过保护队友好走
             if (minOpponentCards > 3) {
                 val cheap = normalPlays.filter { it.type == lastPlay.type && !isControlRank(it.mainRank) }
                 if (cheap.isNotEmpty()) {
@@ -495,7 +487,7 @@ object AIDecision {
             }
             // C. 农民跟牌安全：若跟牌必被更高同型压回且需动用控牌，非紧急时保留控牌
             val higher = if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR)
-                higherOppRanks(lastPlay.type, lastPlay.mainRank, unseenCounts) else 0
+                higherOppRanks(lastPlay.type, lastPlay.mainRank, unseenCounts, role, teammateCardCount, minOpponentCards) else 0
             if (role == PlayerRole.FARMER && higher > 2) {
                 val nonControl = normalPlays.filter { it.type == lastPlay.type && !isControlRank(it.mainRank) }
                 if (nonControl.isNotEmpty()) {
@@ -539,6 +531,7 @@ object AIDecision {
         if (hand.size <= 6) {
             return candidates.minWithOrNull(
                 compareBy(
+                    { if (isControlRank(it.mainRank)) 4 else 0 },
                     { estimateHandTurns(hand.filter { card -> it.cards.none { c -> c.id == card.id } }) },
                     { it.mainRank }
                 )
@@ -580,6 +573,41 @@ object AIDecision {
     private val ControlRanks = setOf(15, 16, 17)
 
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
+
+    /**
+     * 农民视角的威胁折减：unseen 同时包含地主与队友的牌，而农民真正的对手只有地主。
+     * 按「地主手牌数 / 地主+队友手牌数」比例，把「能压住本手的高位牌数量」折减，
+     * 避免把队友可能持牌也算作对手威胁而误判。
+     * 地主没有队友，直接返回原值。
+     */
+    private fun scaledThreat(count: Int, role: PlayerRole, teammateCardCount: Int, minOpponentCards: Int): Int {
+        if (role != PlayerRole.FARMER) return count
+        val total = minOpponentCards + teammateCardCount
+        if (total <= 0) return count
+        return (count * minOpponentCards.toFloat() / total).toInt()
+    }
+
+    /**
+     * 在单张/对子候选中取最值：同型内比较 mainRank，避免「单张 A 与对子 K」混比大小；
+     * max 时优先对子（两手并作一手、更不易被压），min 时优先更小的牌。
+     */
+    private fun pickSinglePairBest(candidates: List<CardGroup>, max: Boolean): CardGroup? {
+        val singles = candidates.filter { it.type == CardType.SINGLE }
+        val pairs = candidates.filter { it.type == CardType.PAIR }
+        if (max) {
+            val bestPair = pairs.maxByOrNull { it.mainRank }
+            if (bestPair != null) return bestPair
+            return singles.maxByOrNull { it.mainRank }
+        }
+        val minSingle = singles.minByOrNull { it.mainRank }
+        val minPair = pairs.minByOrNull { it.mainRank }
+        return when {
+            minSingle != null && minPair == null -> minSingle
+            minPair != null && minSingle == null -> minPair
+            minSingle != null -> if (minSingle.mainRank <= minPair!!.mainRank) minSingle else minPair
+            else -> null
+        }
+    }
 
     /**
      * A. 整手分解规划：把 17 张拆成近乎最少出牌组，输出「先出垃圾、后留武器」的有序计划
@@ -700,14 +728,21 @@ object AIDecision {
     }
 
     /** C. 统计对手未见的、能压住该牌型的更高 rank 数量 */
-    private fun higherOppRanks(groupType: CardType, mainRank: Int, unseenCounts: IntArray): Int {
+    private fun higherOppRanks(
+        groupType: CardType,
+        mainRank: Int,
+        unseenCounts: IntArray,
+        role: PlayerRole,
+        teammateCardCount: Int,
+        minOpponentCards: Int
+    ): Int {
         var count = 0
         when (groupType) {
             CardType.SINGLE -> for (r in (mainRank + 1)..17) if (r < unseenCounts.size && unseenCounts[r] > 0) count++
             CardType.PAIR -> for (r in (mainRank + 1)..15) if (r < unseenCounts.size && unseenCounts[r] >= 2) count++
             else -> {}
         }
-        return count
+        return scaledThreat(count, role, teammateCardCount, minOpponentCards)
     }
 
     /** E. 炸弹分层：防杀/收尾/救队友/安全翻倍才炸，不盲目概率炸 */
@@ -730,19 +765,27 @@ object AIDecision {
         // 3. 农民炸救队友：队友快出完时抢回控制权护送
         if (role == PlayerRole.FARMER && teammateCardCount in 1..2) return b
         // 4. 安全翻倍炸：对手手中已无任何2/王，炸弹不可被反制且能翻倍
-        val controls = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
+        val rawControls = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
+        val controls = scaledThreat(rawControls, role, teammateCardCount, minOpponentCards)
         if (controls == 0) return b
         // 其余情况保留炸弹，避免交回控制权
         return null
     }
 
     /** 2. 领出威胁度：对手能压住该单张/对子的更高同型 rank 数量，越小越安全 */
-    private fun leadThreat(group: CardGroup, unseenCounts: IntArray): Int {
-        return when (group.type) {
+    private fun leadThreat(
+        group: CardGroup,
+        unseenCounts: IntArray,
+        role: PlayerRole,
+        teammateCardCount: Int,
+        minOpponentCards: Int
+    ): Int {
+        val raw = when (group.type) {
             CardType.SINGLE -> (group.mainRank + 1..17).count { r -> r < unseenCounts.size && unseenCounts[r] > 0 }
             CardType.PAIR -> (group.mainRank + 1..15).count { r -> r < unseenCounts.size && unseenCounts[r] >= 2 }
             else -> 100
         }
+        return if (raw >= 100) raw else scaledThreat(raw, role, teammateCardCount, minOpponentCards)
     }
 
     /** D. 地主钓牌：从计划里挑一手中位对子/单张作诱饵，勾出对手的2/王 */
@@ -762,8 +805,14 @@ object AIDecision {
      * B. 领出威胁度（残局增强版）：单/对统计更高不可见同型数量；
      * 若对手报单（剩 1 张）且该单张能被接，则喂杀风险极大 → 大幅抬高威胁
      */
-    private fun feedDanger(group: CardGroup, unseenCounts: IntArray, minOpponentCards: Int): Int {
-        var danger = when (group.type) {
+    private fun feedDanger(
+        group: CardGroup,
+        unseenCounts: IntArray,
+        minOpponentCards: Int,
+        role: PlayerRole,
+        teammateCardCount: Int
+    ): Int {
+        val rawDanger = when (group.type) {
             CardType.SINGLE -> {
                 var d = 0
                 for (r in (group.mainRank + 1)..17) if (r < unseenCounts.size && unseenCounts[r] > 0) d++
@@ -777,6 +826,7 @@ object AIDecision {
             // 结构牌无法精确预判，给一个中位威胁，避免残局时全部堵死
             else -> 1
         }
+        var danger = scaledThreat(rawDanger, role, teammateCardCount, minOpponentCards)
         if (minOpponentCards == 1 && group.type == CardType.SINGLE && danger > 0) danger += 50
         return danger
     }
@@ -794,6 +844,26 @@ object AIDecision {
     }
 
     /**
+     * 残局软偏好用的「乐观不可被压」：农民视角下，若更高同型经队友折减后威胁为 0，
+     * 则可能是队友持有而实际无人可压，可在残局选牌时作为偏好（非必胜保证）。
+     * 仅用于自由领出的候选排序；必胜判定 canFinishGuaranteed 仍用严格的 isUnbeatable。
+     */
+    private fun isUnbeatableOptimistic(
+        group: CardGroup,
+        unseenCounts: IntArray,
+        role: PlayerRole,
+        teammateCardCount: Int,
+        minOpponentCards: Int
+    ): Boolean {
+        val high = when (group.type) {
+            CardType.SINGLE -> (group.mainRank + 1..17).count { r -> r < unseenCounts.size && unseenCounts[r] > 0 }
+            CardType.PAIR -> (group.mainRank + 1..15).count { r -> r < unseenCounts.size && unseenCounts[r] >= 2 }
+            else -> return false
+        }
+        return scaledThreat(high, role, teammateCardCount, minOpponentCards) == 0
+    }
+
+    /**
      * A. 残局 1 层递归必胜判定（启用条件：对手手数 <= 4 且本手剩余 <= 8，限定计算量）
      *
      * 枚举各领出候选，回推对手应对：
@@ -806,20 +876,22 @@ object AIDecision {
         hand: List<Card>,
         validPlays: List<CardGroup>,
         minOpponentCards: Int,
-        unseenCounts: IntArray
+        unseenCounts: IntArray,
+        role: PlayerRole,
+        teammateCardCount: Int
     ): CardGroup? {
         if (minOpponentCards > 4 || hand.size > 8) return null
         val candidates = validPlays
             .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-            .sortedBy { feedDanger(it, unseenCounts, minOpponentCards) }
+            .sortedBy { feedDanger(it, unseenCounts, minOpponentCards, role, teammateCardCount) }
         for (c in candidates) {
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
             // 领出即清空手牌：必然直接获胜
             if (remaining.isEmpty()) return c
             val remTurns = estimateHandTurns(remaining)
-            // 绝对通吃：对手只能过牌，控制权必回己方，剩余牌可自给收完
+            // 绝对通吃：对手只能过牌，控制权必回己方，剩余牌须能在一两手内收完才算必胜
             if (isUnbeatable(c, unseenCounts)) {
-                if (remTurns <= remaining.size) return c
+                if (remTurns <= 2) return c
                 continue
             }
             // 对手能接：仅当剩余牌拢成一整手（再一手即走完），对手代行领出也无损

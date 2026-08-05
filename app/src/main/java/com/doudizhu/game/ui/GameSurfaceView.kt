@@ -627,10 +627,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val startX = (screenWidth - totalW) / 2
         val y = 88f
 
-        textPaint.textSize = 40f
-        textPaint.color = Color.parseColor("#FFD600")
-        canvas.drawText("底牌", screenWidth / 2f, y + 6f, textPaint)
-
         for ((i, card) in gameEngine.stateMachine.bottomCards.withIndex()) {
             drawMiniCard(canvas, startX + i * (miniW + gap), y + 20f, miniW, miniH,
                 card, faceUp = gameEngine.stateMachine.hasLandlord)
@@ -848,9 +844,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawAllRemainingCards(canvas: Canvas) {
         // 在桌面下方显示所有玩家剩余牌
         val showY = screenHeight * 0.58f
-        val miniW = 60f
-        val miniH = 84f
-        val miniGap = 8f
+        val miniW = 90f
+        val miniH = 126f
+        val miniGap = 12f
 
         // 左侧AI剩余牌
         val leftCards = gameEngine.players[2].handCards
