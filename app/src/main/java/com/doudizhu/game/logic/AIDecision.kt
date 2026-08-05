@@ -224,13 +224,13 @@ object AIDecision {
         for (r in tripleSet.toList()) {
             if ((counts[r] ?: 0) != 3) continue
             // 优先从非三张 rank 取对子作带牌，避免拆散其他三张
-            val pairKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 2 }
+            val pairKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 2 && !isControlRank(it.key) }
                 ?: counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 2 }
             if (pairKicker != null) {
                 counts[pairKicker.key] = pairKicker.value - 2
                 if (counts[pairKicker.key] == 0) counts.remove(pairKicker.key)
             } else {
-                val singleKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 1 }
+                val singleKicker = counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 1 && !isControlRank(it.key) }
                     ?: counts.entries.firstOrNull { it.key != r && it.key !in tripleSet && it.value >= 1 }
                 if (singleKicker != null) {
                     counts[singleKicker.key] = singleKicker.value - 1
@@ -404,7 +404,8 @@ object AIDecision {
         }
 
         // D. 地主钓牌：手牌较优（较大且紧凑）且无必杀压力时，偶尔出中位诱饵勾出对手的2/王
-        if (role == PlayerRole.LANDLORD && hand.size > 8 && plan.size <= 6 && Math.random() < 0.30) {
+        // 钓牌时机：手牌较多（>10张）时有空间耐心等待，且手牌紧凑（计划手数少）
+        if (role == PlayerRole.LANDLORD && hand.size > 10 && plan.size <= 6 && Math.random() < 0.30) {
             val bait = pickBait(plan)
             if (bait != null) return bait
         }
@@ -493,13 +494,27 @@ object AIDecision {
                 if (nonControl.isNotEmpty()) {
                     return chooseFollowPlay(nonControl, lastPlay, hand)
                 }
-                return null
+                // 无法避免动用控牌时，只有在紧急情况下才打出控牌
+                // 紧急情况：自己手牌较少（<=5），或队友手牌较少（<=3），或有队友获胜压力
+                val isUrgent = hand.size <= 5 || teammateCardCount <= 3 || minOpponentCards <= 3
+                if (!isUrgent) {
+                    return null  // 非紧急时保留控牌
+                }
+                // 紧急情况下，使用最小的控牌
+                val controlPlays = normalPlays.filter { it.type == lastPlay.type && isControlRank(it.mainRank) }
+                if (controlPlays.isNotEmpty()) {
+                    return chooseFollowPlay(controlPlays, lastPlay, hand)
+                }
             }
             // 5. 主动过牌（地主）：只有动用2/王等控牌才压得住、且对手出的是小牌、非紧急 → 保存控牌
             if (role == PlayerRole.LANDLORD && lastPlay.mainRank <= 9) {
                 val candidates = normalPlays.filter { it.type == lastPlay.type }
                 if (candidates.isNotEmpty() && candidates.all { isControlRank(it.mainRank) }) {
-                    return null
+                    // 紧急情况下不应被动过牌，应主动出控牌以减少手牌
+                    val isUrgent = hand.size <= 4 || minOpponentCards <= 3
+                    if (!isUrgent) {
+                        return null
+                    }
                 }
             }
             // B. 正常情况：成本aware选择（破坏结构最小、其次最小、控牌最后）
@@ -869,7 +884,8 @@ object AIDecision {
      * 枚举各领出候选，回推对手应对：
      *  - 领出即清空手牌 → 必然赢，直接返回；
      *  - 领出绝对通吃（不可被反制）→ 控制权笃定回到己方，剩余手牌可自行收完；
-     *  - 否则对手可能接走后反身领出 → 仅当剩余手牌恰好拢成一整手（一手完）才视为必胜。
+     *  - 否则对手可能接走 → 仅当对手报单（剩1张）且AI剩余牌型为单/对子（无法被压住），
+     *    才能确定先出完后，对手只能出最后一张而无法反制。
      * 按领出威胁度升序取第一个可靠的必胜出法（威胁最小的必胜优先）。
      */
     private fun canFinishGuaranteed(
@@ -894,8 +910,14 @@ object AIDecision {
                 if (remTurns <= 2) return c
                 continue
             }
-            // 对手能接：仅当剩余牌拢成一整手（再一手即走完），对手代行领出也无损
-            if (remTurns == 1) return c
+            // 对手能接牌：不能假设必胜，必须进一步判断
+            // 只有当对手报单（剩1张）且AI剩下的牌构成单牌型时，
+            // 才能确定先出完后，对手也只能出最后一张
+            if (minOpponentCards == 1 && remTurns == 1) {
+                // 验证剩余牌型是单张或对子（对手的1张无法压住）
+                val remGroup = CardRuleEngine.identify(remaining)
+                if (remGroup.type == CardType.SINGLE || remGroup.type == CardType.PAIR) return c
+            }
         }
         return null
     }

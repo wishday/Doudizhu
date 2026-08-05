@@ -399,7 +399,8 @@ object CardRuleEngine {
     }
 
     /**
-     * 查找所有长度==5 的最短顺子（自由出牌用，避免一次打光长顺子失去控牌权）
+     * 查找最长顺子（自由出牌用，避免一次打光长顺子失去控牌权）
+     * 优先生成较短顺子，以保存更多的控牌权选项
      */
     private fun findShortStraights(
         sorted: List<Card>,
@@ -413,9 +414,16 @@ object CardRuleEngine {
             while (j + 1 < ranks.size && ranks[j + 1] == ranks[j] + 1) j++
             val runLen = j - i + 1
             if (runLen >= 5) {
-                for (start in ranks[i] until (ranks[i] + runLen - 4)) {
-                    val cards = (start until start + 5).map { r -> sorted.first { it.rank == r } }
-                    results.add(CardGroup(CardType.STRAIGHT, start, 5, cards))
+                // 生成从较短到较长的顺子，但优先生成长度5（最短）
+                // 这样AI在自由出牌时会优先考虑较短顺子，保留更多弹性
+                val cards5 = (0 until 5).map { r -> sorted.first { it.rank == ranks[i + r] } }
+                results.add(CardGroup(CardType.STRAIGHT, ranks[i], 5, cards5))
+                // 同时考虑更长的顺子
+                if (runLen > 5) {
+                    for (len in 6..runLen) {
+                        val cards = (0 until len).map { r -> sorted.first { it.rank == ranks[i + r] } }
+                        results.add(CardGroup(CardType.STRAIGHT, ranks[i], len, cards))
+                    }
                 }
             }
             i = j + 1
@@ -424,7 +432,8 @@ object CardRuleEngine {
     }
 
     /**
-     * 查找所有长度==3 的最短连对（自由出牌用）
+     * 查找连对（自由出牌用）
+     * 优先生成较短连对（3对），同时考虑更长的连对
      */
     private fun findShortStraightPairs(
         sorted: List<Card>,
@@ -438,9 +447,15 @@ object CardRuleEngine {
             while (j + 1 < pairRanks.size && pairRanks[j + 1] == pairRanks[j] + 1) j++
             val runLen = j - i + 1
             if (runLen >= 3) {
-                for (start in pairRanks[i] until (pairRanks[i] + runLen - 2)) {
-                    val cards = (start until start + 3).flatMap { r -> sorted.filter { it.rank == r }.take(2) }
-                    results.add(CardGroup(CardType.STRAIGHT_PAIR, start, 3, cards))
+                // 优先生成3连对
+                val cards3 = (0 until 3).flatMap { r -> sorted.filter { it.rank == pairRanks[i + r] }.take(2) }
+                results.add(CardGroup(CardType.STRAIGHT_PAIR, pairRanks[i], 3, cards3))
+                // 同时考虑更长的连对
+                if (runLen > 3) {
+                    for (len in 4..runLen) {
+                        val cards = (0 until len).flatMap { r -> sorted.filter { it.rank == pairRanks[i + r] }.take(2) }
+                        results.add(CardGroup(CardType.STRAIGHT_PAIR, pairRanks[i], len, cards))
+                    }
                 }
             }
             i = j + 1
