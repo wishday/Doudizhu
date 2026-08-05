@@ -16,6 +16,7 @@ object AIDecision {
     private var ctxRole: PlayerRole = PlayerRole.FARMER
     private var ctxTeammateCardCount: Int = 0
     private var ctxMinOpponentCards: Int = 20
+    private var ctxMaxOpponentCards: Int = 20
     private var ctxUnseenCounts: IntArray = IntArray(18)
     private var ctxPerPlayerPlayed: Array<IntArray> = Array(3) { IntArray(18) }
     private var ctxPrimaryOpponent: Int = -1
@@ -57,6 +58,7 @@ object AIDecision {
         ctxRole = role
         ctxTeammateCardCount = teammateCardCount
         ctxMinOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
+        ctxMaxOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.max() else 20
         ctxUnseenCounts = unseenCounts
         ctxPerPlayerPlayed = perPlayerPlayed
         ctxPrimaryOpponent = primaryOpponentIndex
@@ -464,7 +466,7 @@ object AIDecision {
             if (bigSinglePair.isNotEmpty()) {
                 return bigSinglePair.sortedWith(
                     compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 })
-                ).lastOrNull()
+                ).last()
             }
         }
 
@@ -616,7 +618,7 @@ private fun chooseFollowPlay(
             ) ?: candidates.minByOrNull { it.mainRank }
         }
         val plan = buildHandPlan(hand)
-        if (ctxRole == PlayerRole.FARMER && ctxTeammateCardCount in 1..2) {
+        if (ctxRole == PlayerRole.FARMER && ctxTeammateCardCount in 1..3) {
             return candidates.minWithOrNull(
                 compareBy(
                     { followCost(it, plan) },
@@ -728,19 +730,28 @@ private fun chooseFollowPlay(
      */
     private fun buildHandPlan(hand: List<Card>): List<CardGroup> {
         val counts = hand.groupBy { it.rank }.mapValues { it.value.size }.toMutableMap()
-        val cardsByRank = hand.groupBy { it.rank }
+        val cardsByRank = hand.groupByTo(mutableMapOf()) { it.rank }
         val plan = mutableListOf<CardGroup>()
         val weapons = mutableListOf<CardGroup>()  // 炸弹/火箭收尾
 
+        /** 从 cardsByRank 中切出 n 张，返回切出的牌并从池子中删除 */
+        fun takeCards(r: Int, n: Int): List<Card> {
+            val pool = cardsByRank.getValue(r)
+            val taken = pool.take(n)
+            cardsByRank[r] = pool.drop(n)
+            return taken
+        }
+
         // 火箭
         if ((counts[16] ?: 0) > 0 && (counts[17] ?: 0) > 0) {
-            weapons.add(CardGroup(CardType.ROCKET, 17, 1, cardsByRank.getValue(16) + cardsByRank.getValue(17)))
+            weapons.add(CardGroup(CardType.ROCKET, 17, 1, takeCards(16, 1) + takeCards(17, 1)))
             counts.remove(16)
             counts.remove(17)
         }
         // 炸弹
-        counts.filterValues { it == 4 }.keys.sorted().forEach { r ->
-            weapons.add(CardGroup(CardType.BOMB, r, 1, cardsByRank.getValue(r)))
+        val bombRanks = counts.filterValues { it == 4 }.keys.sorted()
+        for (r in bombRanks) {
+            weapons.add(CardGroup(CardType.BOMB, r, 1, takeCards(r, 4)))
             counts.remove(r)
         }
 
@@ -753,7 +764,7 @@ private fun chooseFollowPlay(
         val triples = counts.filterValues { it == 3 }.keys.sorted()
         for (r in triples) {
             if ((counts[r] ?: 0) < 3) continue
-            val three = cardsByRank.getValue(r).take(3)
+            val three = takeCards(r, 3)
             val pairKick = kickerFor(counts, r, 2, cardsByRank, excludeControl = true)
                 ?: kickerFor(counts, r, 2, cardsByRank, excludeControl = false)
             if (pairKick != null) {
@@ -778,14 +789,14 @@ private fun chooseFollowPlay(
         val pairs = mutableListOf<CardGroup>()
         for ((r, n) in counts.entries.sortedBy { it.key }.toList()) {
             if (n >= 2) {
-                pairs.add(CardGroup(CardType.PAIR, r, 1, cardsByRank.getValue(r).take(2)))
+                pairs.add(CardGroup(CardType.PAIR, r, 1, takeCards(r, 2)))
                 counts[r] = n - 2
             }
         }
         // 散单
         val singles = mutableListOf<CardGroup>()
         for ((r, n) in counts.entries.sortedBy { it.key }.toList()) {
-            if (n >= 1) singles.add(CardGroup(CardType.SINGLE, r, 1, cardsByRank.getValue(r).take(1)))
+            if (n >= 1) singles.add(CardGroup(CardType.SINGLE, r, 1, takeCards(r, 1)))
         }
 
         // 组装顺序：非控对子/单张优先，控牌靠后，武器收尾（F 控牌纪律）
@@ -804,13 +815,16 @@ private fun chooseFollowPlay(
         counts: MutableMap<Int, Int>,
         excludeRank: Int,
         need: Int,
-        cardsByRank: Map<Int, List<Card>>,
+        cardsByRank: MutableMap<Int, List<Card>>,
         excludeControl: Boolean
     ): Kicker? {
         val entry = counts.entries.firstOrNull {
             it.key != excludeRank && it.value >= need && (!excludeControl || !isControlRank(it.key))
         } ?: return null
-        return Kicker(entry.key, cardsByRank.getValue(entry.key).take(need))
+        val pool = cardsByRank.getValue(entry.key)
+        val taken = pool.take(need)
+        cardsByRank[entry.key] = pool.drop(need)
+        return Kicker(entry.key, taken)
     }
 
     /**
@@ -818,7 +832,7 @@ private fun chooseFollowPlay(
      */
     private fun extractRuns(
         counts: MutableMap<Int, Int>,
-        cardsByRank: Map<Int, List<Card>>,
+        cardsByRank: MutableMap<Int, List<Card>>,
         m: Int,
         minLen: Int,
         type: CardType
@@ -830,7 +844,14 @@ private fun chooseFollowPlay(
             var j = i
             while (j + 1 < ranks.size && ranks[j + 1] == ranks[j] + 1) j++
             if (j - i + 1 >= minLen) {
-                result.add(CardGroup(type, ranks[i], j - i + 1, (i..j).flatMap { cardsByRank.getValue(ranks[it]).take(m) }))
+                val runCards = mutableListOf<Card>()
+                for (k in i..j) {
+                    val rk = ranks[k]
+                    val pool = cardsByRank.getValue(rk)
+                    runCards.addAll(pool.take(m))
+                    cardsByRank[rk] = pool.drop(m)
+                }
+                result.add(CardGroup(type, ranks[i], j - i + 1, runCards))
                 for (k in i..j) {
                     counts[ranks[k]] = counts[ranks[k]]!! - m
                     if (counts[ranks[k]] == 0) counts.remove(ranks[k])
@@ -863,7 +884,7 @@ private fun chooseFollowPlay(
         // 是否存在对手手中可反制的更高炸弹/火箭（若有，炸完未必能守住控制权）
         val canBeCountered = hasUnseenHigherBombOrRocket(b.mainRank)
         // 1. 对手距获胜很近，必须炸阻止（即使可能被反也值得一搏）
-        if (ctxMinOpponentCards <= 3) return b
+        if (ctxMinOpponentCards <= 5) return b
         // 2. 出炸后剩余手牌若成一整手，炸完可收尾（前提：对方无反制炸弹时才稳）
         val remaining = hand.filter { c -> b.cards.none { it.id == c.id } }
         if (!canBeCountered && remaining.isNotEmpty() && remaining.size <= 5 &&
@@ -905,10 +926,10 @@ private fun chooseFollowPlay(
         val pairs = plan.filter { it.type == CardType.PAIR && !isControlRank(it.mainRank) }
         val singles = plan.filter { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
         if (Math.random() < 0.5 && pairs.isNotEmpty()) {
-            return pairs.firstOrNull { it.mainRank >= 9 } ?: pairs.minByOrNull { it.mainRank }
+            return pairs.firstOrNull { it.mainRank in 9..13 } ?: pairs.minByOrNull { it.mainRank }
         }
         if (singles.isNotEmpty()) {
-            return singles.firstOrNull { it.mainRank >= 9 } ?: singles.minByOrNull { it.mainRank }
+            return singles.firstOrNull { it.mainRank in 9..13 } ?: singles.minByOrNull { it.mainRank }
         }
         return null
     }
@@ -1021,7 +1042,7 @@ private fun chooseFollowPlay(
         hand: List<Card>,
         validPlays: List<CardGroup>
     ): CardGroup? {
-        if (ctxMinOpponentCards > 4 || hand.size > 8) return null
+        if (ctxMinOpponentCards > 4 || hand.size > 12) return null
         if (hasUnseenBombOrRocket()) return null
         val candidates = validPlays
             .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
@@ -1056,18 +1077,9 @@ private fun chooseFollowPlay(
      */
     private fun hasUnseenHigherBombOrRocket(myBombRank: Int): Boolean {
         if (ctxUnseenCounts.size < 18) return false
-        // 火箭判断：检查主要对手是否可能持有双王
-        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1) {
-            if (ctxPrimaryOpponent >= 0 && ctxPerPlayerPlayed.size > ctxPrimaryOpponent) {
-                // 主要对手必须至少2手才能同时持双王
-                val primaryCount = if (ctxTeammateCardCount < 0) ctxMinOpponentCards else ctxMinOpponentCards
-                // 引导主要对手能容下双王
-                if (primaryCount >= 2) return true
-                // 地主视角需要检测另一对手
-                if (ctxRole == PlayerRole.LANDLORD && ctxTeammateIndex >= 0) {
-                    if (ctxTeammateCardCount >= 2) return true
-                }
-            }
+        // 火箭判断：若双王unseen，任一对手手牌 >= 2 即可能持火箭
+        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && ctxMaxOpponentCards >= 2) {
+            return true
         }
         for (r in (myBombRank + 1)..15) {
             if (ctxUnseenCounts[r] == 4) return true
@@ -1081,13 +1093,9 @@ private fun chooseFollowPlay(
      */
     private fun hasUnseenBombOrRocket(): Boolean {
         if (ctxUnseenCounts.size < 18) return false
-        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1) {
-            // 主要对手至少需2卡方能持火箭
-            if (ctxMinOpponentCards >= 2) return true
-            if (ctxRole == PlayerRole.LANDLORD && ctxTeammateCardCount < 0) {
-                // second farmer cardhen back
-                if (ctxTeammateCardCount >= 2) return true
-            }
+        // 双王 unseen 且任一对手有 >=2 手牌可容火箭
+        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && ctxMaxOpponentCards >= 2) {
+            return true
         }
         for (r in 3..15) if (ctxUnseenCounts[r] == 4) return true
         return false
