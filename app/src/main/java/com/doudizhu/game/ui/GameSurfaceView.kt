@@ -213,27 +213,32 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 按钮轻触反馈（按下，偏轻量） */
     private fun hapticButtonPress() {
-        vibrate(15, 60)
+        vibrate(30, 120)
     }
 
     /** 按钮释放反馈（弱于按下，体现按键回弹） */
     private fun hapticButtonRelease() {
-        vibrate(10, 40)
+        vibrate(20, 80)
     }
 
     /** 选牌反馈（点击选中） */
     private fun hapticCardSelect() {
-        vibrate(25, 80)
+        vibrate(25, 150)
     }
 
     /** 取消选牌反馈（时长/强度区别于选中，便于区分） */
     private fun hapticCardDeselect() {
-        vibrate(18, 50)
+        vibrate(25, 100)
     }
 
     /** 滑动加选反馈（每张轻触） */
     private fun hapticSwipeCard() {
-        vibrate(12, 50)
+        vibrate(15, 70)
+    }
+
+    /** 按钮动作确认反馈（叫分/出牌/不出/提示成功时的明确振动） */
+    private fun hapticActionConfirm() {
+        vibrate(35, 200)
     }
 
     /** 播放出牌音效 */
@@ -495,12 +500,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     // 合法出牌，清空桌面并出牌
                     clearAllPlayedCards()
                     playCardSound()
+                    hapticActionConfirm()
                     gameEngine.humanPlay(selectedCards)
                 } else {
                     showError("请先选择要出的牌", 1500)
                 }
             }
-            action == "pass" -> gameEngine.humanPass()
+            action == "pass" -> {
+                hapticActionConfirm()
+                gameEngine.humanPass()
+            }
             action == "hint" -> {
                 val hint = gameEngine.getHint()
                 if (hint != null) {
@@ -510,18 +519,21 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         val idx = hand.indexOfFirst { it.id == card.id }
                         if (idx >= 0) gameEngine.selectedCardIndices.add(idx)
                     }
-                    playTone(ToneGenerator.TONE_PROP_ACK, 50)
+playTone(ToneGenerator.TONE_PROP_ACK, 50)
+                    hapticActionConfirm()
                 } else {
                     showError("没有能出的牌", 1500)
                 }
                 refresh()
             }
             action.startsWith("bid_") -> {
+                hapticActionConfirm()
                 gameEngine.humanBid(action.removePrefix("bid_").toInt())
                 playTone(ToneGenerator.TONE_PROP_ACK, 50)
             }
             action == "restart" -> {
                 clearAllPlayedCards()
+                hapticActionConfirm()
                 gameEngine.startNewGame()
             }
         }

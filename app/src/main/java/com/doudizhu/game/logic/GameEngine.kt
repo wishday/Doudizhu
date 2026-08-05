@@ -57,6 +57,9 @@ class GameEngine {
     /** 当前选中的手牌索引集合（CopyOnWrite：绘制线程与UI线程并发读写安全） */
     val selectedCardIndices = java.util.concurrent.CopyOnWriteArraySet<Int>()
 
+    /** 3 位玩家各 rank 已打出张数（仅凭公开出牌记录推算，不做不可见推断） */
+    private val playedByPlayer: Array<IntArray> = Array(3) { IntArray(18) }
+
     /**
      * 开始新游戏
      */
@@ -67,6 +70,8 @@ class GameEngine {
             it.role = PlayerRole.FARMER
             it.bidScore = 0
         }
+        // 清零出牌记录
+        playedByPlayer.forEach { it.fill(0) }
         selectedCardIndices.clear()
 
         // 重置计分
@@ -238,6 +243,9 @@ class GameEngine {
             player.handCards.removeIf { it.id == card.id }
         }
 
+        // 记录每 rank 已打出张数（用于对手高牌推演）
+        cards.forEach { playedByPlayer[playerIndex][it.rank]++ }
+
         // 更新状态
         val nextPlayer = stateMachine.processPlay(playerIndex, group)
         selectedCardIndices.clear()
@@ -292,8 +300,7 @@ class GameEngine {
 
             // 计算队友手牌数（农民时，仅凭公开出牌记录推导）
             val teammateCount = if (player.role == PlayerRole.FARMER) {
-                val teammate = players.firstOrNull { it.index != playerIndex && it.role == PlayerRole.FARMER }
-                teammate?.let { legalCardCount(it.index) } ?: 0
+                getCardCount(getTeammateIndex(playerIndex))
             } else 0
 
             val decision = AIDecision.decide(
@@ -302,7 +309,10 @@ class GameEngine {
                 myIndex = playerIndex,
                 opponentCardCounts = getOpponentCardCounts(playerIndex),
                 landlordIndex = stateMachine.landlordIndex,
-                unseenCounts = getUnseenRankCounts(playerIndex)
+                unseenCounts = getUnseenRankCounts(playerIndex),
+                perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
+                primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
+                teammateIndex = getTeammateIndex(playerIndex)
             )
 
             // 本轮首家（mustPlay）时 AI 必须出牌，不允许跳过
@@ -358,7 +368,7 @@ class GameEngine {
         return (base - played).coerceAtLeast(0)
     }
 
-    /**
+/**
      * 获取 AI 未见的各点数剩余张数（仅凭合法信息推导）
      * 推导方式：54张牌中每个rank的总数 - 自己手牌中该rank张数 - 已打出的该rank张数
      * = 另外两位玩家手牌中该rank的张数（可被合法精确推导）
@@ -378,6 +388,39 @@ class GameEngine {
         }
         return counts
     }
+
+    /**
+     * 获取指定玩家已打出的每 rank 张数（用于对手高牌精确推演）
+     * @return IntArray[18]
+     */
+    fun getPerPlayed(playerIndex: Int): IntArray = playedByPlayer[playerIndex].clone()
+
+    /**
+     * 获取我方视角下的队友索引：
+     *  - 地主返回 -1
+     *  - 农民返回「非我且非地主的玩家」
+     */
+    fun getTeammateIndex(myIndex: Int): Int {
+        if (players[myIndex].role != PlayerRole.FARMER) return -1
+        val landlord = stateMachine.landlordIndex
+        return (0..2).firstOrNull { it != myIndex && it != landlord } ?: -1
+    }
+
+    /**
+     * 获取我方的主要对手索引：
+     *  - 农民为地主索引
+     *  - 地主为右手农民索引（简化，取轮转下一位）
+     */
+    fun getPrimaryOpponentIndex(myIndex: Int): Int {
+        if (stateMachine.landlordIndex < 0) return -1
+        if (players[myIndex].role == PlayerRole.FARMER) return stateMachine.landlordIndex
+        return (myIndex + 1) % 3
+    }
+
+    /**
+     * 获取某个玩家的合法剩余手牌数
+     */
+    fun getCardCount(index: Int): Int = legalCardCount(index)
 
     /**
      * 获取AI提示的出牌建议（给人类玩家用）
