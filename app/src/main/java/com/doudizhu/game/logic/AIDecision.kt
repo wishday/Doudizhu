@@ -766,7 +766,7 @@ private fun chooseFollowPlay(
         fun takeCards(r: Int, n: Int): List<Card> {
             val pool = cardsByRank.getValue(r)
             val taken = pool.take(n)
-            cardsByRank[r] = pool.drop(n)
+            cardsByRank[r] = pool.drop(n).toMutableList()
             return taken
         }
 
@@ -843,7 +843,7 @@ private fun chooseFollowPlay(
         counts: MutableMap<Int, Int>,
         excludeRank: Int,
         need: Int,
-        cardsByRank: MutableMap<Int, List<Card>>,
+        cardsByRank: MutableMap<Int, MutableList<Card>>,
         excludeControl: Boolean
     ): Kicker? {
         val entry = counts.entries.firstOrNull {
@@ -851,7 +851,7 @@ private fun chooseFollowPlay(
         } ?: return null
         val pool = cardsByRank.getValue(entry.key)
         val taken = pool.take(need)
-        cardsByRank[entry.key] = pool.drop(need)
+        cardsByRank[entry.key] = pool.drop(need).toMutableList()
         return Kicker(entry.key, taken)
     }
 
@@ -860,7 +860,7 @@ private fun chooseFollowPlay(
      */
     private fun extractRuns(
         counts: MutableMap<Int, Int>,
-        cardsByRank: MutableMap<Int, List<Card>>,
+        cardsByRank: MutableMap<Int, MutableList<Card>>,
         m: Int,
         minLen: Int,
         type: CardType
@@ -877,7 +877,7 @@ private fun chooseFollowPlay(
                     val rk = ranks[k]
                     val pool = cardsByRank.getValue(rk)
                     runCards.addAll(pool.take(m))
-                    cardsByRank[rk] = pool.drop(m)
+                    cardsByRank[rk] = pool.drop(m).toMutableList()
                 }
                 result.add(CardGroup(type, ranks[i], j - i + 1, runCards))
                 for (k in i..j) {
