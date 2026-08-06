@@ -275,9 +275,12 @@ object AIDecision {
             if (maxSingle != null) return maxSingle
         }
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
-        val best = candidates.minWithOrNull(
+        // 残局领出：先甩非控牌，保留2/王后收尾。不能按 feedDanger 择优——
+        // 控牌不可被压 feedDanger 恒为0，会领出就甩掉大王。故选剩余手数最少、点数最小的非控出法
+        val shed = candidates.filter { !isControlRank(it.mainRank) }
+        val pool = if (shed.isNotEmpty()) shed else candidates
+        val best = pool.minWithOrNull(
             compareBy(
-                { feedDanger(it) },
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { it.mainRank }
             )
@@ -597,9 +600,10 @@ object AIDecision {
     private fun canFinishGuaranteed(hand: List<Card>, validPlays: List<CardGroup>): CardGroup? {
         if (ctxMinOpponentCards > 4 || hand.size > 12) return null
         if (hasUnseenBombOrRocket()) return null
+        // 非控牌优先，避免用大王兜底冲完时白白甩掉控牌（控牌最后收尾同样必胜）
         val candidates = validPlays
             .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
-            .sortedBy { feedDanger(it) }
+            .sortedWith(compareBy({ isControlRank(it.mainRank) }, { feedDanger(it) }))
         for (c in candidates) {
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
             if (remaining.isEmpty()) return c
