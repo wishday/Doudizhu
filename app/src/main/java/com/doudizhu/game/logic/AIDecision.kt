@@ -401,17 +401,26 @@ object AIDecision {
                     if (!riskyToFeed) return lead
                 }
             } else if (teammateCardCount == 2) {
-                // 队友剩2张：出大牌帮顶（同型内取最大）
-                val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
-                if (bigPlays.isNotEmpty()) {
-                    return pickSinglePairBest(bigPlays, max = true)!!
-                }
+                // 队友剩2张（大概率是对子）：安全性评估后出牌
+                // 优先出对子（队友也是对子就能接走），其次出单张；不用盲目最大
+                val pair = plan.firstOrNull { it.type == CardType.PAIR }
+                if (pair != null && feedDanger(pair) <= 3) return pair
+                val single = plan.firstOrNull { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
+                    ?: plan.firstOrNull { it.type == CardType.SINGLE }
+                if (single != null) return single
             } else {
-                // 队友剩3张：出大单张/对子帮顶，为队友铺垫
-                val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
-                if (bigPlays.isNotEmpty()) {
-                    return pickSinglePairBest(bigPlays, max = true)!!
+                // 队友剩3张：出中位单张/对子帮顶，不用盲目最大
+                val safe = plan.filter {
+                    (it.type == CardType.SINGLE || it.type == CardType.PAIR) &&
+                        !isControlRank(it.mainRank) && leadThreat(it) <= 5
                 }
+                if (safe.isNotEmpty()) {
+                    val best = safe.maxByOrNull { it.mainRank }
+                        ?: safe.minByOrNull { it.mainRank }!!
+                    return best
+                }
+                val anySp = plan.firstOrNull { it.type == CardType.SINGLE || it.type == CardType.PAIR }
+                if (anySp != null) return anySp
             }
         }
 
@@ -426,14 +435,33 @@ object AIDecision {
         if (guaranteed != null) return guaranteed
 
         if (minOpponentCards <= 5) {
-            // 若2/王等控牌全部已出（对手手里没有），则小牌也能控场，优先出最小的
-            // 但若仍有 unseen 炸弹存在，仍然应当出大牌先防守
             val controlUnseen = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
             val bombUnseen = (3..15).any { r -> r < unseenCounts.size && unseenCounts[r] == 4 }
             val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
-            if (bigPlays.isNotEmpty()) {
-                return if (controlUnseen == 0 && !bombUnseen) pickSinglePairBest(bigPlays, max = false)!!
-                else pickSinglePairBest(bigPlays, max = true)!!
+
+            if (controlUnseen == 0 && !bombUnseen) {
+                // 控牌和炸弹全无：最小的牌也能压制，直接出最小
+                if (bigPlays.isNotEmpty()) return pickSinglePairBest(bigPlays, max = false)!!
+            } else {
+                // 仍有 unseen 控牌/炸弹：采用「小牌诱饵 + 大牌回收」策略
+                // 先尝试从 plan 中找出最小的单张/对子（非控牌）作为诱饵
+                val bait = plan.firstOrNull {
+                    (it.type == CardType.SINGLE || it.type == CardType.PAIR) && !isControlRank(it.mainRank)
+                }
+                if (bait != null && leadThreat(bait) <= 3) {
+                    return bait
+                }
+                // 若没有安全的小牌诱饵，出最小可出的（保留控牌后手回收）
+                val nonControl = plan.filter {
+                    (it.type == CardType.SINGLE || it.type == CardType.PAIR) && !isControlRank(it.mainRank)
+                }
+                if (nonControl.isNotEmpty()) {
+                    return nonControl.minByOrNull(compareBy({ leadThreat(it) }, { it.mainRank }))!!
+                }
+                // 只能出控牌时，出最小的控牌
+                if (bigPlays.isNotEmpty()) {
+                    return pickSinglePairBest(bigPlays, max = false)!!
+                }
             }
         }
 
@@ -574,9 +602,19 @@ object AIDecision {
         }
 
         if (normalPlays.isNotEmpty()) {
-            // 对手快出完时，无条件出最大压制
+            // 对手快出完时，选择能压住对手的最小牌（保留大牌回收控制权）
             if (minOpponentCards <= 5) {
-                return normalPlays.maxByOrNull { it.mainRank }
+                val controlUnseen = (15..17).sumOf { r -> if (r < ctxUnseenCounts.size) ctxUnseenCounts[r] else 0 }
+                val bombUnseen = (3..15).any { r -> r < ctxUnseenCounts.size && ctxUnseenCounts[r] == 4 }
+                val sameType = normalPlays.filter { it.type == lastPlay.type }
+                return if (controlUnseen == 0 && !bombUnseen) {
+                    // 控牌炸弹全无：最小能压的即可
+                    sameType.minByOrNull { it.mainRank }
+                } else {
+                    // 仍有 unseen 控制力：用最小合规牌压制，保留大牌回收
+                    val nonControl = sameType.filter { !isControlRank(it.mainRank) }
+                    nonControl.minByOrNull { it.mainRank } ?: sameType.minByOrNull { it.mainRank }
+                }
             }
             // C. 农民跟牌安全：若跟牌必被更高同型压回且需动用控牌，非紧急时保留控牌
             val higher = if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR)
@@ -741,14 +779,12 @@ private fun chooseFollowPlay(
         val singles = candidates.filter { it.type == CardType.SINGLE }
         val pairs = candidates.filter { it.type == CardType.PAIR }
         if (max) {
-            // 取最大：对子比同 rank 单张更容易被回压（对手需同 rank 两张），
-            // 因此对子在跨 rank 比较时获得 +2 权重（对子10≈单张13≈对子12的效果）
-            return (singles + pairs).sortedWith(
-                compareBy(
-                    { it.mainRank + if (it.type == CardType.PAIR) 3 else 0 },
-                    { it.mainRank }
-                )
-            ).lastOrNull()
+            // 取最大时，优先选非控牌中的最大，其次选控牌中的最小（保留回收能力）
+            val nonControl = (singles + pairs).filter { !isControlRank(it.mainRank) }
+            if (nonControl.isNotEmpty()) {
+                return nonControl.maxByOrNull { it.mainRank }
+            }
+            return (singles + pairs).minByOrNull { it.mainRank }
         }
         val minSingle = singles.minByOrNull { it.mainRank }
         val minPair = pairs.minByOrNull { it.mainRank }
