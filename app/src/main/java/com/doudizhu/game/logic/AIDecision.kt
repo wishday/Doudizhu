@@ -291,11 +291,9 @@ object AIDecision {
             return validPlays.first()
         }
 
-        // B. 结构牌优先：甩掉多张垃圾，先甩威胁最低的
-        val structures = plan.filter { isStructure(it) }
-        if (structures.isNotEmpty()) {
-            return structures.minWithOrNull(compareBy({ feedDanger(it) }, { it.mainRank }))!!
-        }
+        // B. 结构牌优先：枚举拆分变体（短顺子/短连对/飞机/三带），
+        //    选「出完剩余手数最少 + 威胁最低」的一手，减少零散单张
+        chooseStructureLead(hand)?.let { return it }
 
         // C. 最小非控单张/对子作诱饵（保留2/王后手回收）
         val bait = plan.filter {
@@ -316,6 +314,95 @@ object AIDecision {
         else -> false
     }
 
+    /**
+     * 结构牌领出择优：
+     * 枚举长顺子/长连对/长飞机的所有「拆分变体」及三带，计算每种出完后的「剩余手数」，
+     * 选剩余手数最少、威胁最低的组合。目标是让零散小牌尽量被结构/带牌吸收，
+     * 而不是一味追求一次甩出单张最多（可能反而在剩一堆小单张）。
+     */
+    private fun chooseStructureLead(hand: List<Card>): CardGroup? {
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        val bombRanks = counts.filterValues { it >= 4 }.keys
+        val candidates = mutableListOf<CardGroup>()
+
+        // 顺子（3..14，避开炸弹 rank，避免拆炸弹）
+        val singleRanks = counts.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
+        addRunVariants(hand, singleRanks, 1, 5, CardType.STRAIGHT, candidates)
+        // 连对（>=3连）
+        val pairRanks = counts.filterValues { it >= 2 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
+        addRunVariants(hand, pairRanks, 2, 3, CardType.STRAIGHT_PAIR, candidates)
+        // 飞机（>=2连）
+        val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
+        addRunVariants(hand, tripleRanks, 3, 2, CardType.PLANE, candidates)
+
+        // 三带一/三带二/三张：用非控最小 kicker 吸收零散小牌
+        for (r in tripleRanks) {
+            val three = hand.filter { it.rank == r }.take(3)
+            val pairKick = counts.entries
+                .filter { it.key != r && it.key !in bombRanks && it.value >= 2 }
+                .minByOrNull { entry -> rankOf(entry.key) }
+            if (pairKick != null) {
+                val kickers = hand.filter { c -> c.rank == pairKick.key }.take(2)
+                candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
+            } else {
+                val singleKick = counts.entries
+                    .filter { it.key != r && it.key !in bombRanks && it.value >= 1 }
+                    .minByOrNull { entry -> rankOf(entry.key) }?.key
+                    ?: counts.entries.firstOrNull { it.key != r && it.key !in bombRanks }?.key
+                if (singleKick != null) {
+                    val kick = hand.filter { c -> c.rank == singleKick }.take(1).firstOrNull()
+                    if (kick != null) candidates.add(CardGroup(CardType.TRIPLE_ONE, r, 1, three + kick))
+                } else {
+                    candidates.add(CardGroup(CardType.TRIPLE, r, 1, three))
+                }
+            }
+        }
+
+        if (candidates.isEmpty()) return null
+
+        // 评估：剩余手数最少优先，其次 feedDanger，其次主 rank
+        return candidates.minWithOrNull(
+            compareBy(
+                { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
+                { feedDanger(it) },
+                { it.mainRank }
+            )
+        )
+    }
+
+    /** 生成某类型连通段的所有长度变体（如7连顺子 → 所有5/6/7连子串） */
+    private fun addRunVariants(
+        hand: List<Card>,
+        ranks: List<Int>,
+        m: Int,
+        minLen: Int,
+        type: CardType,
+        out: MutableList<CardGroup>
+    ) {
+        if (ranks.size < minLen) return
+        var i = 0
+        while (i < ranks.size) {
+            var j = i
+            while (j + 1 < ranks.size && ranks[j + 1] == ranks[j] + 1) j++
+            val segLen = j - i + 1
+            if (segLen >= minLen) {
+                for (len in minLen..segLen) {
+                    for (start in i..(j - len + 1)) {
+                        val subRanks = (start until start + len).toList()
+                        val cards = subRanks.flatMap { r -> hand.filter { it.rank == r }.take(m) }
+                        if (cards.size == len * m) {
+                            out.add(CardGroup(type, ranks[start], len, cards))
+                        }
+                    }
+                }
+            }
+            i = j + 1
+        }
+    }
+
+    /** 出牌优先级排序：先非控小牌（利于当诱饵/吸收），控牌(2/王)殿后 */
+    private fun rankOf(rank: Int): Int = if (isControlRank(rank)) 1000 + rank else rank
+
     // ==================== 跟牌 ====================
 
     private fun normalFollow(
@@ -335,9 +422,9 @@ object AIDecision {
             return fullHand
         }
 
-        // 1. 队友出的牌：农民绝不压队友
+        // 1. 队友出的牌：大牌不压 | 快赢接管 | 否则小牌顶着消耗
         if (role == PlayerRole.FARMER && isTeammate(lastPlayerIndex, myIndex, role, landlordIndex)) {
-            return null
+            return shouldInterceptTeammate(hand, validPlays, lastPlay)
         }
 
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
@@ -390,6 +477,38 @@ object AIDecision {
         if (lastPlayerIndex < 0 || myIndex < 0) return false
         if (lastPlayerIndex == myIndex) return false
         return lastPlayerIndex != landlordIndex
+    }
+
+    /**
+     * 队友出牌时的农民应对策略：
+     *   A. 队友出大牌（mainRank >= K）→ 坚决不压，队友很可能有信心冲完
+     *   B. 地主快赢（手牌 <= 4）且我能接管清完 → 用最大牌接管后连续打完
+     *   C. 其他 → 用小牌顶着消耗地主，同时出掉手上零散牌（不拆大牌组）
+     */
+    private fun shouldInterceptTeammate(
+        hand: List<Card>,
+        validPlays: List<CardGroup>,
+        lastPlay: CardGroup
+    ): CardGroup? {
+        // A. 队友出大牌：坚决不压
+        if (lastPlay.mainRank >= 13) return null
+
+        val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
+        if (sameType.isEmpty()) return null
+
+        // B. 地主快赢且我能接管清完 → 用最大牌接管
+        if (ctxMinOpponentCards <= 4) {
+            val takeover = sameType.maxByOrNull { it.mainRank }
+            if (takeover != null) {
+                val remaining = hand.filter { c -> takeover.cards.none { it.id == c.id } }
+                // 接管后能在 5 轮内清空，或剩余牌数极少（一手内走完）
+                val turns = estimateHandTurns(remaining)
+                if (turns <= 5 || remaining.size <= 3) return takeover
+            }
+        }
+
+        // C. 小牌顶着消耗地主 + 出掉零碎牌
+        return sameType.minByOrNull { it.mainRank }
     }
 
     // ==================== 炸弹纪律 ====================
