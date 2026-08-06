@@ -184,10 +184,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (toneGenerator == null) {
                 toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
             }
-            // Android 12+ (API 31) 使用 VibratorManager，低版本使用 Vibrator
+            // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-                vm?.defaultVibrator
+                vm?.defaultVibrator ?: @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             } else {
                 @Suppress("DEPRECATION")
                 context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
@@ -203,7 +204,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 播放振动反馈（支持设置振幅） */
-    private fun vibrate(durationMs: Long = 30, amplitude: Int = VibrationEffect.DEFAULT_AMPLITUDE) {
+    private fun vibrate(durationMs: Long = 30, amplitude: Int = 200) {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
