@@ -456,7 +456,7 @@ object AIDecision {
                     (it.type == CardType.SINGLE || it.type == CardType.PAIR) && !isControlRank(it.mainRank)
                 }
                 if (nonControl.isNotEmpty()) {
-                    return nonControl.minByOrNull(compareBy({ leadThreat(it) }, { it.mainRank }))!!
+                    return nonControl.minWithOrNull(compareBy({ leadThreat(it) }, { it.mainRank }))!!
                 }
                 // 只能出控牌时，出最小的控牌
                 if (bigPlays.isNotEmpty()) {
