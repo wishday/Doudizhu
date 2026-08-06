@@ -478,6 +478,8 @@ object CardRuleEngine {
         for (startIdx in availableRanks.indices) {
             val startRank = availableRanks[startIdx]
             if (startRank <= minRank) continue
+            // 顺子仅3~14，终点超过A(14)则2/王不参与，直接跳过
+            if (startRank + length - 1 > 14) continue
             // 检查从startRank开始是否有length个连续rank
             val seqRanks = mutableListOf<Int>()
             for (r in startRank until startRank + length) {
@@ -509,6 +511,8 @@ object CardRuleEngine {
         for (startIdx in pairRanks.indices) {
             val startRank = pairRanks[startIdx]
             if (startRank <= minRank) continue
+            // 连对仅3~14，终点超过A(14)则2/王不参与，直接跳过
+            if (startRank + length - 1 > 14) continue
             val seqRanks = mutableListOf<Int>()
             for (r in startRank until startRank + length) {
                 if (countMap.containsKey(r) && countMap[r]!! >= 2) {
@@ -539,6 +543,8 @@ object CardRuleEngine {
         for (startIdx in tripleRanks.indices) {
             val startRank = tripleRanks[startIdx]
             if (startRank <= lastPlay.mainRank) continue
+            // 飞机仅3~14，终点超过A(14)则2/王不参与，直接跳过
+            if (startRank + planeLen - 1 > 14) continue
             val seqRanks = mutableListOf<Int>()
             for (r in startRank until startRank + planeLen) {
                 if (countMap.containsKey(r) && countMap[r]!! >= 3) {
