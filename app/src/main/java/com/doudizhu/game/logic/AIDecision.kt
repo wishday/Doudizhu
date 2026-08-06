@@ -33,7 +33,11 @@ object AIDecision {
 
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
 
-    /** 该组合是否会拆散手中的炸弹（用到4张同rank的牌，但本身不是炸弹/火箭）或王炸（双王） */
+    /**
+     * 该组合是否会严重破坏手中的炸弹（拆后只剩1张/无法复用）或王炸（双王）。
+     * 拆1张当单张（剩3张可当三张/三带）或拆2张当对子（剩对子）代价低，不视为破坏；
+     * 拆3张当三张（剩1张废牌）炸弹彻底报废，才视为破坏。
+     */
     private fun breaksBomb(group: CardGroup, hand: List<Card>): Boolean {
         if (group.type == CardType.BOMB || group.type == CardType.ROCKET) return false
         val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
@@ -43,7 +47,13 @@ object AIDecision {
         if (hasSmallJoker && hasBigJoker) {
             if (group.cards.any { it.rank == 16 || it.rank == 17 }) return true
         }
-        return group.cards.any { counts[it.rank] == 4 }
+        val used = group.cards.groupBy { it.rank }.mapValues { it.value.size }
+        for ((rank, n) in used) {
+            val own = counts[rank] ?: 0
+            // 4张全留下时才构成炸弹；用了3张=炸完剩1张废牌，彻底报废
+            if (own == 4 && n == 3) return true
+        }
+        return false
     }
 
     /**
@@ -895,26 +905,32 @@ object AIDecision {
         return danger
     }
 
-    /** 绝对不可被压：依据 unseen 推导当前通吃 */
+    /** 绝对不可被压：依据 unseen 推导当前通吃（农民视角折减队友大牌威胁） */
     private fun isUnbeatable(group: CardGroup): Boolean {
         return when (group.type) {
-            CardType.SINGLE -> (group.mainRank + 1..17).none { r -> r < ctxUnseenCounts.size && ctxUnseenCounts[r] > 0 }
-            CardType.PAIR -> (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && ctxUnseenCounts[r] >= 2 }
+            CardType.SINGLE -> (group.mainRank + 1..17).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) > 0 }
+            CardType.PAIR -> (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) >= 2 }
             CardType.STRAIGHT -> maxUnseenRun(group.mainRank, 1) < group.length
             CardType.STRAIGHT_PAIR -> maxUnseenRun(group.mainRank, 2) < group.length
             CardType.PLANE, CardType.PLANE_SINGLE, CardType.PLANE_PAIR ->
                 maxUnseenRun(group.mainRank, 3) < group.length
             CardType.TRIPLE, CardType.TRIPLE_ONE, CardType.TRIPLE_TWO ->
-                (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && ctxUnseenCounts[r] >= 3 }
+                (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) >= 3 }
             else -> false
         }
+    }
+
+    /** 对手视角的威胁张数：农民时按对手占比折减，队友大牌不算威胁（地主视角全额） */
+    private fun unseenThreat(r: Int): Int {
+        if (r >= ctxUnseenCounts.size) return 0
+        return scaledThreat(ctxUnseenCounts[r])
     }
 
     private fun maxUnseenRun(minRank: Int, needPerRank: Int): Int {
         var best = 0
         var cur = 0
         for (r in 3..14) {
-            if (r > minRank && r < ctxUnseenCounts.size && ctxUnseenCounts[r] >= needPerRank) {
+            if (r > minRank && r < ctxUnseenCounts.size && unseenThreat(r) >= needPerRank) {
                 cur++
                 if (cur > best) best = cur
             } else {

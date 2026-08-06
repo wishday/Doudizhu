@@ -395,6 +395,9 @@ object CardRuleEngine {
         // 连对（只生成最短3连对）
         findShortStraightPairs(sorted, countMap).forEach { results.add(it) }
 
+        // 飞机（纯飞机 + 带单翼/双翼，翼用最小非飞机散牌）
+        findFreePlanes(sorted, countMap).forEach { results.add(it) }
+
         return results
     }
 
@@ -464,6 +467,48 @@ object CardRuleEngine {
     }
 
     /**
+     * 自由出牌查找飞机（纯飞机 + 带单翼/双翼）
+     * 只生成每个连续段的最短2连起，不滑动窗口，保持候选量可控
+     */
+    private fun findFreePlanes(sorted: List<Card>, countMap: Map<Int, Int>): List<CardGroup> {
+        val results = mutableListOf<CardGroup>()
+        val tripleRanks = countMap.filter { it.value >= 3 }.keys.filter { it in 3..14 }.sorted()
+        var i = 0
+        while (i < tripleRanks.size) {
+            var j = i
+            while (j + 1 < tripleRanks.size && tripleRanks[j + 1] == tripleRanks[j] + 1) j++
+            val runLen = j - i + 1
+            if (runLen >= 2) {
+                for (len in 2..runLen) {
+                    val planeRanks = (0 until len).map { tripleRanks[i + it] }
+                    val planeCards = planeRanks.flatMap { r -> sorted.filter { it.rank == r }.take(3) }
+                    results.add(CardGroup(CardType.PLANE, planeRanks[0], len, planeCards))
+                    val usedRanks = planeRanks.toSet()
+                    // 带单翼：取 len 张最小非飞机 rank 散牌
+                    val wingRanks = countMap.keys
+                        .filter { it !in usedRanks && it in 3..14 }
+                        .sorted()
+                        .take(len)
+                    if (wingRanks.size >= len) {
+                        val wingCards = wingRanks.map { r -> sorted.first { it.rank == r } }
+                        results.add(CardGroup(CardType.PLANE_SINGLE, planeRanks[0], len, planeCards + wingCards))
+                    }
+                    // 带双翼：取 len 对最小非飞机 rank 对子
+                    val pairWingRanks = countMap.filter { it.key !in usedRanks && it.key in 3..14 && it.value >= 2 }
+                        .keys.sorted()
+                        .take(len)
+                    if (pairWingRanks.size >= len) {
+                        val pairCards = pairWingRanks.flatMap { r -> sorted.filter { it.rank == r }.take(2) }
+                        results.add(CardGroup(CardType.PLANE_PAIR, planeRanks[0], len, planeCards + pairCards))
+                    }
+                }
+            }
+            i = j + 1
+        }
+        return results
+    }
+
+    /**
      * 查找顺子
      */
     private fun findStraights(
@@ -490,7 +535,6 @@ object CardRuleEngine {
             if (seqRanks.size >= length) {
                 val cards = seqRanks.take(length).map { r -> sorted.first { it.rank == r } }
                 results.add(CardGroup(CardType.STRAIGHT, seqRanks[0], length, cards))
-                break // 只返回第一个找到的
             }
         }
         return results
@@ -522,7 +566,6 @@ object CardRuleEngine {
             if (seqRanks.size >= length) {
                 val cards = seqRanks.take(length).flatMap { r -> sorted.filter { it.rank == r }.take(2) }
                 results.add(CardGroup(CardType.STRAIGHT_PAIR, seqRanks[0], length, cards))
-                break
             }
         }
         return results
@@ -577,7 +620,6 @@ object CardRuleEngine {
                     }
                     else -> {}
                 }
-                break
             }
         }
         return results
