@@ -34,11 +34,34 @@ object AIDecision {
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
 
     /**
-     * 该组合是否会严重破坏手中的炸弹（拆后只剩1张/无法复用）或王炸（双王）。
-     * 拆1张当单张（剩3张可当三张/三带）或拆2张当对子（剩对子）代价低，不视为破坏；
-     * 拆3张当三张（剩1张废牌）炸弹彻底报废，才视为破坏。
+     * 该组合是否拆散手中的炸弹或王炸（双王）：
+     * 正常出牌/跟牌/领出时，炸弹是宝贵的控牌武器，任何拆解（拆1张变三张、
+     * 拆2张变对子、拆3张变废牌）都视为破坏而禁止；只有 BOMB/ROCKET 本尊可用。
+     * 必胜判定等少数场景用 breaksBombForWin 放宽。
      */
     private fun breaksBomb(group: CardGroup, hand: List<Card>): Boolean {
+        if (group.type == CardType.BOMB || group.type == CardType.ROCKET) return false
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        // 王炸保护：手中有双王，但组合（非火箭）用了其中一张王
+        val hasSmallJoker = counts[16] ?: 0 > 0
+        val hasBigJoker = counts[17] ?: 0 > 0
+        if (hasSmallJoker && hasBigJoker) {
+            if (group.cards.any { it.rank == 16 || it.rank == 17 }) return true
+        }
+        val used = group.cards.groupBy { it.rank }.mapValues { it.value.size }
+        for ((rank, _) in used) {
+            val own = counts[rank] ?: 0
+            // 用了炸弹 rank 的任何一张即视为拆弹
+            if (own == 4) return true
+        }
+        return false
+    }
+
+    /**
+     * 必胜判定专用放宽版：允许为「保证赢牌」牺牲炸弹——拆1张（剩三张）或拆2张
+     * （剩对子）仍留有可复用牌组，不算破坏；仅拆3张（剩1张废牌彻底报废）与拆王炸禁止。
+     */
+    private fun breaksBombForWin(group: CardGroup, hand: List<Card>): Boolean {
         if (group.type == CardType.BOMB || group.type == CardType.ROCKET) return false
         val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
         // 王炸保护：手中有双王，但组合（非火箭）用了其中一张王
@@ -665,7 +688,7 @@ object AIDecision {
         if (hasUnseenBombOrRocket()) return null
         // 非控牌优先，避免用大王兜底冲完时白白甩掉控牌（控牌最后收尾同样必胜）
         val candidates = validPlays
-            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
+            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBombForWin(it, hand) }
             .sortedWith(compareBy({ isControlRank(it.mainRank) }, { feedDanger(it) }))
         for (c in candidates) {
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
@@ -679,7 +702,7 @@ object AIDecision {
         if (hand.isEmpty()) return true
         if (depth <= 0) return false
         val plays = CardRuleEngine.findAllValidPlays(hand, null)
-            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
+            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBombForWin(it, hand) }
         for (c in plays) {
             if (!isUnbeatable(c)) continue
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
