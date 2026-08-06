@@ -423,13 +423,29 @@ class GameEngine {
     fun getCardCount(index: Int): Int = legalCardCount(index)
 
     /**
-     * 获取AI提示的出牌建议（给人类玩家用）
+     * 获取AI建议的最优出牌组合（给人类玩家用）
+     * 复用 AI 决策引擎，按当前局面给出最优选择：
+     *  - 自由出牌：小牌诱饵/甩结构，保留大牌控制权
+     *  - 跟牌：用最小能压的牌
      */
     fun getHint(): List<Card>? {
         val hand = players[0].handCards
         val lastPlay = stateMachine.lastPlayedGroup
-        val validPlays = CardRuleEngine.findAllValidPlays(hand, lastPlay)
-        // 返回第一个合法组合
-        return validPlays.firstOrNull()?.cards
+        val decision = AIDecision.decide(
+            hand, lastPlay, players[0].difficulty, players[0].role, getCardCount(getTeammateIndex(0)),
+            lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
+            myIndex = 0,
+            opponentCardCounts = getOpponentCardCounts(0),
+            landlordIndex = stateMachine.landlordIndex,
+            unseenCounts = getUnseenRankCounts(0),
+            perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
+            primaryOpponentIndex = getPrimaryOpponentIndex(0),
+            teammateIndex = getTeammateIndex(0)
+        )
+        if (decision != null && decision.type != CardType.INVALID) {
+            return decision.cards
+        }
+        // 无最优选择时（跟牌阶段没有能压的牌），返回 null 让 UI 提示「没有能出的牌」
+        return null
     }
 }

@@ -488,11 +488,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         showError("牌型不合法，请重新选择", 2000)
                         return
                     }
-                    // 检查是否能管上家
+                    // 检查是否能管上家（用规则引擎的正规合法校验，避免炸弹/火箭误判）
                     val lastGroup = gameEngine.stateMachine.lastPlayedGroup
                     val lastPlayer = gameEngine.stateMachine.lastPlayedPlayerIndex
                     if (lastGroup != null && lastPlayer != 0) {
-                        if (com.doudizhu.game.logic.CardRuleEngine.compare(group, lastGroup) <= 0) {
+                        if (!com.doudizhu.game.logic.CardRuleEngine.isValidPlay(group, lastGroup)) {
                             showError("打不过上家的牌，请重新选择", 2000)
                             return
                         }
