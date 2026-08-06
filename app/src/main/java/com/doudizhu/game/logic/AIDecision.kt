@@ -250,9 +250,10 @@ object AIDecision {
     private fun feedTeammate(hand: List<Card>): CardGroup? {
         val plan = buildPlan(hand)
         if (ctxTeammateCardCount == 1) {
+            // 队友报单：优先出最小非控单张助攻，让队友好接走获胜
             val single = plan.firstOrNull { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
                 ?: plan.firstOrNull { it.type == CardType.SINGLE }
-            if (single != null && feedDanger(single) <= 1) return single
+            if (single != null) return single
             return null
         }
         // 剩2张：优先对子（队友是对子可直接接走），其次单张
@@ -292,8 +293,9 @@ object AIDecision {
             }
             val pair = plan.firstOrNull { it.type == CardType.PAIR }
             if (pair != null) return pair
-            val single = plan.firstOrNull { it.type == CardType.SINGLE }
-            if (single != null) return single // 只能出单张，出最小（对手只剩一张若比我大也没办法）
+            // 对手只剩1张：从大往小出最大的单张，尽量让对手接不走获胜
+            val single = plan.filter { it.type == CardType.SINGLE }.maxByOrNull { it.mainRank }
+            if (single != null) return single
             return validPlays.first()
         }
 
