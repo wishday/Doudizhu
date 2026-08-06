@@ -264,15 +264,29 @@ object AIDecision {
         return null
     }
 
+    /**
+     * 对手报单（1张）时选单张：
+     *  - 握有控牌（2/小王/大王）回收时，出最小非控单张，保留控牌最后压制（先小后大王）；
+     *  - 全控牌时留最大王最后；无控牌时出最大防被接走获胜
+     */
+    private fun leadSingleVsOneCard(validPlays: List<CardGroup>, hand: List<Card>): CardGroup? {
+        val singles = validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+        if (singles.isEmpty()) return null
+        val hasControl = hand.any { it.rank in ControlRanks }
+        val nonControl = singles.filter { !isControlRank(it.mainRank) }
+        return when {
+            hasControl && nonControl.isNotEmpty() -> nonControl.minByOrNull { it.mainRank }
+            hasControl -> singles.minByOrNull { it.mainRank }
+            else -> singles.maxByOrNull { it.mainRank }
+        }
+    }
+
     /** 残局领出（手牌 <= 5）：选「对手最难压住 + 剩余手数最少」的一手 */
     private fun endgameLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
-        // 对手报单：优先对子/结构，只能出单张时出最大，防止被接走获胜
+        // 对手报单：优先对子/结构，只能出单张时先小后大（控牌后手压制）
         if (ctxMinOpponentCards == 1) {
             validPlays.firstOrNull { it.type == CardType.PAIR }?.let { return it }
-            val maxSingle = validPlays
-                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
-                .maxByOrNull { it.mainRank }
-            if (maxSingle != null) return maxSingle
+            leadSingleVsOneCard(validPlays, hand)?.let { return it }
         }
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         val best = candidates.minWithOrNull(
@@ -301,11 +315,8 @@ object AIDecision {
             }
             val pair = plan.firstOrNull { it.type == CardType.PAIR }
             if (pair != null) return pair
-            // 对手只剩1张：从 validPlays 选真正的最大单张（含2/王），从大往小压
-            val maxSingle = validPlays
-                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
-                .maxByOrNull { it.mainRank }
-            if (maxSingle != null) return maxSingle
+            // 对手只剩1张：单张先小后大，保留控牌（2/王）最后压制回收
+            leadSingleVsOneCard(validPlays, hand)?.let { return it }
             return validPlays.first()
         }
 
