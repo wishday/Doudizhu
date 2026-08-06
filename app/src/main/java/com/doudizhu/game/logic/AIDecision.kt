@@ -58,8 +58,8 @@ object AIDecision {
 
     /**
      * 这手牌是否会拆散手上的完整牌组（对子/三张/炸弹等）：
-     * 跟牌时若用的是离散散牌（该rank原本只有1张）或完整消费一组，则 true；
-     * 若该rank原始张数>=2却只被用掉一部分（如从对子拆1张、从三张拆1/2张、拆炸弹），则 false。
+     * 只在拆完只剩 1 张散牌（无法再组成对子/三张等结构）时才算破坏；
+     * 反之从三张拆1张（剩对子仍完整）、从炸弹拆1/2张（剩三张/对子仍完整）不算拆。
      */
     private fun preservesGroups(cards: List<Card>, hand: List<Card>): Boolean {
         val orig = hand.groupBy { it.rank }.mapValues { it.value.size }
@@ -67,8 +67,7 @@ object AIDecision {
             val o = orig[card.rank] ?: 0
             if (o >= 2) {
                 val used = cards.count { it.rank == card.rank }
-                val remain = o - used
-                if (remain in 1 until o) return false
+                if (o - used == 1) return false
             }
         }
         return true
@@ -631,7 +630,11 @@ object AIDecision {
     // ==================== 炸弹纪律 ====================
 
     private fun decideBomb(bombs: List<CardGroup>, hand: List<Card>): CardGroup? {
-        val b = bombs.maxByOrNull { it.mainRank } ?: return null
+        val sorted = bombs.sortedBy { it.mainRank }
+        if (sorted.isEmpty()) return null
+        // 分级用炸：优先用最小的炸弹（保留大炸弹对付更大威胁），
+        // 但若最小的会被 unseen 更高炸弹/火箭反制，则逐级上探，最后才用最大炸弹兜底
+        val b = sorted.firstOrNull { !hasUnseenHigherBombOrRocket(it.mainRank) } ?: sorted.last()
         val canBeCountered = hasUnseenHigherBombOrRocket(b.mainRank)
         // 1. 对手距获胜很近：必须炸阻止
         if (ctxMinOpponentCards <= 2) return b
@@ -667,7 +670,7 @@ object AIDecision {
         for (c in candidates) {
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
             if (remaining.isEmpty()) return c
-            if (isUnbeatable(c) && canWinInControl(remaining, 3)) return c
+            if (isUnbeatable(c) && canWinInControl(remaining, minOf(remaining.size, 8))) return c
         }
         return null
     }
@@ -700,7 +703,7 @@ object AIDecision {
         }
         val bombs = counts.filterValues { it == 4 }.keys.sorted()
         bombs.forEach { counts.remove(it) }
-        turns += bombs.size
+        // 炸弹是控牌武器：能在被打断时强势夺回主动权，故不计入"正常出牌手数"（沉底保命牌）
 
         turns += consumeStructureRuns(counts, 3, 2)
         turns += consumeStructureRuns(counts, 2, 3)
@@ -730,7 +733,7 @@ object AIDecision {
             turns += n / 2
             if (n % 2 == 1) turns += 1
         }
-        return turns
+        return turns.coerceAtLeast(0)
     }
 
     private fun consumeStructureRuns(counts: MutableMap<Int, Int>, m: Int, minLen: Int): Int {
