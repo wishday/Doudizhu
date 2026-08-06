@@ -33,6 +33,13 @@ object AIDecision {
 
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
 
+    /** 该组合是否会拆散手中的炸弹（用到4张同rank的牌，但本身不是炸弹/火箭） */
+    private fun breaksBomb(group: CardGroup, hand: List<Card>): Boolean {
+        if (group.type == CardType.BOMB || group.type == CardType.ROCKET) return false
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        return group.cards.any { counts[it.rank] == 4 }
+    }
+
     private fun isUrgent(): Boolean =
         ctxMinOpponentCards <= 3 || ctxTeammateCardCount in 1..2
 
@@ -252,7 +259,7 @@ object AIDecision {
 
     /** 残局领出（手牌 <= 5）：选「对手最难压住 + 剩余手数最少」的一手 */
     private fun endgameLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
-        val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+        val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         val best = candidates.minWithOrNull(
             compareBy(
                 { feedDanger(it) },
@@ -333,7 +340,7 @@ object AIDecision {
             return null
         }
 
-        val sameType = validPlays.filter { it.type == lastPlay.type }
+        val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
         val nonControl = sameType.filter { !isControlRank(it.mainRank) }
         val teammateIsNext = role == PlayerRole.FARMER && myIndex >= 0 && (myIndex + 1) % 3 == ctxTeammateIndex
         val landlordPlayed = role == PlayerRole.FARMER && lastPlayerIndex == landlordIndex
@@ -418,7 +425,7 @@ object AIDecision {
         if (ctxMinOpponentCards > 4 || hand.size > 12) return null
         if (hasUnseenBombOrRocket()) return null
         val candidates = validPlays
-            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
             .sortedBy { feedDanger(it) }
         for (c in candidates) {
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }
@@ -432,7 +439,7 @@ object AIDecision {
         if (hand.isEmpty()) return true
         if (depth <= 0) return false
         val plays = CardRuleEngine.findAllValidPlays(hand, null)
-            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+            .filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         for (c in plays) {
             if (!isUnbeatable(c)) continue
             val remaining = hand.filter { card -> c.cards.none { it.id == card.id } }

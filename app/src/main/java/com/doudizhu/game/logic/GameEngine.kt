@@ -445,6 +445,17 @@ class GameEngine {
         if (decision != null && decision.type != CardType.INVALID) {
             return decision.cards
         }
+        // AI 决策返回 null（如保存炸弹不跟）但玩家手上确实有可出的牌时，
+        // 提示一个最小的合法出牌（优先非炸弹），避免误报「没有能出的牌」
+        if (lastPlay != null && lastPlay.type != CardType.INVALID) {
+            val legal = CardRuleEngine.findAllValidPlays(hand, lastPlay)
+            if (legal.isNotEmpty()) {
+                val nonBomb = legal.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+                val pick = nonBomb.minByOrNull { it.mainRank }
+                    ?: legal.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }.minByOrNull { it.mainRank }
+                if (pick != null) return pick.cards
+            }
+        }
         // 无最优选择时（跟牌阶段没有能压的牌），返回 null 让 UI 提示「没有能出的牌」
         return null
     }
