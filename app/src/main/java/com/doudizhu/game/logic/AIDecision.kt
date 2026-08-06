@@ -46,6 +46,24 @@ object AIDecision {
         return group.cards.any { counts[it.rank] == 4 }
     }
 
+    /**
+     * 这手牌是否会拆散手上的完整牌组（对子/三张/炸弹等）：
+     * 跟牌时若用的是离散散牌（该rank原本只有1张）或完整消费一组，则 true；
+     * 若该rank原始张数>=2却只被用掉一部分（如从对子拆1张、从三张拆1/2张、拆炸弹），则 false。
+     */
+    private fun preservesGroups(cards: List<Card>, hand: List<Card>): Boolean {
+        val orig = hand.groupBy { it.rank }.mapValues { it.value.size }
+        for (card in cards) {
+            val o = orig[card.rank] ?: 0
+            if (o >= 2) {
+                val used = cards.count { it.rank == card.rank }
+                val remain = o - used
+                if (remain in 1 until o) return false
+            }
+        }
+        return true
+    }
+
     private fun isUrgent(): Boolean =
         ctxMinOpponentCards <= 3 || ctxTeammateCardCount in 1..2
 
@@ -513,8 +531,12 @@ object AIDecision {
             // 非紧急：放走地主，保存控牌
         }
 
-        // 4. 普通情况：最小能压的非控牌（核心：绝不浪费大牌）
-        if (nonControl.isNotEmpty()) return nonControl.minByOrNull { it.mainRank }
+        // 4. 普通情况：优先用不拆组的离散散牌压；仅当拆组且紧急/手牌少时才拆，否则宁可放过保存结构
+        val preserving = nonControl.filter { preservesGroups(it.cards, hand) }
+        if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
+        if (nonControl.isNotEmpty() && (isUrgent() || hand.size <= 4)) {
+            return nonControl.minByOrNull { it.mainRank }
+        }
 
         // 5. 只剩控牌可跟：非紧急保存控牌
         if (sameType.isNotEmpty()) {
@@ -564,7 +586,9 @@ object AIDecision {
             }
         }
 
-        // C. 小牌顶着消耗地主 + 出掉零碎牌
+        // C. 小牌顶着消耗地主 + 出掉零碎牌：优先用不拆组的离散散牌，避免为压队友拆自家牌组
+        val preserving = sameType.filter { preservesGroups(it.cards, hand) }
+        if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
         return sameType.minByOrNull { it.mainRank }
     }
 
