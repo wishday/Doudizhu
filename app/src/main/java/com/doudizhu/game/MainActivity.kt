@@ -130,7 +130,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         runOnUiThread {
             val winner = gameEngine.players[winnerIndex]
             val roleText = if (isLandlordWin) "地主" else "农民"
-            val isHumanWin = winnerIndex == 0
+            // 玩家是地主时地主胜即赢；玩家是农民时地主败（农民胜）即赢，队友获胜同样算我方赢
+            val isHumanLandlord = gameEngine.stateMachine.landlordIndex == 0
+            val isHumanWin = isHumanLandlord == isLandlordWin
 
             // 计算本局得分
             val baseScore = gameEngine.stateMachine.currentBidScore
