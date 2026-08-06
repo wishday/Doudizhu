@@ -323,6 +323,9 @@ object AIDecision {
                 .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
                 .maxByOrNull { it.mainRank }
             if (maxSingle != null) return maxSingle
+            // 无对子且无可用最大单张：只剩炸弹时优先出整弹本尊，避免拆弹
+            return validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                ?: validPlays.first()
         }
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         // 残局领出：先甩非控牌，保留2/王后收尾。不能按 feedDanger 择优——
@@ -335,7 +338,9 @@ object AIDecision {
                 { it.mainRank }
             )
         )
-        return best ?: validPlays.first()
+        return best
+            ?: validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+            ?: validPlays.first()
     }
 
     /**
@@ -359,7 +364,9 @@ object AIDecision {
                 .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
                 .maxByOrNull { it.mainRank }
             if (maxSingle != null) return maxSingle
-            return validPlays.first()
+            // 对手报单无可用最大单张：只剩炸弹时优先出整弹本尊，避免拆弹
+            return validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                ?: validPlays.first()
         }
 
         // B. 结构牌优先：枚举拆分变体（短顺子/短连对/飞机/三带），
@@ -378,12 +385,13 @@ object AIDecision {
             return pool.minWithOrNull(compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 }))!!
         }
 
-        // D. 兜底：非控最小出牌，不白白浪费2/王
+        // D. 兜底：非控最小出牌，不白白浪费2/王（也不拆弹）
         val nonBomb = validPlays.filter {
-            it.type != CardType.BOMB && it.type != CardType.ROCKET && !isControlRank(it.mainRank)
+            it.type != CardType.BOMB && it.type != CardType.ROCKET && !isControlRank(it.mainRank) && !breaksBomb(it, hand)
         }
         return (nonBomb.minByOrNull { it.mainRank }
-            ?: validPlays.firstOrNull { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+            ?: validPlays.firstOrNull { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
+            ?: validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
             ?: validPlays.first())
     }
 
