@@ -378,9 +378,35 @@ object AIDecision {
         // 连对（>=3连）
         val pairRanks = counts.filterValues { it >= 2 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
         addRunVariants(hand, pairRanks, 2, 3, CardType.STRAIGHT_PAIR, candidates)
-        // 飞机（>=2连）
+        // 飞机（>=2连）：纯飞机 + 带单翼/双翼，翼用最小非控散牌吸收零散小牌
         val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
-        addRunVariants(hand, tripleRanks, 3, 2, CardType.PLANE, candidates)
+        val planes = mutableListOf<CardGroup>()
+        addRunVariants(hand, tripleRanks, 3, 2, CardType.PLANE, planes)
+        for (plane in planes) {
+            candidates.add(plane)
+            val usedRanks = plane.cards.map { it.rank }.toSet()
+            val wingLen = plane.length
+            // 可用作翼的候选：非控、非炸弹、非飞机自身 rank
+            val wingRanks = counts.entries
+                .filter { it.key !in usedRanks && it.key !in bombRanks && !isControlRank(it.key) }
+                .sortedBy { it.key }
+            // 带单翼：优先用纯散牌（count==1）作翼吸收零散小牌，不足再从最小对子拆单张补齐
+            if (wingRanks.size >= wingLen) {
+                val pureSingles = wingRanks.filter { it.value == 1 }.take(wingLen)
+                val wings = if (pureSingles.size >= wingLen) {
+                    pureSingles.map { (rank, _) -> hand.first { it.rank == rank } }
+                } else {
+                    wingRanks.take(wingLen).flatMap { (rank, _) -> hand.filter { it.rank == rank }.take(1) }
+                }
+                candidates.add(CardGroup(CardType.PLANE_SINGLE, plane.mainRank, wingLen, plane.cards + wings))
+            }
+            // 带双翼：取 wingLen 个最小非控对子
+            val pairWingRanks = wingRanks.filter { it.value >= 2 }.take(wingLen)
+            if (pairWingRanks.size >= wingLen) {
+                val pairWings = pairWingRanks.flatMap { (rank, _) -> hand.filter { it.rank == rank }.take(2) }
+                candidates.add(CardGroup(CardType.PLANE_PAIR, plane.mainRank, wingLen, plane.cards + pairWings))
+            }
+        }
 
         // 三带一/三带二/三张：用非控最小 kicker 吸收零散小牌
         for (r in tripleRanks) {
