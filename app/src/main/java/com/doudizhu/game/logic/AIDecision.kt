@@ -207,6 +207,12 @@ object AIDecision {
         val turns = estimateHandTurns(hand)
         score += (20 - turns * 2).coerceAtLeast(0)
 
+        // 7. 缺控牌惩罚：缺少大牌容易被对手压制
+        val controlsAboveA = twos + smallJoker + bigJoker
+        if (controlsAboveA == 0 && aces == 0 && bombs == 0) score -= 14
+        else if (controlsAboveA == 0 && aces == 0) score -= 7
+        else if (controlsAboveA == 0) score -= 4
+
         return score.coerceIn(0, 100)
     }
 
@@ -467,11 +473,12 @@ object AIDecision {
             }
         }
 
-        // D. 地主钓牌：手牌较优（较大且紧凑）且无必杀压力时，偶尔出中位诱饵勾出对手的2/王
-        // 钓牌时机：手牌较多（>10张）时有空间耐心等待，且手牌紧凑（计划手数少）；
-        // 仅在不落后时钓牌，落后时应专注甩牌减负而非试探
+        // D. 地主钓牌：手牌较优（较大且紧凑）且对手仍有未见控牌时，
+        // 偶尔出中位诱饵勾出对手的 2/王。每一轮最多一次钓牌尝试
         val landlordGap = if (role == PlayerRole.LANDLORD) hand.size - minOpponentCards else 0
-        if (role == PlayerRole.LANDLORD && hand.size > 10 && landlordGap < 6 && plan.size <= 6 && Math.random() < 0.30) {
+        val unseenControls = (15..17).sumOf { r -> if (r < ctxUnseenCounts.size) ctxUnseenCounts[r] else 0 }
+        if (role == PlayerRole.LANDLORD && hand.size > 10 && landlordGap < 6 && plan.size <= 6 &&
+            unseenControls > 0 && Math.random() < 0.25) {
             val bait = pickBait(plan)
             if (bait != null) return bait
         }
@@ -554,19 +561,15 @@ object AIDecision {
         // D. 位置修正：地主刚出完且队友（介于地主与我之间）已过牌、快出完时，
         // 不应无条件过牌送地主免费领出，而应尽量接过控制（交由下方普通跟牌/深度合作逻辑决定）
         if (role == PlayerRole.FARMER && landlordIndex == lastPlayerIndex) {
-            // 深度合作：若我有便宜非控牌可接过，主动接过保护队友好走
-            if (minOpponentCards > 3) {
-                val cheap = normalPlays.filter { it.type == lastPlay.type && !isControlRank(it.mainRank) }
-                if (cheap.isNotEmpty()) {
-                    return chooseFollowPlay(cheap, lastPlay, hand)
-                }
-            }
-            // 队友临近报单（剩1~2张）：即使要动用控牌也值得接过控制，为队友好走创造条件
             if (teammateCardCount in 1..2) {
                 val anyFollow = normalPlays.filter { it.type == lastPlay.type }
                 if (anyFollow.isNotEmpty()) {
                     return chooseFollowPlay(anyFollow, lastPlay, hand)
                 }
+            }
+            val cheap = normalPlays.filter { it.type == lastPlay.type && !isControlRank(it.mainRank) }
+            if (cheap.isNotEmpty()) {
+                return chooseFollowPlay(cheap, lastPlay, hand)
             }
         }
 
@@ -724,7 +727,7 @@ private fun chooseFollowPlay(
     private fun scaledThreat(count: Int): Int {
         if (ctxRole != PlayerRole.FARMER) return count
         val total = ctxMinOpponentCards + ctxTeammateCardCount
-        if (total <= 0) return count
+        if (total <= 0) return 0
         if (count <= 0) return 0
         val scaled = count * ctxMinOpponentCards.toFloat() / total
         return Math.round(scaled)
@@ -750,9 +753,8 @@ private fun chooseFollowPlay(
         val minSingle = singles.minByOrNull { it.mainRank }
         val minPair = pairs.minByOrNull { it.mainRank }
         return when {
-            minSingle != null && minPair == null -> minSingle
-            minPair != null && minSingle == null -> minPair
-            minSingle != null -> if (minSingle.mainRank <= minPair!!.mainRank) minSingle else minPair
+            minSingle != null -> minSingle
+            minPair != null -> minPair
             else -> null
         }
     }
@@ -907,21 +909,12 @@ private fun chooseFollowPlay(
         return scaledThreat(count)
     }
 
-    /** 判断出炸弹后剩余手牌能否在 1~2 手内收完（包括「炸弹+炸弹」「炸弹+一手牌」的情况） */
+    /** 判断出炸弹后剩余手牌能否在 1~2 手内收完 */
     private fun canFinishRemaining(remaining: List<Card>): Boolean {
         if (remaining.isEmpty()) return true
         if (remaining.size > 8) return false
-        val id = CardRuleEngine.identify(remaining)
-        if (id.type != CardType.INVALID) return true
-        val plays = CardRuleEngine.findAllValidPlays(remaining, null)
-        for (c in plays) {
-            if (c.type != CardType.BOMB && c.type != CardType.ROCKET) continue
-            val after = remaining.filter { card -> c.cards.none { it.id == card.id } }
-            if (after.isEmpty()) return true
-            val afterId = CardRuleEngine.identify(after)
-            if (afterId.type != CardType.INVALID) return true
-        }
-        return false
+        val turns = estimateHandTurns(remaining)
+        return turns <= 2
     }
 
     /** E. 炸弹分层：防杀/收尾/救队友/安全翻倍才炸，不盲目概率炸 */
