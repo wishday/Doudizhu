@@ -266,6 +266,14 @@ object AIDecision {
 
     /** 残局领出（手牌 <= 5）：选「对手最难压住 + 剩余手数最少」的一手 */
     private fun endgameLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
+        // 对手报单：优先对子/结构，只能出单张时出最大，防止被接走获胜
+        if (ctxMinOpponentCards == 1) {
+            validPlays.firstOrNull { it.type == CardType.PAIR }?.let { return it }
+            val maxSingle = validPlays
+                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+                .maxByOrNull { it.mainRank }
+            if (maxSingle != null) return maxSingle
+        }
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         val best = candidates.minWithOrNull(
             compareBy(
@@ -293,9 +301,11 @@ object AIDecision {
             }
             val pair = plan.firstOrNull { it.type == CardType.PAIR }
             if (pair != null) return pair
-            // 对手只剩1张：从大往小出最大的单张，尽量让对手接不走获胜
-            val single = plan.filter { it.type == CardType.SINGLE }.maxByOrNull { it.mainRank }
-            if (single != null) return single
+            // 对手只剩1张：从 validPlays 选真正的最大单张（含2/王），从大往小压
+            val maxSingle = validPlays
+                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+                .maxByOrNull { it.mainRank }
+            if (maxSingle != null) return maxSingle
             return validPlays.first()
         }
 
