@@ -24,6 +24,12 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 累计积分 */
     private var totalScore = 0
 
+    /** 游戏局数统计 */
+    private var gameCount = 0
+
+    /** 玩家获胜局数统计 */
+    private var winCount = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -141,6 +147,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$roundScore 分", 5000)
             }
 
+            // 统计游戏局数与玩家胜率
+            gameCount++
+            if (isHumanWin) winCount++
+            gameSurfaceView.setStats(gameCount, winCount)
             gameSurfaceView.setTotalScore(totalScore)
             gameSurfaceView.refresh()
         }

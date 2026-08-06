@@ -161,6 +161,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 计分系统 */
     private var totalScore = 0
 
+    /** 游戏局数与玩家胜场统计 */
+    private var gameCount = 0
+    private var winCount = 0
+
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
 
@@ -324,6 +328,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     fun getTotalScore(): Int = totalScore
+
+    /** 设置游戏局数与胜场统计 */
+    fun setStats(games: Int, wins: Int) {
+        gameCount = games
+        winCount = wins
+    }
 
     /** 设置任意玩家的桌面出牌展示 */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
@@ -1066,12 +1076,16 @@ playTone(ToneGenerator.TONE_PROP_ACK, 50)
         canvas.drawText(errorText, screenWidth / 2f, screenHeight * 0.26f + 54f, textPaint)
     }
 
-    /** 计分显示 */
+    /** 计分与统计显示 */
     private fun drawScore(canvas: Canvas) {
         textPaint.textSize = 38f
         textPaint.color = Color.parseColor("#FFFFFF")
         textPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText("积分: $totalScore", screenWidth - 28f, 56f, textPaint)
+        // 右上角积分左侧显示游戏局数与玩家胜率
+        val winRate = if (gameCount > 0) (winCount * 100.0 / gameCount) else 0.0
+        val rateText = "胜率: ${winCount}/$gameCount (${"%.0f".format(winRate)}%)"
+        canvas.drawText(rateText, screenWidth - 28f - textPaint.measureText("积分: $totalScore") - 40f, 56f, textPaint)
         textPaint.textAlign = Paint.Align.CENTER
     }
 

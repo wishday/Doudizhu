@@ -33,10 +33,16 @@ object AIDecision {
 
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
 
-    /** 该组合是否会拆散手中的炸弹（用到4张同rank的牌，但本身不是炸弹/火箭） */
+    /** 该组合是否会拆散手中的炸弹（用到4张同rank的牌，但本身不是炸弹/火箭）或王炸（双王） */
     private fun breaksBomb(group: CardGroup, hand: List<Card>): Boolean {
         if (group.type == CardType.BOMB || group.type == CardType.ROCKET) return false
         val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        // 王炸保护：手中有双王，但组合（非火箭）用了其中一张王
+        val hasSmallJoker = counts[16] ?: 0 > 0
+        val hasBigJoker = counts[17] ?: 0 > 0
+        if (hasSmallJoker && hasBigJoker) {
+            if (group.cards.any { it.rank == 16 || it.rank == 17 }) return true
+        }
         return group.cards.any { counts[it.rank] == 4 }
     }
 
@@ -300,7 +306,11 @@ object AIDecision {
             (it.type == CardType.SINGLE || it.type == CardType.PAIR) && !isControlRank(it.mainRank)
         }
         if (bait.isNotEmpty()) {
-            return bait.minWithOrNull(compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 }))!!
+            // 优先选「被压后仍可用大牌回收」的散牌作诱饵，形成「小牌-大牌回收-继续打」的节奏；
+            // 否则只能走不可回收的散牌
+            val reclaimable = bait.filter { canReclaimAfter(it, hand) }
+            val pool = if (reclaimable.isNotEmpty()) reclaimable else bait
+            return pool.minWithOrNull(compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 }))!!
         }
 
         // D. 兜底：最小的可出牌（可能是控牌）
@@ -360,10 +370,11 @@ object AIDecision {
 
         if (candidates.isEmpty()) return null
 
-        // 评估：剩余手数最少优先，其次 feedDanger，其次主 rank
+        // 评估：剩余手数最少优先，其次零散单张最少，其次威胁最低，其次主 rank
         return candidates.minWithOrNull(
             compareBy(
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
+                { scatteredSingles(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { feedDanger(it) },
                 { it.mainRank }
             )
@@ -402,6 +413,33 @@ object AIDecision {
 
     /** 出牌优先级排序：先非控小牌（利于当诱饵/吸收），控牌(2/王)殿后 */
     private fun rankOf(rank: Int): Int = if (isControlRank(rank)) 1000 + rank else rank
+
+    /** 统计手中难以配对的零散单张数（单张、以及凑不成连对的对子），越少越不卡手 */
+    private fun scatteredSingles(hand: List<Card>): Int {
+        if (hand.isEmpty()) return 0
+        val counts = hand.filter { it.rank in 3..14 }.groupBy { it.rank }.mapValues { it.value.size }
+        var scattered = 0
+        for ((rank, n) in counts) {
+            when {
+                n == 1 -> scattered++
+                n == 2 -> if (!isNearPair(rank, counts)) scattered++ // 孤对也不易消化
+                else -> {}
+            }
+        }
+        return scattered
+    }
+
+    /** 某对子的相邻点（rank±1）也至少有1张，可参与连对，视为易组合 */
+    private fun isNearPair(rank: Int, counts: Map<Int, Int>): Boolean =
+        counts.containsKey(rank - 1) || counts.containsKey(rank + 1)
+
+    /** 领出小散牌被压后，手中是否仍有大牌(2/王炸/炸弹)可回收控制权 */
+    private fun canReclaimAfter(group: CardGroup, hand: List<Card>): Boolean {
+        val remaining = hand.filter { c -> group.cards.none { it.id == c.id } }
+        return remaining.any { it.rank == 15 } ||
+            (remaining.any { it.rank == 16 } && remaining.any { it.rank == 17 }) ||
+            remaining.groupBy { it.rank }.any { it.value.size == 4 }
+    }
 
     // ==================== 跟牌 ====================
 
