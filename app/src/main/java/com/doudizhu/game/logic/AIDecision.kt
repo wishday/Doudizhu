@@ -325,9 +325,13 @@ object AIDecision {
             return pool.minWithOrNull(compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 }))!!
         }
 
-        // D. 兜底：最小的可出牌（可能是控牌）
-        val nonBomb = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-        return nonBomb.minByOrNull { it.mainRank } ?: validPlays.first()
+        // D. 兜底：非控最小出牌，不白白浪费2/王
+        val nonBomb = validPlays.filter {
+            it.type != CardType.BOMB && it.type != CardType.ROCKET && !isControlRank(it.mainRank)
+        }
+        return (nonBomb.minByOrNull { it.mainRank }
+            ?: validPlays.firstOrNull { it.type != CardType.BOMB && it.type != CardType.ROCKET }
+            ?: validPlays.first())
     }
 
     private fun isStructure(g: CardGroup): Boolean = when (g.type) {
@@ -411,7 +415,7 @@ object AIDecision {
             if (segLen >= minLen) {
                 for (len in minLen..segLen) {
                     for (start in i..(j - len + 1)) {
-                        val subRanks = (start until start + len).toList()
+                        val subRanks = ranks.subList(start, start + len)
                         val cards = subRanks.flatMap { r -> hand.filter { it.rank == r }.take(m) }
                         if (cards.size == len * m) {
                             out.add(CardGroup(type, ranks[start], len, cards))
