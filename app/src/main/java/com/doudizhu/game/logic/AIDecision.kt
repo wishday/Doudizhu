@@ -387,7 +387,6 @@ object AIDecision {
                 // 队友报单：领出最小非控单张，让队友好接走完
                 val lead = plan.firstOrNull { it.type == CardType.SINGLE && !isControlRank(it.mainRank) }
                     ?: plan.firstOrNull { it.type == CardType.SINGLE }
-                    ?: plan.firstOrNull { it.type == CardType.PAIR }
                 if (lead != null) {
                     // 地主位于我与队友之间（队友不接牌）时，喂小单张易被地主拦截，
                     // 只有当该牌对手难压住（threat 低）才喂，否则交给常规领出
@@ -420,12 +419,14 @@ object AIDecision {
         val guaranteed = canFinishGuaranteed(hand, validPlays)
         if (guaranteed != null) return guaranteed
 
-        if (minOpponentCards <= 3) {
+        if (minOpponentCards <= 5) {
             // 若2/王等控牌全部已出（对手手里没有），则小牌也能控场，优先出最小的
+            // 但若仍有 unseen 炸弹存在，仍然应当出大牌先防守
             val controlUnseen = (15..17).sumOf { r -> if (r < unseenCounts.size) unseenCounts[r] else 0 }
+            val bombUnseen = (3..15).any { r -> r < unseenCounts.size && unseenCounts[r] == 4 }
             val bigPlays = validPlays.filter { it.type == CardType.SINGLE || it.type == CardType.PAIR }
             if (bigPlays.isNotEmpty()) {
-                return if (controlUnseen == 0) pickSinglePairBest(bigPlays, max = false)!!
+                return if (controlUnseen == 0 && !bombUnseen) pickSinglePairBest(bigPlays, max = false)!!
                 else pickSinglePairBest(bigPlays, max = true)!!
             }
         }
@@ -571,7 +572,7 @@ object AIDecision {
 
         if (normalPlays.isNotEmpty()) {
             // 对手快出完时，无条件出最大压制
-            if (minOpponentCards <= 3) {
+            if (minOpponentCards <= 5) {
                 return normalPlays.maxByOrNull { it.mainRank }
             }
             // C. 农民跟牌安全：若跟牌必被更高同型压回且需动用控牌，非紧急时保留控牌
@@ -737,10 +738,13 @@ private fun chooseFollowPlay(
         val singles = candidates.filter { it.type == CardType.SINGLE }
         val pairs = candidates.filter { it.type == CardType.PAIR }
         if (max) {
-            // 取最大：跨型比较以 rank 为主（谁大谁更能控场），
-            // 对子只在同 rank 时优先（一手清两张），避免为打对子而浪费更高单张
+            // 取最大：对子比同 rank 单张更容易被回压（对手需同 rank 两张），
+            // 因此对子在跨 rank 比较时获得 +2 权重（对子10≈单张13≈对子12的效果）
             return (singles + pairs).sortedWith(
-                compareBy({ it.mainRank }, { if (it.type == CardType.PAIR) 1 else 0 })
+                compareBy(
+                    { it.mainRank + if (it.type == CardType.PAIR) 3 else 0 },
+                    { it.mainRank }
+                )
             ).lastOrNull()
         }
         val minSingle = singles.minByOrNull { it.mainRank }
@@ -903,6 +907,23 @@ private fun chooseFollowPlay(
         return scaledThreat(count)
     }
 
+    /** 判断出炸弹后剩余手牌能否在 1~2 手内收完（包括「炸弹+炸弹」「炸弹+一手牌」的情况） */
+    private fun canFinishRemaining(remaining: List<Card>): Boolean {
+        if (remaining.isEmpty()) return true
+        if (remaining.size > 8) return false
+        val id = CardRuleEngine.identify(remaining)
+        if (id.type != CardType.INVALID) return true
+        val plays = CardRuleEngine.findAllValidPlays(remaining, null)
+        for (c in plays) {
+            if (c.type != CardType.BOMB && c.type != CardType.ROCKET) continue
+            val after = remaining.filter { card -> c.cards.none { it.id == card.id } }
+            if (after.isEmpty()) return true
+            val afterId = CardRuleEngine.identify(after)
+            if (afterId.type != CardType.INVALID) return true
+        }
+        return false
+    }
+
     /** E. 炸弹分层：防杀/收尾/救队友/安全翻倍才炸，不盲目概率炸 */
     private fun decideBomb(
         bombs: List<CardGroup>,
@@ -914,14 +935,14 @@ private fun chooseFollowPlay(
         val canBeCountered = hasUnseenHigherBombOrRocket(b.mainRank)
         // 1. 对手距获胜很近，必须炸阻止（即使可能被反也值得一搏）
         if (ctxMinOpponentCards <= 5) return b
-        // 2. 出炸后剩余手牌若成一整手，炸完可收尾（前提：对方无反制炸弹时才稳）
-        val remaining = hand.filter { c -> b.cards.none { it.id == c.id } }
-        if (!canBeCountered && remaining.isNotEmpty() && remaining.size <= 5 &&
-            CardRuleEngine.identify(remaining).type != CardType.INVALID) {
-            return b
+        // 2. 出炸后剩余手牌若可在一或两手中收尾（含炸弹+结构牌等组合）
+        val bomb = b
+        val remaining = hand.filter { c -> bomb.cards.none { it.id == c.id } }
+        if (!canBeCountered && remaining.isNotEmpty() && canFinishRemaining(remaining)) {
+            return bomb
         }
         // 3. 农民炸救队友：队友接近报单时抢回控制权护送（对方无反制炸弹时更安全）
-        if (ctxRole == PlayerRole.FARMER && ctxTeammateCardCount in 1..2 && !canBeCountered) return b
+        if (ctxRole == PlayerRole.FARMER && ctxTeammateCardCount in 1..3 && !canBeCountered) return bomb
         // 4. 安全翻倍炸：对手手中无任何2/王、且无更高炸弹可反 → 绝对安全且能翻倍
         val rawControls = (15..17).sumOf { r -> if (r < ctxUnseenCounts.size) ctxUnseenCounts[r] else 0 }
         val controls = scaledThreat(rawControls)
