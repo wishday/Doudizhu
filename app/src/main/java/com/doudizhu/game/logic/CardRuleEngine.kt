@@ -601,10 +601,16 @@ object CardRuleEngine {
                         results.add(CardGroup(CardType.PLANE, seqRanks[0], planeLen, planeCards))
                     }
                     CardType.PLANE_SINGLE -> {
-                        // 需要附带单翼
+                        // 需要附带单翼：翼牌必须是 planeLen 张「不同 rank」的单牌，
+                        // 不能取同一 rank 的两张（那会变成对子，构成非法的飞机带单翼，
+                        // 且 identify() 会判定为 INVALID）。与自由出牌的 findFreePlanes 保持一致。
                         val usedRanks = seqRanks.take(planeLen).toSet()
-                        val kickers = sorted.filter { it.rank !in usedRanks }.take(planeLen)
-                        if (kickers.size >= planeLen) {
+                        val wingRanks = countMap.keys
+                            .filter { it !in usedRanks && it in 3..14 }
+                            .sorted()
+                            .take(planeLen)
+                        if (wingRanks.size >= planeLen) {
+                            val kickers = wingRanks.map { r -> sorted.first { it.rank == r } }
                             results.add(CardGroup(CardType.PLANE_SINGLE, seqRanks[0], planeLen, planeCards + kickers))
                         }
                     }
