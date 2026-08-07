@@ -281,13 +281,17 @@ object AIDecision {
         if (fullHand.type != CardType.INVALID) return fullHand
 
         // 1. 队友接近出完：优先喂牌（走最小，让队友接走）
-        if (role == PlayerRole.FARMER && ctxTeammateCardCount in 1..2) {
+        //    但对手(地主)也仅剩1张时不要喂——会把出牌权送给地主让他直接获胜
+        if (role == PlayerRole.FARMER && ctxTeammateCardCount in 1..2 && ctxMinOpponentCards > 1) {
             val feed = feedTeammate(hand)
             if (feed != null) return feed
         }
 
         // 2. 残局必胜：能确保冲完就直接冲
         canFinishGuaranteed(hand, validPlays)?.let { return it }
+
+        // 2.5 对手仅剩1张：控场甩牌组，大单张收尾，防被接走获胜
+        if (ctxMinOpponentCards == 1) return endgameLeadAgainstOneCard(hand, validPlays)
 
         // 3. 手牌少：残局枚举，最小剩余手数 + 防喂杀
         if (hand.size <= 5) return endgameLead(hand, validPlays)
@@ -341,6 +345,46 @@ object AIDecision {
         return best
             ?: validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
             ?: validPlays.first()
+    }
+
+    /**
+     * 对手仅剩1张时的残局领出（实现「先出牌组、再大单张收尾」）。
+     *
+     * 对手只有1张，只能压「单张/对子」，**永远接不住任何多张结构牌（顺子/连对/飞机/三带）**，
+     * 也接不住对子与炸弹/火箭，因此：
+     *  1. 优先出「安全牌组」（非单张、不拆弹：含对子/结构/炸弹/火箭），对手必过牌，我方持续控场甩牌；
+     *  2. 组牌择优：出完「剩余手数最少 + 散单最少」的牌组，并尽量消耗小牌（mainRank 小的结构），
+     *     把大牌留作单张，避免最后被迫出小单张被对手那1张接走获胜；
+     *  3. 仅剩单张时，从大到小领出——若对手那1张小于我最大单张则被顶死过牌，我能再多甩一张。
+     */
+    private fun endgameLeadAgainstOneCard(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
+        val safe = validPlays.filter {
+            it.type != CardType.SINGLE && !breaksBomb(it, hand)
+        }
+        if (safe.isNotEmpty()) {
+            // 优先用 chooseStructureLead 的「拆分变体 + 剩余手数最少 + 散单最少」优化器选出最优结构牌，
+            // 它已考虑「吸收小牌、保留大单张」，比下面简版比较更精细。该结构必然非单张、不拆弹，
+            // 且对手仅1张永远接不住，可安全甩出持续控场。
+            val bestStructure = chooseStructureLead(hand)
+            if (bestStructure != null) return bestStructure
+            // 退化情况（手中无任何结构牌，仅剩对子/炸弹等）：在 safe 中按
+            // 「保留炸弹 + 剩余手数最少 + 散单最少 + 消耗小牌」择优
+            return safe.minWithOrNull(
+                compareBy(
+                    { it.type == CardType.BOMB || it.type == CardType.ROCKET },        // 保留炸弹，优先普通牌组
+                    { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) }, // 出完剩余手数最少
+                    { scatteredSingles(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },   // 散单最少
+                    { it.mainRank }                                                    // 消耗小牌、保留大单张
+                )
+            )!!
+        }
+        // 无安全牌组：只剩单张，从大到小领出
+        val single = validPlays
+            .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+            .maxByOrNull { it.mainRank }
+        if (single != null) return single
+        // 极端兜底（仅剩炸弹/拆弹单张）：出最大可用
+        return validPlays.maxByOrNull { it.mainRank } ?: validPlays.first()
     }
 
     /**
@@ -652,6 +696,10 @@ object AIDecision {
             }
         }
 
+        // B'. 地主仅剩1张且即将出牌（在我下家）：绝不出可被接走的小牌送他获胜，
+        // 直接过牌让队友的牌留在台面；能否速胜已在上面 B 处理。
+        if (ctxMinOpponentCards <= 1) return null
+
         // C. 小牌顶着消耗地主 + 出掉零碎牌：优先用不拆组的离散散牌，避免为压队友拆自家牌组
         val preserving = sameType.filter { preservesGroups(it.cards, hand) }
         if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
@@ -904,13 +952,19 @@ object AIDecision {
 
     // ==================== 威胁评估 ====================
 
-    /** 农民视角威胁折减：unseen 同时含队友与对手牌，按对手占比折减 */
+    /**
+     * 农民视角威胁折减：unseen 同时含队友与对手牌，按对手占比折减。
+     * 注意：必须用 ceil 而非 round——否则当地主仅剩1张、队友牌较多时，
+     * 地主那张真实存在的牌会被算成 0 威胁，导致 isUnbeatable / canFinishGuaranteed
+     * 误判「必胜」，把会被地主接走的小/中单张当安全牌打出而输掉。
+     * ceil 保证：只要存在任意未见牌且地主仍有牌，威胁至少为 1（对必胜判定保持保守）。
+     */
     private fun scaledThreat(count: Int): Int {
         if (ctxRole != PlayerRole.FARMER) return count
         val total = ctxMinOpponentCards + ctxTeammateCardCount
         if (total <= 0) return 0
         if (count <= 0) return 0
-        return Math.round(count * ctxMinOpponentCards.toFloat() / total)
+        return Math.ceil(count * ctxMinOpponentCards.toFloat() / total.toDouble()).toInt()
     }
 
     /** 出这手的被压威胁（单张/对子统计更高 unseen 同型；结构牌看更高 run） */

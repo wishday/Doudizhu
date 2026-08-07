@@ -21,6 +21,12 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 游戏绘制视图 */
     private lateinit var gameSurfaceView: GameSurfaceView
 
+    companion object {
+        private const val KEY_TOTAL_SCORE = "total_score"
+        private const val KEY_GAME_COUNT = "game_count"
+        private const val KEY_WIN_COUNT = "win_count"
+    }
+
     /** 累计积分 */
     private var totalScore = 0
 
@@ -30,8 +36,29 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 玩家获胜局数统计 */
     private var winCount = 0
 
+    /** 统计持久化：使用 Activity 级 SharedPreferences，进程重启后仍能恢复 */
+    private val statsPrefs by lazy { getPreferences(MODE_PRIVATE) }
+
+    private fun loadStats() {
+        totalScore = statsPrefs.getInt(KEY_TOTAL_SCORE, 0)
+        gameCount = statsPrefs.getInt(KEY_GAME_COUNT, 0)
+        winCount = statsPrefs.getInt(KEY_WIN_COUNT, 0)
+    }
+
+    private fun saveStats() {
+        statsPrefs.edit().apply {
+            putInt(KEY_TOTAL_SCORE, totalScore)
+            putInt(KEY_GAME_COUNT, gameCount)
+            putInt(KEY_WIN_COUNT, winCount)
+            apply()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 恢复历史积分与胜率
+        loadStats()
 
         // 全屏显示
         requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -48,6 +75,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameEngine.callback = this
         gameSurfaceView.gameEngine = gameEngine
         gameSurfaceView.setTotalScore(totalScore)
+        gameSurfaceView.setStats(gameCount, winCount)
 
         setContentView(gameSurfaceView)
     }
@@ -155,7 +183,14 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             gameSurfaceView.setStats(gameCount, winCount)
             gameSurfaceView.setTotalScore(totalScore)
             gameSurfaceView.refresh()
+            saveStats()
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 兜底保存：应用退到后台时持久化积分与胜率，避免异常退出丢数据
+        saveStats()
     }
 
     override fun onRequestRefresh() {
