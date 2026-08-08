@@ -182,7 +182,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun initAudio() {
         try {
             if (toneGenerator == null) {
-                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 50)
+                // 音量：ToneGenerator 音量参数上限为 100（即系统流音量的满档），已是可程序控制的最大值
+                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
             }
             // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
