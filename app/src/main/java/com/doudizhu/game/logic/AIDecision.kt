@@ -1043,10 +1043,23 @@ object AIDecision {
 
     // ==================== 手牌规划 ====================
 
-    /** 估算手牌最少拆分手数（越少说明牌越紧凑） */
+    /**
+     * 估算手牌最少拆分手数（越少说明牌越紧凑）。
+     * 采用两种拆解顺序取较优：① 先结构(顺子/连对/飞机)后三带；② 先三带后结构。
+     * 原因：固定"先结构后三带"会让顺子抢走三张的牌（如 10-J-Q-K-A 顺子拆散 101010/AAA 两个三张），
+     * 误判剩余手数使"领更低三张"被压；两种顺序取 min 既修正该误判，又保留"该组顺子更优"的局面。
+     */
     private fun estimateHandTurns(hand: List<Card>): Int {
         if (hand.isEmpty()) return 0
-        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }.toMutableMap()
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        val orderA = scoreTurns(counts, triplesFirst = false)
+        val orderB = scoreTurns(counts, triplesFirst = true)
+        return if (orderA <= orderB) orderA else orderB
+    }
+
+    /** 按指定顺序拆解手牌，返回拆分手数；triplesFirst=true 时先处理三带再处理结构 */
+    private fun scoreTurns(base: Map<Int, Int>, triplesFirst: Boolean): Int {
+        val counts = base.toMutableMap()
         var turns = 0
 
         if ((counts[16] ?: 0) > 0 && (counts[17] ?: 0) > 0) {
@@ -1058,10 +1071,28 @@ object AIDecision {
         bombs.forEach { counts.remove(it) }
         // 炸弹是控牌武器：能在被打断时强势夺回主动权，故不计入"正常出牌手数"（沉底保命牌）
 
-        turns += consumeStructureRuns(counts, 3, 2)
-        turns += consumeStructureRuns(counts, 2, 3)
-        turns += consumeStructureRuns(counts, 1, 5)
+        if (triplesFirst) {
+            turns += consumeTriples(counts)
+            turns += consumeStructureRuns(counts, 3, 2)
+            turns += consumeStructureRuns(counts, 2, 3)
+            turns += consumeStructureRuns(counts, 1, 5)
+        } else {
+            turns += consumeStructureRuns(counts, 3, 2)
+            turns += consumeStructureRuns(counts, 2, 3)
+            turns += consumeStructureRuns(counts, 1, 5)
+            turns += consumeTriples(counts)
+        }
 
+        for ((_, n) in counts.entries.sortedBy { it.key }) {
+            turns += n / 2
+            if (n % 2 == 1) turns += 1
+        }
+        return turns.coerceAtLeast(0)
+    }
+
+    /** 处理三带：每个三张配一对/单做翼以吸收散牌；返回消耗手数 */
+    private fun consumeTriples(counts: MutableMap<Int, Int>): Int {
+        var turns = 0
         val triples = counts.filterValues { it == 3 }.keys.sorted()
         for (r in triples) {
             if ((counts[r] ?: 0) != 3) continue
@@ -1081,12 +1112,7 @@ object AIDecision {
             counts.remove(r)
             turns++
         }
-
-        for ((_, n) in counts.entries.sortedBy { it.key }) {
-            turns += n / 2
-            if (n % 2 == 1) turns += 1
-        }
-        return turns.coerceAtLeast(0)
+        return turns
     }
 
     private fun consumeStructureRuns(counts: MutableMap<Int, Int>, m: Int, minLen: Int): Int {
