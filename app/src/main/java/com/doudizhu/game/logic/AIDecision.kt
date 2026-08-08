@@ -23,6 +23,8 @@ object AIDecision {
     private var ctxTeammateCardCount: Int = 0
     private var ctxMinOpponentCards: Int = 20
     private var ctxMaxOpponentCards: Int = 20
+    /** 各敌人当前剩余牌数（农民视角=[地主]；地主视角=[农民1,农民2]），用于按对手分别推演 */
+    private var ctxEnemyTotals: IntArray = intArrayOf()
     private var ctxUnseenCounts: IntArray = IntArray(18)
     private var ctxPerPlayerPlayed: Array<IntArray> = Array(3) { IntArray(18) }
     private var ctxPrimaryOpponent: Int = -1
@@ -30,6 +32,18 @@ object AIDecision {
 
     /** 控牌：2(15)/小王(16)/大王(17)，用于回收控制权，尽量后手使用 */
     private val ControlRanks = setOf(15, 16, 17)
+
+    /**
+     * 跟牌时"大单张"（A/2/小王/大王）出牌阈值：
+     * 仅当对手出的单张 >= 此点数时才允许用大单张去压，避免为小牌保结构/压队友而浪费大牌。
+     */
+    private val BIG_SINGLE_FOLLOW_MIN_RANK = 14
+
+    /**
+     * 对手出单张/对子时，允许"拆牌组去跟"（拆对/三张/顺子/连对/飞机）的最低牌面：
+     * 仅当对手牌面 >= 此点数(Q=12)才允许拆牌去跟；否则只用真散牌跟。队友出牌始终不拆。
+     */
+    private val OPPONENT_BREAK_MIN_RANK = 12
 
     private fun isControlRank(rank: Int): Boolean = rank in ControlRanks
 
@@ -93,11 +107,156 @@ object AIDecision {
                 if (o - used == 1) return false
             }
         }
+        // 出单张若拆了顺子/连对/飞机，也算破坏结构，优先用真散牌
+        if (cards.size == 1 && isStraightMember(cards[0].rank, hand)) return false
         return true
+    }
+
+    /**
+     * 某点数是否处于"每点至少 m 张、长度>=minLen"的连通段：
+     *   m=1,minLen=5 → 顺子；m=2,minLen=3 → 连对；m=3,minLen=2 → 飞机。
+     * 用于判断"出这张牌会否拆掉一个结构牌组"。
+     */
+    private fun inRunSegment(rank: Int, hand: List<Card>, m: Int, minLen: Int): Boolean {
+        if (rank !in 3..14) return false
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        if ((counts[rank] ?: 0) < m) return false
+        var len = 1
+        var r = rank - 1
+        while (r in 3..14 && (counts[r] ?: 0) >= m) { len++; r-- }
+        r = rank + 1
+        while (r in 3..14 && (counts[r] ?: 0) >= m) { len++; r++ }
+        return len >= minLen
+    }
+
+    /** 某点数是否处于一个长度>=5 的顺子段中（单张跟牌时判断会否拆顺子） */
+    private fun isStraightMember(rank: Int, hand: List<Card>): Boolean =
+        inRunSegment(rank, hand, 1, 5)
+
+    /** 某点数是否处于一个长度>=3 的连对段中（跟对子时判断会否拆连对） */
+    private fun isStraightPairMember(rank: Int, hand: List<Card>): Boolean =
+        inRunSegment(rank, hand, 2, 3)
+
+    /** 某点数是否处于一个长度>=2 的飞机段中（跟三张时判断会否拆飞机） */
+    private fun isPlaneMember(rank: Int, hand: List<Card>): Boolean =
+        inRunSegment(rank, hand, 3, 2)
+
+    /**
+     * 跟单张时，出这张单张对原有牌组的"破坏等级"：
+     *   0 = 真散牌（该点数仅 1 张），最优，优先用于跟牌；
+     *   1 = 拆对子/三张（含飞机中的三张），损失相对较小，允许拆出单张压制；
+     *   2 = 拆顺子/连对/飞机等长结构，破坏代价高，仅在紧急时才允许。
+     * 注：处于长顺子段的对子(如 3,3,4,5,6,7)按 2 处理——保顺子优先于保对子。
+     */
+    private fun singleDisruption(rank: Int, hand: List<Card>): Int {
+        val n = hand.count { it.rank == rank }
+        return when {
+            n == 1 -> 0
+            isStraightMember(rank, hand) -> 2
+            n == 2 || n == 3 -> 1
+            else -> 2
+        }
+    }
+
+    /**
+     * 跟任意牌型时，该手牌对原有牌组的"破坏等级"（0=不破坏, 1=拆对/三张, 2=拆顺子/连对/飞机）。
+     * 用于跟牌选牌时优先保留牌组：先出散牌/完整牌组，再考虑拆对/三张，最后(紧急)才拆长结构。
+     */
+    private fun groupDisruption(g: CardGroup, hand: List<Card>): Int {
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        return when (g.type) {
+            CardType.SINGLE -> singleDisruption(g.mainRank, hand)
+            CardType.PAIR -> {
+                val n = counts[g.mainRank] ?: 0
+                when {
+                    n == 2 -> 0
+                    isStraightPairMember(g.mainRank, hand) || isPlaneMember(g.mainRank, hand) -> 2
+                    n == 3 -> 1
+                    else -> 2
+                }
+            }
+            CardType.TRIPLE, CardType.TRIPLE_ONE, CardType.TRIPLE_TWO -> {
+                val n = counts[g.mainRank] ?: 0
+                when {
+                    n == 3 -> 0
+                    isPlaneMember(g.mainRank, hand) -> 2
+                    else -> 0
+                }
+            }
+            else -> 0 // 顺子/连对/飞机/炸弹/火箭：本身即结构牌，不再计破坏
+        }
+    }
+
+    /**
+     * 跟牌选牌：按"破坏等级"分档（不破坏 > 拆对/三张 > 拆顺子/连对/飞机），档内取最小点数；
+     * 对所有牌型生效。非紧急时不拆长结构(等级2)，直接放过保存牌组。大单张(A/2/王)已在
+     * sameTypeSafe 中按 allowBigSingleFollow 过滤过，这里不再处理。
+     */
+    /** 手中 A~王 的总分：A=2, 2=4, 小王=6, 大王=6（用于"是否值得拆牌跟"的动态评分） */
+    private fun bigCardScore(hand: List<Card>): Int =
+        hand.sumOf { c -> when (c.rank) {
+            14 -> 2
+            15 -> 4
+            16 -> 6
+            17 -> 6
+            else -> 0
+        } }
+
+    /** 拆牌代价：拆三张(3张)比拆对子(2张)更亏，用于同档内优先拆更便宜的牌组 */
+    private fun breakCost(g: CardGroup, hand: List<Card>): Int {
+        val n = hand.count { it.rank == g.mainRank }
+        return if (n >= 3) 2 else 1
+    }
+
+    /**
+     * 跟牌选牌：按"破坏等级"分档（不破坏 > 拆对/三张 > 拆顺子/连对/飞机），档内优先拆便宜的牌组、再取最小点数。
+     * 单张/对子跟牌的"拆牌"受两道闸：
+     *   1) 对手牌面 >= Q(12) 才允许拆（OPPONENT_BREAK_MIN_RANK）；
+     *   2) 拆对/三张时再按动态评分：对手剩牌 <=4（很近）或 大牌总分*2 >= 对手剩牌*3（≈ 大牌分 >= 1.5×剩牌）才拆。
+     * 其余牌型维持原 isUrgent 逻辑。
+     */
+    private fun pickFollow(hand: List<Card>, candidates: List<CardGroup>, lastPlay: CardGroup): CardGroup? {
+        if (candidates.isEmpty()) return null
+        val allowBreak = lastPlay.mainRank >= OPPONENT_BREAK_MIN_RANK
+        val oppLeft = ctxMinOpponentCards
+        val myBig = bigCardScore(hand)
+        val maxTierOther = if (isUrgent()) 2 else 1
+        return candidates
+            .filter { g ->
+                val tier = groupDisruption(g, hand)
+                when {
+                    lastPlay.type != CardType.SINGLE && lastPlay.type != CardType.PAIR ->
+                        tier <= maxTierOther
+                    tier == 0 -> true                                  // 真散牌永远可跟
+                    !allowBreak -> false                               // 对手牌面 < Q：绝不拆
+                    tier == 1 -> oppLeft <= 4 || myBig * 2 >= oppLeft * 3   // 拆对/三张：很近 或 大牌足够
+                    else -> true                                       // tier2 拆长结构：>=Q 即放行
+                }
+            }
+            .minWithOrNull(compareBy(
+                { groupDisruption(it, hand) },
+                { breakCost(it, hand) },
+                { it.mainRank }
+            ))
     }
 
     private fun isUrgent(): Boolean =
         ctxMinOpponentCards <= 3 || ctxTeammateCardCount in 1..2
+
+    /**
+     * 跟牌（单张）时是否允许动用"大单张"（A/2/王, rank >= BIG_SINGLE_FOLLOW_MIN_RANK）：
+     * 仅当满足以下任一条件才动用，否则保留大牌——
+     *   1) 对手出的单张本身已 >= 阈值（值得用大牌去压）；
+     *   2) 对手即将获胜（剩 <=2 张，必须拦截）。
+     * 不满足时宁可放过，避免"为小牌保结构"或"浪费大牌压小单张"而消耗宝贵控牌。
+     * 注：压队友的场景已在 shouldInterceptTeammate 中单独处理，这里遇到的一定是压对手。
+     */
+    private fun allowBigSingleFollow(lastPlay: CardGroup): Boolean {
+        if (lastPlay.type != CardType.SINGLE) return true
+        if (lastPlay.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK) return true
+        if (ctxMinOpponentCards <= 2) return true // 对手即将获胜，必须拦截
+        return false
+    }
 
     /**
      * AI做出牌决策
@@ -135,6 +294,7 @@ object AIDecision {
         ctxTeammateCardCount = teammateCardCount
         ctxMinOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min()!! else 20
         ctxMaxOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.max()!! else 20
+        ctxEnemyTotals = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.copyOf() else intArrayOf()
         ctxUnseenCounts = unseenCounts
         ctxPerPlayerPlayed = perPlayerPlayed
         ctxPrimaryOpponent = primaryOpponentIndex
@@ -320,17 +480,8 @@ object AIDecision {
 
     /** 残局领出（手牌 <= 5）：选「对手最难压住 + 剩余手数最少」的一手 */
     private fun endgameLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
-        // 对手报单：优先对子/结构，只能出单张时出最大，防止被接走获胜
-        if (ctxMinOpponentCards == 1) {
-            validPlays.firstOrNull { it.type == CardType.PAIR }?.let { return it }
-            val maxSingle = validPlays
-                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
-                .maxByOrNull { it.mainRank }
-            if (maxSingle != null) return maxSingle
-            // 无对子且无可用最大单张：只剩炸弹时优先出整弹本尊，避免拆弹
-            return validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
-                ?: validPlays.first()
-        }
+        // 进入此分支时 ctxMinOpponentCards 必然 > 1（==1 已在 normalFreeLead 的
+        // step 2.5 提前返回 endgameLeadAgainstOneCard），故无需再判断报单。
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         // 残局领出：先甩非控牌，保留2/王后收尾。不能按 feedDanger 择优——
         // 控牌不可被压 feedDanger 恒为0，会领出就甩掉大王。故选剩余手数最少、点数最小的非控出法
@@ -396,22 +547,8 @@ object AIDecision {
     private fun chooseLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
         val plan = buildPlan(hand)
 
-        // A. 对手报单：绝不能出能被接走的单张
-        if (ctxMinOpponentCards == 1) {
-            for (g in plan) {
-                if (isStructure(g) && g.type != CardType.SINGLE && feedDanger(g) == 0) return g
-            }
-            val pair = plan.firstOrNull { it.type == CardType.PAIR }
-            if (pair != null) return pair
-            // 对手只剩1张：从 validPlays 选真正的最大单张（含2/王），从大往小压
-            val maxSingle = validPlays
-                .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
-                .maxByOrNull { it.mainRank }
-            if (maxSingle != null) return maxSingle
-            // 对手报单无可用最大单张：只剩炸弹时优先出整弹本尊，避免拆弹
-            return validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
-                ?: validPlays.first()
-        }
+        // 进入此分支时 ctxMinOpponentCards 必然 > 1（==1 已在 normalFreeLead 的
+        // step 2.5 提前返回 endgameLeadAgainstOneCard），故无需再判断报单。
 
         // B. 结构牌优先：枚举拆分变体（短顺子/短连对/飞机/三带），
         //    选「出完剩余手数最少 + 威胁最低」的一手，减少零散单张
@@ -470,9 +607,9 @@ object AIDecision {
             candidates.add(plane)
             val usedRanks = plane.cards.map { it.rank }.toSet()
             val wingLen = plane.length
-            // 可用作翼的候选：非控、非炸弹、非飞机自身 rank
+            // 可用作翼的候选：非控、非炸弹、非飞机自身 rank；且不用 A(14)/2/王 当附件（多留大牌）
             val wingRanks = counts.entries
-                .filter { it.key !in usedRanks && it.key !in bombRanks && !isControlRank(it.key) }
+                .filter { it.key !in usedRanks && it.key !in bombRanks && !isControlRank(it.key) && it.key < 14 }
                 .sortedBy { it.key }
             // 带单翼：优先用纯散牌（count==1）作翼吸收零散小牌，不足再从最小对子拆单张补齐
             if (wingRanks.size >= wingLen) {
@@ -496,16 +633,16 @@ object AIDecision {
         for (r in tripleRanks) {
             val three = hand.filter { it.rank == r }.take(3)
             val pairKick = counts.entries
-                .filter { it.key != r && it.key !in bombRanks && it.value >= 2 }
+                .filter { it.key != r && it.key !in bombRanks && it.value >= 2 && it.key < 14 }
                 .minByOrNull { entry -> rankOf(entry.key) }
             if (pairKick != null) {
                 val kickers = hand.filter { c -> c.rank == pairKick.key }.take(2)
                 candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
             } else {
                 val singleKick = counts.entries
-                    .filter { it.key != r && it.key !in bombRanks && it.value >= 1 }
+                    .filter { it.key != r && it.key !in bombRanks && it.value >= 1 && it.key < 14 }
                     .minByOrNull { entry -> rankOf(entry.key) }?.key
-                    ?: counts.entries.firstOrNull { it.key != r && it.key !in bombRanks }?.key
+                    ?: counts.entries.firstOrNull { it.key != r && it.key !in bombRanks && it.key < 14 }?.key
                 if (singleKick != null) {
                     val kick = hand.filter { c -> c.rank == singleKick }.take(1).firstOrNull()
                     if (kick != null) candidates.add(CardGroup(CardType.TRIPLE_ONE, r, 1, three + kick))
@@ -517,10 +654,11 @@ object AIDecision {
 
         if (candidates.isEmpty()) return null
 
-        // 评估：剩余手数最少优先，其次零散单张最少，其次威胁最低，其次主 rank
+        // 评估：剩余手数最少优先，其次带走低牌(3..7)越多越好，其次零散单张最少，其次威胁最低，其次主 rank
         return candidates.minWithOrNull(
             compareBy(
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
+                { -lowAbsorbed(it.cards) },
                 { scatteredSingles(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { feedDanger(it) },
                 { it.mainRank }
@@ -580,6 +718,10 @@ object AIDecision {
     private fun isNearPair(rank: Int, counts: Map<Int, Int>): Boolean =
         counts.containsKey(rank - 1) || counts.containsKey(rank + 1)
 
+    /** 一手牌消耗的低点数牌(3..7)张数：越多说明把小散牌(34567)带走得越干净，用于结构领出择优 */
+    private fun lowAbsorbed(cards: List<Card>): Int =
+        cards.count { it.rank in 3..7 }
+
     /** 领出小散牌被压后，手中是否仍有大牌(2/王炸/炸弹)可回收控制权 */
     private fun canReclaimAfter(group: CardGroup, hand: List<Card>): Boolean {
         val remaining = hand.filter { c -> group.cards.none { it.id == c.id } }
@@ -614,11 +756,17 @@ object AIDecision {
 
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
         val nonControl = sameType.filter { !isControlRank(it.mainRank) }
+        // 大单张克制：仅当允许时才把 A/2/王 纳入"可跟"候选，否则保留（见 allowBigSingleFollow）
+        val allowBig = allowBigSingleFollow(lastPlay)
+        val gateBig: (CardGroup) -> Boolean = { g ->
+            !( !allowBig && g.type == CardType.SINGLE && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
+        }
+        val sameTypeSafe = sameType.filter(gateBig)
         val teammateIsNext = role == PlayerRole.FARMER && myIndex >= 0 && (myIndex + 1) % 3 == ctxTeammateIndex
         val landlordPlayed = role == PlayerRole.FARMER && lastPlayerIndex == landlordIndex
         val myLastResponder = landlordPlayed && !teammateIsNext
 
-        // 2. 对手快赢了，必须压住
+        // 2. 对手快赢了，必须压住（此处 ctxMinOpponentCards<=2，allowBig 必为 true，大单张可动用）
         if (ctxMinOpponentCards <= 2) {
             if (ctxMinOpponentCards == 1 &&
                 (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR)) {
@@ -634,27 +782,16 @@ object AIDecision {
             return decideBomb(validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }, hand)
         }
 
-        // 3. 我是最后一个响应地主的人（队友已过牌）→ 尽量接过控制，但优先最小
+        // 3. 我是最后一个响应地主的人（队友已过牌）→ 尽量接过控制，按"最小破坏"选牌
         if (myLastResponder) {
-            if (nonControl.isNotEmpty()) return nonControl.minByOrNull { it.mainRank }
-            if (sameType.isNotEmpty() && isUrgent()) return sameType.minByOrNull { it.mainRank }
-            // 非紧急：放走地主，保存控牌
+            pickFollow(hand, sameTypeSafe, lastPlay)?.let { return it }
+            // 无安全可跟牌：放走地主，保存结构/控牌
         }
 
-        // 4. 普通情况：优先用不拆组的离散散牌压；仅当拆组且紧急/手牌少时才拆，否则宁可放过保存结构
-        val preserving = nonControl.filter { preservesGroups(it.cards, hand) }
-        if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
-        if (nonControl.isNotEmpty() && (isUrgent() || hand.size <= 4)) {
-            return nonControl.minByOrNull { it.mainRank }
-        }
+        // 4. 普通跟牌：优先真散牌 → 其次拆对/三张 → (紧急)才拆顺子/飞机；大单张受 allowBig 限制
+        pickFollow(hand, sameTypeSafe, lastPlay)?.let { return it }
 
-        // 5. 只剩控牌可跟：非紧急保存控牌
-        if (sameType.isNotEmpty()) {
-            if (isUrgent() || hand.size <= 4) return sameType.minByOrNull { it.mainRank }
-            return null
-        }
-
-        // 6. 炸弹：紧急时才炸
+        // 5. 兜底：仅紧急时才动炸弹
         if (isUrgent()) {
             return decideBomb(validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }, hand)
         }
@@ -685,9 +822,10 @@ object AIDecision {
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
         if (sameType.isEmpty()) return null
 
-        // B. 地主快赢且我能接管清完 → 用最大牌接管
+        // B. 地主快赢且我能接管清完 → 优先用"不拆牌组"的牌接管，实在没有再退而求其次（必胜出清）
         if (ctxMinOpponentCards <= 4) {
-            val takeover = sameType.maxByOrNull { it.mainRank }
+            val takeover = sameType.filter { groupDisruption(it, hand) == 0 }.maxByOrNull { it.mainRank }
+                ?: sameType.maxByOrNull { it.mainRank }
             if (takeover != null) {
                 val remaining = hand.filter { c -> takeover.cards.none { it.id == c.id } }
                 // 接管后能在 5 轮内清空，或剩余牌数极少（一手内走完）
@@ -700,7 +838,13 @@ object AIDecision {
         // 直接过牌让队友的牌留在台面；能否速胜已在上面 B 处理。
         if (ctxMinOpponentCards <= 1) return null
 
-        // C. 小牌顶着消耗地主 + 出掉零碎牌：优先用不拆组的离散散牌，避免为压队友拆自家牌组
+        // C. 队友出单张/对子：坚决不拆任何牌组，只用真散牌顶；没有散牌就放过，绝不拆牌组
+        if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR) {
+            val loose = sameType.filter { groupDisruption(it, hand) == 0 }
+            if (loose.isNotEmpty()) return loose.minByOrNull { it.mainRank }
+            return null
+        }
+        // 队友出其他牌型：优先不拆组的离散牌，避免为压队友拆自家牌组
         val preserving = sameType.filter { preservesGroups(it.cards, hand) }
         if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
         return sameType.minByOrNull { it.mainRank }
@@ -720,8 +864,9 @@ object AIDecision {
         // 2. 出炸后剩余牌可在一两手内收完：炸
         val remaining = hand.filter { c -> b.cards.none { it.id == c.id } }
         if (!canBeCountered && remaining.isNotEmpty() && canFinishRemaining(remaining)) return b
-        // 3. 对手无任何2/王且无反制炸弹：安全翻倍炸
-        val controls = (15..17).sumOf { r -> if (r < ctxUnseenCounts.size) ctxUnseenCounts[r] else 0 }
+        // 3. 敌人无任何2/王且无反制炸弹：安全翻倍炸
+        //    用 enemyMaxHold 只统计"敌人"的控牌（农民视角自动排除队友的2/王），避免误判有威胁而舍不得炸
+        val controls = (15..17).sumOf { r -> enemyMaxHold(r) }
         if (controls == 0 && !canBeCountered) return b
         // 其余情况保存炸弹
         return null
@@ -1008,10 +1153,25 @@ object AIDecision {
         }
     }
 
-    /** 对手视角的威胁张数：农民时按对手占比折减，队友大牌不算威胁（地主视角全额） */
+    /**
+     * 单个敌人最多可能握有的某点数张数上界（按对手分别推演，不偷看暗牌）。
+     * 公开信息可确定：某点数总未见量为 U，单个敌人 p 能握该点数的上界 = min(U, p 剩余牌数)；
+     * 取所有敌人中的最大值作为"敌人最多可能持有量"。由此：
+     *  - 不会出现"两家 2+2 分家却被当成炸弹"的误报（受敌人剩余牌数硬约束）；
+     *  - 农民视角只统计地主（ctxEnemyTotals 不含队友），队友大牌不再算作威胁；
+     *  - 当敌人剩余牌数很少时，能正确排除其握不住三张/更高结构的情况。
+     */
+    private fun enemyMaxHold(r: Int): Int {
+        if (r < 0 || r >= ctxUnseenCounts.size) return 0
+        var maxEnemy = 0
+        for (t in ctxEnemyTotals) if (t > maxEnemy) maxEnemy = t
+        val u = ctxUnseenCounts[r]
+        return if (u <= maxEnemy) u else maxEnemy
+    }
+
+    /** 对手视角的威胁张数：以"单个敌人最多可能持有量"上界计（农民视角自动只算地主） */
     private fun unseenThreat(r: Int): Int {
-        if (r >= ctxUnseenCounts.size) return 0
-        return scaledThreat(ctxUnseenCounts[r])
+        return enemyMaxHold(r)
     }
 
     private fun maxUnseenRun(minRank: Int, needPerRank: Int): Int {
@@ -1030,7 +1190,11 @@ object AIDecision {
 
     private fun hasUnseenHigherBombOrRocket(myBombRank: Int): Boolean {
         if (ctxUnseenCounts.size < 18) return false
-        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && ctxMaxOpponentCards >= 2) return true
+        // 炸弹/火箭需单个敌人握满：用各敌人剩余牌数做硬约束，避免"两家 2+2 分家"被误判成炸弹
+        val anyEnemyCanHoldBomb = ctxEnemyTotals.any { it >= 4 }
+        val anyEnemyCanHoldRocket = ctxEnemyTotals.any { it >= 2 }
+        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && anyEnemyCanHoldRocket) return true
+        if (!anyEnemyCanHoldBomb) return false
         for (r in (myBombRank + 1)..15) {
             if (ctxUnseenCounts[r] == 4) return true
         }
@@ -1039,7 +1203,10 @@ object AIDecision {
 
     private fun hasUnseenBombOrRocket(): Boolean {
         if (ctxUnseenCounts.size < 18) return false
-        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && ctxMaxOpponentCards >= 2) return true
+        val anyEnemyCanHoldBomb = ctxEnemyTotals.any { it >= 4 }
+        val anyEnemyCanHoldRocket = ctxEnemyTotals.any { it >= 2 }
+        if (ctxUnseenCounts[16] == 1 && ctxUnseenCounts[17] == 1 && anyEnemyCanHoldRocket) return true
+        if (!anyEnemyCanHoldBomb) return false
         for (r in 3..15) if (ctxUnseenCounts[r] == 4) return true
         return false
     }
