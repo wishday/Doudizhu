@@ -294,10 +294,16 @@ object AIDecision {
      * 不满足时宁可放过，避免"为小牌保结构"或"浪费大牌压小单张"而消耗宝贵控牌。
      * 注：压队友的场景已在 shouldInterceptTeammate 中单独处理，这里遇到的一定是压对手。
      */
-    private fun allowBigSingleFollow(lastPlay: CardGroup): Boolean {
+    private fun allowBigSingleFollow(lastPlay: CardGroup, role: PlayerRole, hand: List<Card>): Boolean {
         if (lastPlay.type != CardType.SINGLE) return true
         if (lastPlay.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK) return true
         if (ctxMinOpponentCards <= 2) return true // 对手即将获胜，必须拦截
+        // 地主残局：手牌仅剩少量"散单"（无任何对/三/炸可保留）时，遇到单张领出必须尽早压，
+        // 否则对手一旦改领对子，地主散单永远压不了，被永久封死（地主只能靠两轮分别压单张取胜）。
+        if (role == PlayerRole.LANDLORD && hand.size <= 4 &&
+            hand.all { c -> hand.count { it.rank == c.rank } == 1 }) {
+            return true
+        }
         return false
     }
 
@@ -901,7 +907,7 @@ object AIDecision {
                 ?.let { return it }
         }
         // 大单张克制：仅当允许时才把 A/2/王 纳入"可跟"候选，否则保留（见 allowBigSingleFollow）
-        val allowBig = allowBigSingleFollow(lastPlay)
+        val allowBig = allowBigSingleFollow(lastPlay, role, hand)
         val gateBig: (CardGroup) -> Boolean = { g ->
             !( !allowBig && g.type == CardType.SINGLE && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
         }
