@@ -714,14 +714,15 @@ object AIDecision {
 
         if (candidates.isEmpty()) return null
 
-        // 评估：剩余手数最少优先，其次带走低牌(3..7)越多越好，其次零散单张最少，其次威胁最低，其次主 rank
+        // 评估：剩余手数最少优先；同效率(剩余手数相同)时主牌小的优先（先消耗小牌）；
+        // 再依次：带走低牌(3..7)越多越好、零散单张最少、被接走危险最低
         return candidates.minWithOrNull(
             compareBy(
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
+                { it.mainRank },
                 { -lowAbsorbed(it.cards) },
                 { scatteredSingles(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
-                { feedDanger(it) },
-                { it.mainRank }
+                { feedDanger(it) }
             )
         )
     }
