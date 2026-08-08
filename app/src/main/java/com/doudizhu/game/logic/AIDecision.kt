@@ -189,8 +189,8 @@ object AIDecision {
 
     /**
      * 跟牌选牌：按"破坏等级"分档（不破坏 > 拆对/三张 > 拆顺子/连对/飞机），档内取最小点数；
-     * 对所有牌型生效。非紧急时不拆长结构(等级2)，直接放过保存牌组。大单张(A/2/王)已在
-     * sameTypeSafe 中按 allowBigSingleFollow 过滤过，这里不再处理。
+     * 对所有牌型生效。非紧急时不拆长结构(等级2)，直接放过保存牌组。大单张(A/2/王)与拆结构的
+     * 可否跟出，统一在 pickFollow 的统一闸门中按 allowBigSingleFollow / OPPONENT_BREAK_MIN_RANK 决定。
      */
     /** 手中 A~王 的总分：A=2, 2=4, 小王=6, 大王=6（用于"是否值得拆牌跟"的动态评分） */
     private fun bigCardScore(hand: List<Card>): Int =
@@ -211,7 +211,7 @@ object AIDecision {
     /**
      * 该单张跟牌是否会破坏"需要保护的大结构"（按需求：顺子/连对/飞机，以及三张 Q(12)/K(13)）。
      * 普通对子、其它三张、散牌 一律视为"无需保护"，返回 false。
-     * 用于 normalFollow 的 gateBig：仅当"不用王/2 就必然破坏受保护大结构"时才放行王/2。
+     * 供 pickFollow 统一闸门使用：仅当"不用王/2 就必然破坏受保护大结构"时才放行王/2。
      */
     private fun breaksProtectedStructure(g: CardGroup, hand: List<Card>): Boolean {
         if (g.type != CardType.SINGLE) return false
@@ -228,22 +228,36 @@ object AIDecision {
      *   2) 拆对/三张时再按动态评分：对手剩牌 <=4（很近）或 大牌总分*2 >= 对手剩牌*3（≈ 大牌分 >= 1.5×剩牌）才拆。
      * 其余牌型维持原 isUrgent 逻辑。
      */
+    /**
+     * 跟对手牌的统一闸门（合并原 gateBig 与拆结构门槛，单一事实源）：
+     *   - tier 2（拆顺子/连对/飞机）：一律禁止
+     *   - tier 0 散牌：可跟；其中控牌散张(A/2/王)仅当 allowBig(对手领出>=A 或对手快赢) 或"无安全跟法需保大结构"时放行
+     *   - tier 1（拆对/三张）：仅当对手领出 >= Q 且 (很近 或 大牌足够) 时放行
+     *   hasSafeFollow = 存在"无需牺牲受保护大结构即可压过"的跟法（散牌 或 仅拆普通对子/非QQQ·KKK三张）
+     */
     private fun pickFollow(hand: List<Card>, candidates: List<CardGroup>, lastPlay: CardGroup): CardGroup? {
         if (candidates.isEmpty()) return null
         val allowBreak = lastPlay.mainRank >= OPPONENT_BREAK_MIN_RANK
         val oppLeft = ctxMinOpponentCards
         val myBig = bigCardScore(hand)
         val maxTierOther = if (isUrgent()) 2 else 1
+        val hasSafeFollow = candidates.any { g ->
+            g.type == CardType.SINGLE &&
+            g.mainRank > lastPlay.mainRank &&
+            !isControlRank(g.mainRank) &&
+            !breaksProtectedStructure(g, hand)
+        }
+        val allowBig = allowBigSingleFollow(lastPlay, ctxRole, hand)
         return candidates
             .filter { g ->
                 val tier = groupDisruption(g, hand)
                 when {
                     lastPlay.type != CardType.SINGLE && lastPlay.type != CardType.PAIR ->
                         tier <= maxTierOther
-                    tier == 0 -> true                                  // 真散牌永远可跟
+                    tier == 0 -> if (isControlRank(g.mainRank)) allowBig || !hasSafeFollow else true
                     !allowBreak -> false                               // 对手牌面 < Q：绝不拆
-                    tier == 1 -> oppLeft <= 4 || myBig * 2 >= oppLeft * 3   // 拆对/三张：很近 或 大牌足够
-                    else -> true                                       // tier2 拆长结构：>=Q 即放行
+                    tier == 1 -> oppLeft <= 4 || myBig * 2 >= oppLeft * 3   // 拆对/三张：很近 或 大牌足够（允许所有对子/三张）
+                    else -> false                                      // tier2：禁止拆顺子/连对/飞机等长结构
                 }
             }
             .minWithOrNull(compareBy(
@@ -919,31 +933,10 @@ object AIDecision {
                 }
                 ?.let { return it }
         }
-        // 大单张克制：仅当允许时才把 A/2/王 纳入"可跟"候选，否则保留（见 allowBigSingleFollow）
-        val allowBig = allowBigSingleFollow(lastPlay, role, hand)
-        // 是否存在"无需牺牲受保护大结构即可压过"的跟法：散牌(tier0) 或 仅拆普通对子/非QQQ·KKK的三张
-        // （这些按需求不保护）。存在时走保守策略（不浪费王/2）；不存在时放行王/2 以保大结构。
-        val hasSafeFollow = sameType.any { g ->
-            g.type == CardType.SINGLE &&
-            g.mainRank > lastPlay.mainRank &&
-            !isControlRank(g.mainRank) &&
-            !breaksProtectedStructure(g, hand)
-        }
-        val gateBig: (CardGroup) -> Boolean = { g ->
-            if (g.type != CardType.SINGLE) true
-            else if (hasSafeFollow) {
-                // 有更划算的跟法（散牌/只拆普通对子）→ 保守，不浪费王/2
-                !( !allowBig && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
-            } else {
-                // 任何非控跟法都会破坏受保护大结构 → 放行王/2 保大结构
-                true
-            }
-        }
-        val sameTypeSafe = sameType.filter(gateBig)
         val landlordPlayed = role == PlayerRole.FARMER && lastPlayerIndex == landlordIndex
         val myLastResponder = landlordPlayed && !teammateIsNext
 
-        // 2. 对手快赢了，必须压住（此处 ctxMinOpponentCards<=2，allowBig 必为 true，大单张可动用）
+        // 2. 对手快赢了，必须压住（此处 ctxMinOpponentCards<=2，allowBigSingleFollow 必为 true，大单张可动用）
         if (ctxMinOpponentCards <= 2) {
             if (ctxMinOpponentCards == 1 &&
                 (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR)) {
@@ -961,12 +954,13 @@ object AIDecision {
 
         // 3. 我是最后一个响应地主的人（队友已过牌）→ 尽量接过控制，按"最小破坏"选牌
         if (myLastResponder) {
-            pickFollow(hand, sameTypeSafe, lastPlay)?.let { return it }
+            pickFollow(hand, sameType, lastPlay)?.let { return it }
             // 无安全可跟牌：放走地主，保存结构/控牌
         }
 
         // 4. 普通跟牌：优先真散牌 → 其次拆对/三张 → (紧急)才拆顺子/飞机；大单张受 allowBig 限制
-        pickFollow(hand, sameTypeSafe, lastPlay)?.let { return it }
+        //    （门槛统一在 pickFollow 内：禁拆长结构、控牌单张受 allowBigSingleFollow 约束）
+        pickFollow(hand, sameType, lastPlay)?.let { return it }
 
         // 5. 兜底：仅紧急时才动炸弹
         if (isUrgent()) {
