@@ -208,22 +208,34 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /**
      * 播放振动反馈（针对线性马达 LRA 优化）：
-     * 用显式长脉冲 + 满振幅，确保 LRA 质量块有足够时间起振并可清晰感知。
-     * 预设波形(EFFECT_*)在部分 LRA 上过轻，故改为可控时长/振幅的 one-shot。
+     * 用显式长脉冲 + 中等振幅，确保 LRA 质量块起振且可清晰感知（振幅已按手感减半）。
      */
     private fun vibrate(kind: VibrationKind) {
         try {
             val v = vibrator ?: return
             val (dur, amp) = when (kind) {
-                VibrationKind.TICK -> 50L to 200
-                VibrationKind.CLICK -> 90L to 255
-                VibrationKind.HEAVY -> 150L to 255
+                VibrationKind.TICK -> 50L to 100
+                VibrationKind.CLICK -> 90L to 128
+                VibrationKind.HEAVY -> 150L to 128
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 v.vibrate(VibrationEffect.createOneShot(dur, amp))
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(dur)
+            }
+        } catch (_: Exception) {}
+    }
+
+    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：1.5 秒满振幅 */
+    fun playBigVibration() {
+        try {
+            val v = vibrator ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(VibrationEffect.createOneShot(1500L, 255))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(1500L)
             }
         } catch (_: Exception) {}
     }
@@ -235,21 +247,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 按钮释放反馈（弱于按下，体现按键回弹） */
     private fun hapticButtonRelease() {
-        vibrate(VibrationKind.TICK)
-    }
-
-    /** 选牌反馈（点击选中） */
-    private fun hapticCardSelect() {
-        vibrate(VibrationKind.CLICK)
-    }
-
-    /** 取消选牌反馈 */
-    private fun hapticCardDeselect() {
-        vibrate(VibrationKind.TICK)
-    }
-
-    /** 滑动加选反馈（每张轻触） */
-    private fun hapticSwipeCard() {
         vibrate(VibrationKind.TICK)
     }
 
@@ -440,11 +437,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (idx < 0) return
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
-            hapticCardDeselect()
             playTone(ToneGenerator.TONE_PROP_ACK, 25)
         } else {
             gameEngine.selectedCardIndices.add(idx)
-            hapticCardSelect()
             playTone(ToneGenerator.TONE_PROP_ACK, 30)
         }
         refresh()
@@ -458,11 +453,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         lastDragCardIndex = idx
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
-            hapticCardDeselect()
             playTone(ToneGenerator.TONE_PROP_ACK, 25)
         } else {
             gameEngine.selectedCardIndices.add(idx)
-            hapticSwipeCard()
             playTone(ToneGenerator.TONE_PROP_ACK, 30)
         }
         refresh()

@@ -26,7 +26,7 @@ interface GameEngineCallback {
     /** 轮到某玩家出牌 */
     fun onPlayerTurn(playerIndex: Int)
     /** 玩家出牌 */
-    fun onPlayerPlay(playerIndex: Int, cards: List<Card>)
+    fun onPlayerPlay(playerIndex: Int, cards: List<Card>, group: CardGroup)
     /** 玩家不出 */
     fun onPlayerPass(playerIndex: Int)
     /** 游戏结束 */
@@ -250,7 +250,7 @@ class GameEngine {
         val nextPlayer = stateMachine.processPlay(playerIndex, group)
         selectedCardIndices.clear()
 
-        callback?.onPlayerPlay(playerIndex, cards)
+        callback?.onPlayerPlay(playerIndex, cards, group)
 
         // 检查是否结束
         val winner = stateMachine.checkGameOver(players.map { it.cardCount })

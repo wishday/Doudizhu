@@ -7,6 +7,8 @@ import androidx.appcompat.app.AppCompatActivity
 import com.doudizhu.game.logic.GameEngine
 import com.doudizhu.game.logic.GameEngineCallback
 import com.doudizhu.game.model.Card
+import com.doudizhu.game.model.CardGroup
+import com.doudizhu.game.model.CardType
 import com.doudizhu.game.ui.GameSurfaceView
 
 /**
@@ -134,7 +136,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         }
     }
 
-    override fun onPlayerPlay(playerIndex: Int, cards: List<Card>) {
+    override fun onPlayerPlay(playerIndex: Int, cards: List<Card>, group: CardGroup) {
         runOnUiThread {
             gameSurfaceView.clearAllPlayedCards()
             gameSurfaceView.setTablePlayedCards(playerIndex, cards)
@@ -142,6 +144,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             val cardText = cards.joinToString(" ") { it.toString() }
             gameSurfaceView.showMessage("$name: $cardText", 2000)
             gameSurfaceView.playCardSound()
+            // 大出牌：炸弹 / 火箭 / 一次出牌≥8张，加 1.5 秒长振动
+            if (group.type == CardType.BOMB || group.type == CardType.ROCKET || cards.size >= 8) {
+                gameSurfaceView.playBigVibration()
+            }
             gameSurfaceView.refresh()
         }
     }
