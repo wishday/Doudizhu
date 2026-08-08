@@ -611,42 +611,64 @@ object AIDecision {
             val wingRanks = counts.entries
                 .filter { it.key !in usedRanks && it.key !in bombRanks && !isControlRank(it.key) && it.key < 14 }
                 .sortedBy { it.key }
-            // 带单翼：优先用纯散牌（count==1）作翼吸收零散小牌，不足再从最小对子拆单张补齐
+            // 带单翼：优先用「真散牌」(仅1张、非顺子成员) 作翼吸收零散小牌，不足再从最小非顺子牌拆单张补齐
             if (wingRanks.size >= wingLen) {
-                val pureSingles = wingRanks.filter { it.value == 1 }.take(wingLen)
+                val pureSingles = wingRanks.filter { it.value == 1 && !isStraightMember(it.key, hand) }.take(wingLen)
                 val wings = if (pureSingles.size >= wingLen) {
                     pureSingles.map { (rank, _) -> hand.first { it.rank == rank } }
                 } else {
-                    wingRanks.take(wingLen).flatMap { (rank, _) -> hand.filter { it.rank == rank }.take(1) }
+                    wingRanks.filter { !isStraightMember(it.key, hand) }.take(wingLen)
+                        .flatMap { (rank, _) -> hand.filter { it.rank == rank }.take(1) }
                 }
                 candidates.add(CardGroup(CardType.PLANE_SINGLE, plane.mainRank, wingLen, plane.cards + wings))
             }
-            // 带双翼：取 wingLen 个最小非控对子
-            val pairWingRanks = wingRanks.filter { it.value >= 2 }.take(wingLen)
+            // 带双翼：仅用「干净低对」(仅2张、<10、且非连对/飞机成员) 作翼；
+            //         不够或只有 >=10 对子/结构对子时，一律不白送，只保留上面的带单翼方案。
+            val pairWingRanks = wingRanks.filter {
+                it.value == 2 && it.key < 10
+                    && !isStraightPairMember(it.key, hand) && !isPlaneMember(it.key, hand)
+            }.take(wingLen)
             if (pairWingRanks.size >= wingLen) {
                 val pairWings = pairWingRanks.flatMap { (rank, _) -> hand.filter { it.rank == rank }.take(2) }
                 candidates.add(CardGroup(CardType.PLANE_PAIR, plane.mainRank, wingLen, plane.cards + pairWings))
             }
         }
 
-        // 三带一/三带二/三张：用非控最小 kicker 吸收零散小牌
+        // 三带一/三带二/三张：结构感知的 kicker 选择
+        // 规则：
+        //   - <10 的「干净对子」(仅2张、且不是连对/飞机/顺子成员) 优先作带对；
+        //   - >=10 的对子、或任何结构成员(连对/飞机/顺子/三张) 一律不许当补牌；
+        //   - 只要存在可带的「真散牌」(仅1张、非顺子成员)，就优先带单张小散牌，不白送 >=10 的对子。
+        val looseSingleKicker = counts.entries
+            .filter { it.key !in bombRanks && it.key < 14 && it.value == 1 && !isStraightMember(it.key, hand) }
+            .minByOrNull { rankOf(it.key) }?.key
+        val cleanLowPairKicker = counts.entries
+            .filter { it.key !in bombRanks && it.value == 2 && it.key < 10
+                && !isStraightPairMember(it.key, hand) && !isPlaneMember(it.key, hand) }
+            .minByOrNull { rankOf(it.key) }?.key
+        val highPairKicker = counts.entries
+            .filter { it.key !in bombRanks && it.value == 2 && it.key >= 10
+                && !isStraightPairMember(it.key, hand) && !isPlaneMember(it.key, hand) }
+            .minByOrNull { rankOf(it.key) }?.key
+
         for (r in tripleRanks) {
             val three = hand.filter { it.rank == r }.take(3)
-            val pairKick = counts.entries
-                .filter { it.key != r && it.key !in bombRanks && it.value >= 2 && it.key < 14 }
-                .minByOrNull { entry -> rankOf(entry.key) }
-            if (pairKick != null) {
-                val kickers = hand.filter { c -> c.rank == pairKick.key }.take(2)
-                candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
-            } else {
-                val singleKick = counts.entries
-                    .filter { it.key != r && it.key !in bombRanks && it.value >= 1 && it.key < 14 }
-                    .minByOrNull { entry -> rankOf(entry.key) }?.key
-                    ?: counts.entries.firstOrNull { it.key != r && it.key !in bombRanks && it.key < 14 }?.key
-                if (singleKick != null) {
-                    val kick = hand.filter { c -> c.rank == singleKick }.take(1).firstOrNull()
-                    if (kick != null) candidates.add(CardGroup(CardType.TRIPLE_ONE, r, 1, three + kick))
-                } else {
+            // 优先带单张小散牌
+            if (looseSingleKicker != null) {
+                val kick = hand.first { it.rank == looseSingleKicker }
+                candidates.add(CardGroup(CardType.TRIPLE_ONE, r, 1, three + kick))
+            }
+            // 带对：<10 干净对子优先；仅当没有任何散牌可带时，才退而用 >=10 的对子
+            when {
+                cleanLowPairKicker != null -> {
+                    val kickers = hand.filter { c -> c.rank == cleanLowPairKicker }.take(2)
+                    candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
+                }
+                highPairKicker != null && looseSingleKicker == null -> {
+                    val kickers = hand.filter { c -> c.rank == highPairKicker }.take(2)
+                    candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
+                }
+                looseSingleKicker == null && cleanLowPairKicker == null && highPairKicker == null -> {
                     candidates.add(CardGroup(CardType.TRIPLE, r, 1, three))
                 }
             }
