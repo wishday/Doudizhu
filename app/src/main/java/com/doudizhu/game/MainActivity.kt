@@ -144,9 +144,17 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             val cardText = cards.joinToString(" ") { it.toString() }
             gameSurfaceView.showMessage("$name: $cardText", 2000)
             gameSurfaceView.playCardSound()
-            // 大出牌：炸弹 / 火箭 / 一次出牌≥8张，加 1.5 秒长振动
-            if (group.type == CardType.BOMB || group.type == CardType.ROCKET || cards.size >= 8) {
+
+            val isLastCard = gameEngine.players[playerIndex].handCards.size == 1
+            val isBig = group.type == CardType.BOMB || group.type == CardType.ROCKET || cards.size >= 8
+            // 大出牌：炸弹 / 火箭 / 一次出牌≥8张，加 1.5 秒长振动（与最后一张提醒互斥，避免振动互相覆盖）
+            if (isBig && !isLastCard) {
                 gameSurfaceView.playBigVibration()
+            }
+            // 任意玩家剩最后一张牌：特殊提醒音效 + 三段脉冲振动
+            if (isLastCard) {
+                gameSurfaceView.playLastCardAlert()
+                gameSurfaceView.playLastCardVibration()
             }
             gameSurfaceView.refresh()
         }

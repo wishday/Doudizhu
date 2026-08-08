@@ -240,6 +240,26 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } catch (_: Exception) {}
     }
 
+    /** 剩最后一张牌的特殊提醒音效 */
+    fun playLastCardAlert() {
+        playTone(ToneGenerator.TONE_CDMA_ALERT_AUTOREDIAL, 260)
+    }
+
+    /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震） */
+    fun playLastCardVibration() {
+        try {
+            val v = vibrator ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val timings = longArrayOf(0, 120, 80, 120, 80, 120)
+                val amps = intArrayOf(0, 255, 0, 255, 0, 255)
+                v.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(longArrayOf(0, 120, 80, 120, 80, 120), -1)
+            }
+        } catch (_: Exception) {}
+    }
+
     /** 按钮轻触反馈（按下） */
     private fun hapticButtonPress() {
         vibrate(VibrationKind.CLICK)
