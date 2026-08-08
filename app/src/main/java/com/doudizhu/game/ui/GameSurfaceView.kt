@@ -178,6 +178,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 动画结束回调（由 MainActivity 注入，通常为进入叫分阶段） */
     @Volatile
     private var onRevealComplete: (() -> Unit)? = null
+    /** 发牌动画代次：每次开局自增，防止上一局延迟的结束回调串入下一局 */
+    @Volatile
+    private var revealGeneration = 0
     /** 逐张错峰间隔（ms） */
     private val REVEAL_STAGGER_MS = 140L
     /** 单张入场时长（ms） */
@@ -362,18 +365,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 启动开局手牌展示动画（逐张滑入，约 3 秒），结束后回调 onComplete */
     fun startHandReveal(onComplete: () -> Unit) {
+        revealGeneration++
         dealRevealStart = System.currentTimeMillis()
         onRevealComplete = onComplete
         isHandReveal = true
         refresh()
     }
 
-    /** 动画结束：停止动画并（仅一次）触发回调 */
+    /** 动画结束：停止动画并（仅一次、且代次匹配时）触发回调，防止串场 */
     private fun finishReveal() {
         isHandReveal = false
         val cb = onRevealComplete
+        val gen = revealGeneration
         onRevealComplete = null
-        cb?.let { runnable -> post { runnable() } }
+        cb?.let { runnable -> post { if (gen == revealGeneration) runnable() } }
     }
 
     fun showMessage(msg: String, durationMs: Long = 2000) {
@@ -861,17 +866,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
-    /** 带缩放与淡入的卡牌绘制（用于开局滑入动画） */
+    /** 带缩放与淡入的卡牌绘制（用于开局滑入动画，无离屏图层，性能友好） */
     private fun drawRevealingCard(canvas: Canvas, x: Float, y: Float, card: Card,
                                   selected: Boolean, rotation: Float, scale: Float, alpha: Float) {
+        // 完全就位（无缩放、无淡入）：直接原样绘制，零额外开销
+        if (alpha >= 0.999f && scale == 1f) {
+            drawCard(canvas, x, y, card, selected, rotation)
+            return
+        }
         canvas.save()
-        val layerPaint = Paint().apply { this.alpha = (alpha * 255f).toInt().coerceIn(0, 255) }
-        canvas.saveLayer(null, layerPaint)
-        canvas.save()
-        canvas.scale(scale, scale, x + cardW / 2, y + cardH / 2)
-        drawCard(canvas, x, y, card, selected, rotation)
-        canvas.restore()
-        canvas.restore()
+        if (scale != 1f) {
+            canvas.scale(scale, scale, x + cardW / 2, y + cardH / 2)
+        }
+        drawCard(canvas, x, y, card, selected, rotation, alpha)
         canvas.restore()
     }
 
@@ -883,25 +890,34 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         return 1f + c3 * x * x * x + c1 * x * x
     }
 
-    /** 绘制单张扑克牌（手牌，大尺寸） */
-    private fun drawCard(canvas: Canvas, x: Float, y: Float, card: Card, selected: Boolean, rotation: Float = 0f) {
+    /** 绘制单张扑克牌（手牌，大尺寸）；alpha<1 时用于开局淡入，绘制后还原共享画笔的 alpha */
+    private fun drawCard(canvas: Canvas, x: Float, y: Float, card: Card,
+                         selected: Boolean, rotation: Float = 0f, alpha: Float = 1f) {
+        val fade = alpha < 0.999f
+        val a = if (fade) (alpha * 255f).toInt().coerceIn(0, 255) else 255
         canvas.save()
         canvas.rotate(rotation, x + cardW / 2, y + cardH / 2)
 
         // 选中阴影
         if (selected) {
+            if (fade) shadowPaint.alpha = a
             canvas.drawRoundRect(x + 4f, y + 8f, x + cardW + 4f, y + cardH + 8f,
                 cardRadius, cardRadius, shadowPaint)
+            if (fade) shadowPaint.alpha = 255
         }
 
         // 牌面
         cardPaint.color = if (selected) Color.parseColor("#FFF9C4") else Color.WHITE
+        if (fade) cardPaint.alpha = a
         canvas.drawRoundRect(x, y, x + cardW, y + cardH, cardRadius, cardRadius, cardPaint)
+        if (fade) cardPaint.alpha = 255
 
         // 边框
         cardBorderPaint.color = if (selected) Color.parseColor("#FFD600") else Color.parseColor("#BDBDBD")
         cardBorderPaint.strokeWidth = if (selected) 6f else 3f
+        if (fade) cardBorderPaint.alpha = a
         canvas.drawRoundRect(x, y, x + cardW, y + cardH, cardRadius, cardRadius, cardBorderPaint)
+        if (fade) cardBorderPaint.alpha = 255
 
         val textColor = if (card.isRed) Color.parseColor("#D32F2F") else Color.parseColor("#212121")
 
@@ -909,22 +925,26 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         smallTextPaint.textSize = cardW * 0.15f
         smallTextPaint.color = textColor
         smallTextPaint.textAlign = Paint.Align.LEFT
+        if (fade) smallTextPaint.alpha = a
         canvas.drawText(card.suitSymbol, x + 14f, y + cardH * 0.18f, smallTextPaint)
         smallTextPaint.textSize = cardW * 0.36f
         canvas.drawText(card.displayText, x + 14f, y + cardH * 0.36f, smallTextPaint)
+        if (fade) smallTextPaint.alpha = 255
 
         // 中央大字
         textPaint.textSize = cardW * 0.62f
         textPaint.color = textColor
         textPaint.textAlign = Paint.Align.CENTER
+        if (fade) textPaint.alpha = a
         canvas.drawText(card.displayText, x + cardW / 2, y + cardH * 0.62f, textPaint)
+        if (fade) textPaint.alpha = 255
 
         // 右下角花色
         smallTextPaint.textSize = cardW * 0.15f
         smallTextPaint.textAlign = Paint.Align.RIGHT
         canvas.drawText(card.suitSymbol, x + cardW - 14f, y + cardH - 24f, smallTextPaint)
-
         smallTextPaint.textAlign = Paint.Align.LEFT
+
         canvas.restore()
     }
 
