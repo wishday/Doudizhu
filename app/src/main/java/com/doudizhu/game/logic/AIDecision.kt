@@ -794,6 +794,22 @@ object AIDecision {
 
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
         val nonControl = sameType.filter { !isControlRank(it.mainRank) }
+
+        // 1.6 跟对手：炸弹抢胜——只要动炸弹后能"一手清完"就果断炸，不再受对手剩牌数(紧急)限制。
+        //     若普通同型跟牌本身已能导向一手清完，则保留炸弹走普通跟牌；
+        //     否则押上「最小且不会被对手 unseen 更大炸弹/火箭反制」的炸弹抢胜。
+        val normalWinExists = sameType.any { np ->
+            canFinishRemaining(hand.filter { c -> np.cards.none { it.id == c.id } })
+        }
+        if (!normalWinExists) {
+            validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                .sortedBy { it.mainRank }
+                .firstOrNull { bomb ->
+                    !hasUnseenHigherBombOrRocket(bomb.mainRank) &&
+                        canFinishRemaining(hand.filter { c -> bomb.cards.none { it.id == c.id } })
+                }
+                ?.let { return it }
+        }
         // 大单张克制：仅当允许时才把 A/2/王 纳入"可跟"候选，否则保留（见 allowBigSingleFollow）
         val allowBig = allowBigSingleFollow(lastPlay)
         val gateBig: (CardGroup) -> Boolean = { g ->
