@@ -137,6 +137,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
     private var pressedAction: String? = null
 
+    /** 调试日志回调：转发触摸/命中信息给外部（如可复制文本框），用于排查触摸与振动问题 */
+    var logListener: ((String) -> Unit)? = null
+    private fun logD(msg: String) { logListener?.invoke(msg) }
+    private fun actionName(action: Int): String = when (action) {
+        MotionEvent.ACTION_DOWN -> "DOWN"
+        MotionEvent.ACTION_MOVE -> "MOVE"
+        MotionEvent.ACTION_UP -> "UP"
+        MotionEvent.ACTION_CANCEL -> "CANCEL"
+        else -> action.toString()
+    }
+
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
 
@@ -205,6 +216,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 播放振动反馈（支持设置振幅） */
     private fun vibrate(durationMs: Long = 30, amplitude: Int = 200) {
+        logD("  VIBRATE call dur=$durationMs amp=$amplitude vibrator=${if (vibrator != null) "ok" else "NULL"}")
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -213,7 +225,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 @Suppress("DEPRECATION")
                 v.vibrate(durationMs)
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            logD("  VIBRATE exception: ${e.message}")
+        }
     }
 
     /** 按钮轻触反馈（按下，偏轻量） */
@@ -351,6 +365,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = event.x
         val y = event.y
+        logD("TOUCH ${actionName(event.action)} x=${x.toInt()} y=${y.toInt()} W=$screenWidth H=$screenHeight curP=${if (::gameEngine.isInitialized) gameEngine.stateMachine.currentPlayerIndex else "?"}")
 
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
@@ -362,6 +377,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     if (btn.rect.contains(x, y)) {
                         pressedAction = btn.action
                         hapticButtonPress()
+                        logD("  BTN down hit action=${btn.action}")
                         refresh()
                         return true
                     }
@@ -387,6 +403,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 // 处理按钮释放（允许轻微偏移，防误触）
                 val action = pressedAction
                 if (action != null) {
+                    logD("  BTN up action=$action")
                     handleButtonAction(action)
                     hapticButtonRelease()
                     pressedAction = null
@@ -425,6 +442,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 点击：切换某张牌的选中状态（支持取消选牌） */
     private fun toggleCardAt(touchX: Float, touchY: Float) {
         val idx = hitTestCard(touchX, touchY)
+        logD("  CARD tap idx=$idx (sel=${gameEngine.selectedCardIndices})")
         if (idx < 0) return
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
@@ -444,6 +462,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (idx < 0) return
         if (idx == lastDragCardIndex) return
         lastDragCardIndex = idx
+        logD("  CARD swipe idx=$idx (sel=${gameEngine.selectedCardIndices})")
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
             hapticCardDeselect()
