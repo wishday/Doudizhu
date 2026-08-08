@@ -440,6 +440,13 @@ object AIDecision {
         val fullHand = CardRuleEngine.identify(hand)
         if (fullHand.type != CardType.INVALID) return fullHand
 
+        // 手牌已全是炸弹/火箭（含纯火箭、纯炸弹、炸弹+火箭）：果断出炸弹，不拆弹拼同牌型
+        if (validPlays.none { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }) {
+            val bomb = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                .minByOrNull { it.mainRank }
+            if (bomb != null) return bomb
+        }
+
         // 1. 队友接近出完：优先喂牌（走最小，让队友接走）
         //    但对手(地主)也仅剩1张时不要喂——会把出牌权送给地主让他直接获胜
         if (role == PlayerRole.FARMER && ctxTeammateCardCount in 1..2 && ctxMinOpponentCards > 1) {
@@ -774,6 +781,15 @@ object AIDecision {
         // 1. 队友出的牌：大牌不压 | 快赢接管 | 否则小牌顶着消耗
         if (role == PlayerRole.FARMER && isTeammate(lastPlayerIndex, myIndex, role, landlordIndex)) {
             return shouldInterceptTeammate(hand, validPlays, lastPlay)
+        }
+
+        // 1.5 手牌已全是炸弹/火箭（无任何普通牌可出，含纯火箭、纯炸弹、炸弹+火箭）：
+        //     果断出炸弹接管，不拆弹拼同牌型，也不放走过牌。仅对对手/地主出牌生效，
+        //     队友仍走上面的 shouldInterceptTeammate（绝不炸队友）。
+        if (validPlays.none { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }) {
+            val bomb = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                .minByOrNull { it.mainRank }   // 最小炸弹优先，保留更大的炸弹/火箭
+            if (bomb != null) return bomb
         }
 
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
