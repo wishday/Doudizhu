@@ -209,6 +209,19 @@ object AIDecision {
     }
 
     /**
+     * 该单张跟牌是否会破坏"需要保护的大结构"（按需求：顺子/连对/飞机，以及三张 Q(12)/K(13)）。
+     * 普通对子、其它三张、散牌 一律视为"无需保护"，返回 false。
+     * 用于 normalFollow 的 gateBig：仅当"不用王/2 就必然破坏受保护大结构"时才放行王/2。
+     */
+    private fun breaksProtectedStructure(g: CardGroup, hand: List<Card>): Boolean {
+        if (g.type != CardType.SINGLE) return false
+        val r = g.mainRank
+        if (isStraightMember(r, hand) || isStraightPairMember(r, hand) || isPlaneMember(r, hand)) return true
+        if (hand.count { it.rank == r } == 3 && (r == 12 || r == 13)) return true
+        return false
+    }
+
+    /**
      * 跟牌选牌：按"破坏等级"分档（不破坏 > 拆对/三张 > 拆顺子/连对/飞机），档内优先拆便宜的牌组、再取最小点数。
      * 单张/对子跟牌的"拆牌"受两道闸：
      *   1) 对手牌面 >= Q(12) 才允许拆（OPPONENT_BREAK_MIN_RANK）；
@@ -908,8 +921,23 @@ object AIDecision {
         }
         // 大单张克制：仅当允许时才把 A/2/王 纳入"可跟"候选，否则保留（见 allowBigSingleFollow）
         val allowBig = allowBigSingleFollow(lastPlay, role, hand)
+        // 是否存在"无需牺牲受保护大结构即可压过"的跟法：散牌(tier0) 或 仅拆普通对子/非QQQ·KKK的三张
+        // （这些按需求不保护）。存在时走保守策略（不浪费王/2）；不存在时放行王/2 以保大结构。
+        val hasSafeFollow = sameType.any { g ->
+            g.type == CardType.SINGLE &&
+            g.mainRank > lastPlay.mainRank &&
+            !isControlRank(g.mainRank) &&
+            !breaksProtectedStructure(g, hand)
+        }
         val gateBig: (CardGroup) -> Boolean = { g ->
-            !( !allowBig && g.type == CardType.SINGLE && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
+            if (g.type != CardType.SINGLE) true
+            else if (hasSafeFollow) {
+                // 有更划算的跟法（散牌/只拆普通对子）→ 保守，不浪费王/2
+                !( !allowBig && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
+            } else {
+                // 任何非控跟法都会破坏受保护大结构 → 放行王/2 保大结构
+                true
+            }
         }
         val sameTypeSafe = sameType.filter(gateBig)
         val landlordPlayed = role == PlayerRole.FARMER && lastPlayerIndex == landlordIndex
