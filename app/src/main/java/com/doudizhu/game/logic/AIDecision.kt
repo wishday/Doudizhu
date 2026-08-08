@@ -233,7 +233,7 @@ object AIDecision {
      *   - tier 2（拆顺子/连对/飞机）：一律禁止
      *   - tier 0 散牌：可跟；其中控牌散张(A/2/王)仅当 allowBig(对手领出>=A 或对手快赢) 或"无安全跟法需保大结构"时放行
      *   - tier 1（拆对/三张）：仅当对手领出 >= Q 且 (很近 或 大牌足够) 时放行
-     *   hasSafeFollow = 存在"无需牺牲受保护大结构即可压过"的跟法（散牌 或 仅拆普通对子/非QQQ·KKK三张）
+     *   hasSafeFollow = 存在"无需牺牲任何结构即可压过"的跟法（仅真散牌 tier0；拆对/三张不算免费跟法，免得错杀散牌控牌）
      */
     private fun pickFollow(hand: List<Card>, candidates: List<CardGroup>, lastPlay: CardGroup): CardGroup? {
         if (candidates.isEmpty()) return null
@@ -245,6 +245,7 @@ object AIDecision {
             g.type == CardType.SINGLE &&
             g.mainRank > lastPlay.mainRank &&
             !isControlRank(g.mainRank) &&
+            groupDisruption(g, hand) == 0 &&                        // 仅真散牌算"免费跟法"，拆对/三张不算
             !breaksProtectedStructure(g, hand)
         }
         val allowBig = allowBigSingleFollow(lastPlay, ctxRole, hand)
@@ -916,7 +917,6 @@ object AIDecision {
         }
 
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
-        val nonControl = sameType.filter { !isControlRank(it.mainRank) }
 
         // 1.6 跟对手：炸弹抢胜——只要动炸弹后能"一手清完"就果断炸，不再受对手剩牌数(紧急)限制。
         //     若普通同型跟牌本身已能导向一手清完，则保留炸弹走普通跟牌；
@@ -940,12 +940,13 @@ object AIDecision {
         if (ctxMinOpponentCards <= 2) {
             if (ctxMinOpponentCards == 1 &&
                 (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR)) {
-                // 对手报单：用最大牌压，防止对手回手赢走
+                // 对手报单：出最大牌稳吃这一手，确保不被第三家抢走出牌权（对手已无牌可回手）
                 val maxPlay = sameType.maxByOrNull { it.mainRank }
                 if (maxPlay != null) return maxPlay
             } else {
-                // 对手剩2张：用最小能压的（尽量非控牌）
-                val minPlay = nonControl.minByOrNull { it.mainRank } ?: sameType.minByOrNull { it.mainRank }
+                // 对手剩2张：按"最小破坏→最小点数"在全部可压牌(含2/王)中选最小能压的，散牌优先于拆对
+                val minPlay = sameType.minWithOrNull(compareBy({ groupDisruption(it, hand) }, { it.mainRank }))
+                    ?: sameType.minByOrNull { it.mainRank }
                 if (minPlay != null) return minPlay
             }
             // 无普通牌可压时用炸弹阻止
