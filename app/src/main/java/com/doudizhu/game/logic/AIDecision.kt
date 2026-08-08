@@ -264,6 +264,25 @@ object AIDecision {
         }
     }
 
+    /**
+     * 附件偏好惩罚：单附件用高牌(J/Q/K/A/2)会浪费大牌，应优先用对子(尤其低对)作附件、保留高单牌；
+     * 对附件一律不罚（对子一次带走两张、利于清场）。
+     * 用于领出时在"飞机带两单"与"飞机带两对"等同型多方案中，让"单附件偏高"的方案排后，
+     * 从而优先出"飞机带对"而非带两高单牌（如 33/44 对 优于 J/K 单）。
+     */
+    private fun wingPenalty(group: CardGroup): Int {
+        val attachCount = when (group.type) {
+            CardType.TRIPLE_ONE, CardType.PLANE_SINGLE -> 1
+            CardType.TRIPLE_TWO, CardType.PLANE_PAIR -> 2
+            else -> return 0
+        }
+        if (attachCount != 1) return 0
+        val counts = group.cards.groupBy { it.rank }.mapValues { it.value.size }
+        val attachRanks = counts.filter { it.value == 1 }.keys
+        if (attachRanks.isEmpty()) return 0
+        return attachRanks.sumOf { r -> if (r - 10 > 0) r - 10 else 0 }
+    }
+
     private fun isUrgent(): Boolean =
         ctxMinOpponentCards <= 3 || ctxTeammateCardCount in 1..2
 
@@ -721,6 +740,7 @@ object AIDecision {
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { it.mainRank },
                 { -lowAbsorbed(it.cards) },
+                { wingPenalty(it) },
                 { scatteredSingles(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { feedDanger(it) }
             )
