@@ -214,9 +214,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         try {
             val v = vibrator ?: return
             val (dur, amp) = when (kind) {
-                VibrationKind.TICK -> 50L to 100
-                VibrationKind.CLICK -> 90L to 128
-                VibrationKind.HEAVY -> 150L to 128
+                VibrationKind.TICK -> 50L to 50
+                VibrationKind.CLICK -> 90L to 64
+                VibrationKind.HEAVY -> 150L to 64
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 v.vibrate(VibrationEffect.createOneShot(dur, amp))
@@ -227,15 +227,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } catch (_: Exception) {}
     }
 
-    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：1.5 秒满振幅 */
+    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：0.8 秒（振幅已减半） */
     fun playBigVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(VibrationEffect.createOneShot(1500L, 255))
+                v.vibrate(VibrationEffect.createOneShot(800L, 128))
             } else {
                 @Suppress("DEPRECATION")
-                v.vibrate(1500L)
+                v.vibrate(800L)
             }
         } catch (_: Exception) {}
     }
@@ -245,13 +245,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 260)
     }
 
-    /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震） */
+    /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震，振幅减半） */
     fun playLastCardVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val timings = longArrayOf(0, 120, 80, 120, 80, 120)
-                val amps = intArrayOf(0, 255, 0, 255, 0, 255)
+                val amps = intArrayOf(0, 128, 0, 128, 0, 128)
                 v.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
             } else {
                 @Suppress("DEPRECATION")
