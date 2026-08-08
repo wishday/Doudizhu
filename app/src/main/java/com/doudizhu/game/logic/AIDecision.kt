@@ -457,8 +457,8 @@ object AIDecision {
         // 2. 残局必胜：能确保冲完就直接冲
         canFinishGuaranteed(hand, validPlays)?.let { return it }
 
-        // 2.5 对手仅剩1张：控场甩牌组，大单张收尾，防被接走获胜
-        if (ctxMinOpponentCards == 1) return endgameLeadAgainstOneCard(hand, validPlays)
+        // 2.5 对手将赢(≤2张)：领"对手接不住"的安全牌组控场，防被接走获胜
+        if (ctxMinOpponentCards <= 2) return endgameLeadAgainstFewCards(hand, validPlays, ctxMinOpponentCards)
 
         // 3. 手牌少：残局枚举，最小剩余手数 + 防喂杀
         if (hand.size <= 5) return endgameLead(hand, validPlays)
@@ -488,7 +488,7 @@ object AIDecision {
     /** 残局领出（手牌 <= 5）：选「对手最难压住 + 剩余手数最少」的一手 */
     private fun endgameLead(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
         // 进入此分支时 ctxMinOpponentCards 必然 > 1（==1 已在 normalFreeLead 的
-        // step 2.5 提前返回 endgameLeadAgainstOneCard），故无需再判断报单。
+        // step 2.5 提前返回 endgameLeadAgainstFewCards），故无需再判断报单。
         val candidates = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
         // 残局领出：先甩非控牌，保留2/王后收尾。不能按 feedDanger 择优——
         // 控牌不可被压 feedDanger 恒为0，会领出就甩掉大王。故选剩余手数最少、点数最小的非控出法
@@ -506,23 +506,24 @@ object AIDecision {
     }
 
     /**
-     * 对手仅剩1张时的残局领出（实现「先出牌组、再大单张收尾」）。
+     * 对手将赢(≤2张)时的残局领出（实现「先出对手接不住的牌组、保住控制」）。
      *
-     * 对手只有1张，只能压「单张/对子」，**永远接不住任何多张结构牌（顺子/连对/飞机/三带）**，
-     * 也接不住对子与炸弹/火箭，因此：
-     *  1. 优先出「安全牌组」（非单张、不拆弹：含对子/结构/炸弹/火箭），对手必过牌，我方持续控场甩牌；
-     *  2. 组牌择优：出完「剩余手数最少 + 散单最少」的牌组，并尽量消耗小牌（mainRank 小的结构），
-     *     把大牌留作单张，避免最后被迫出小单张被对手那1张接走获胜；
-     *  3. 仅剩单张时，从大到小领出——若对手那1张小于我最大单张则被顶死过牌，我能再多甩一张。
+     * 对手张数越少，能接住的牌型越少：
+     *  - 仅剩1张：只能压「单张/对子」，**永远接不住任何多张结构/炸弹** → 安全集 = 非单张；
+     *  - 剩≤2张：还可能压「对子」→ 安全集收紧为「非单张 且 非对子」（只领 顺子/连对/飞机/三带/炸弹/火箭），
+     *    这样 ≤2 张手牌无论如何组不出、也压不动，我方稳控场。
+     * 优先 chooseStructureLead 选最优结构牌；无结构时在 safe 中按「保留炸弹 + 剩余手数最少 + 散单最少 + 消耗小牌」择优；
+     * 连结构/炸弹都没有时，≤2 张对手优先领对子（两单张的对手接不住）、再退单张。
      */
-    private fun endgameLeadAgainstOneCard(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
+    private fun endgameLeadAgainstFewCards(hand: List<Card>, validPlays: List<CardGroup>, oppCards: Int): CardGroup {
+        // opp<=2 时连对子也要避免（2 张对手可能正好持对子压掉）
+        val allowPair = oppCards > 2
         val safe = validPlays.filter {
-            it.type != CardType.SINGLE && !breaksBomb(it, hand)
+            it.type != CardType.SINGLE && (allowPair || it.type != CardType.PAIR) && !breaksBomb(it, hand)
         }
         if (safe.isNotEmpty()) {
             // 优先用 chooseStructureLead 的「拆分变体 + 剩余手数最少 + 散单最少」优化器选出最优结构牌，
-            // 它已考虑「吸收小牌、保留大单张」，比下面简版比较更精细。该结构必然非单张、不拆弹，
-            // 且对手仅1张永远接不住，可安全甩出持续控场。
+            // 它已考虑「吸收小牌、保留大单张」，该结构必然非单张/非对子、不拆弹，对手(≤2张)永远接不住。
             val bestStructure = chooseStructureLead(hand)
             if (bestStructure != null) return bestStructure
             // 退化情况（手中无任何结构牌，仅剩对子/炸弹等）：在 safe 中按
@@ -536,9 +537,13 @@ object AIDecision {
                 )
             )!!
         }
-        // 无安全牌组：只剩单张，从大到小领出
-        val single = validPlays
-            .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+        // 无结构/炸弹可领：≤2 张对手优先领对子（两单张的对手接不住），再退单张
+        if (!allowPair) {
+            val pair = validPlays.filter { it.type == CardType.PAIR && !breaksBomb(it, hand) }
+                .maxByOrNull { it.mainRank }
+            if (pair != null) return pair
+        }
+        val single = validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
             .maxByOrNull { it.mainRank }
         if (single != null) return single
         // 极端兜底（仅剩炸弹/拆弹单张）：出最大可用
@@ -555,7 +560,7 @@ object AIDecision {
         val plan = buildPlan(hand)
 
         // 进入此分支时 ctxMinOpponentCards 必然 > 1（==1 已在 normalFreeLead 的
-        // step 2.5 提前返回 endgameLeadAgainstOneCard），故无需再判断报单。
+        // step 2.5 提前返回 endgameLeadAgainstFewCards），故无需再判断报单。
 
         // B. 结构牌优先：枚举拆分变体（短顺子/短连对/飞机/三带），
         //    选「出完剩余手数最少 + 威胁最低」的一手，减少零散单张
@@ -835,6 +840,12 @@ object AIDecision {
             // 无普通牌可压时用炸弹阻止
             return decideBomb(validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }, hand)
         }
+
+        // 1.7 农民配合：下游就是队友时，把应地主的机会让给队友（除非自己能赢/抢胜）。
+        //     避免农民先出一张小牌、队友又得再压一张，白白多消耗一手队友的牌。
+        //     整手能赢(第0步)、紧急拦截(第2步)、炸弹抢胜(1.6) 均已先行处理；normalWinExists
+        //     为真表示普通同型跟牌已能导向一手清完，也应照常出。
+        if (teammateIsNext && !normalWinExists) return null
 
         // 3. 我是最后一个响应地主的人（队友已过牌）→ 尽量接过控制，按"最小破坏"选牌
         if (myLastResponder) {
