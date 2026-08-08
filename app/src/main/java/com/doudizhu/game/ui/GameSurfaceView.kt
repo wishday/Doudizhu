@@ -391,7 +391,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 for (btn in currentButtons) {
                     if (btn.rect.contains(x, y)) {
                         pressedAction = btn.action
-                        hapticButtonPress()
+                        // “提示”按钮不振动
+                        if (btn.action != "hint") hapticButtonPress()
                         refresh()
                         return true
                     }
@@ -418,7 +419,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 val action = pressedAction
                 if (action != null) {
                     handleButtonAction(action)
-                    hapticButtonRelease()
+                    // “提示”按钮不振动
+                    if (action != "hint") hapticButtonRelease()
                     pressedAction = null
                     refresh()
                     return true
