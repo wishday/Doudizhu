@@ -137,17 +137,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
     private var pressedAction: String? = null
 
-    /** 调试日志回调：转发触摸/命中信息给外部（如可复制文本框），用于排查触摸与振动问题 */
-    var logListener: ((String) -> Unit)? = null
-    private fun logD(msg: String) { logListener?.invoke(msg) }
-    private fun actionName(action: Int): String = when (action) {
-        MotionEvent.ACTION_DOWN -> "DOWN"
-        MotionEvent.ACTION_MOVE -> "MOVE"
-        MotionEvent.ACTION_UP -> "UP"
-        MotionEvent.ACTION_CANCEL -> "CANCEL"
-        else -> action.toString()
-    }
-
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
 
@@ -214,50 +203,67 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } catch (_: Exception) {}
     }
 
-    /** 播放振动反馈（支持设置振幅） */
-    private fun vibrate(durationMs: Long = 30, amplitude: Int = 200) {
-        logD("  VIBRATE call dur=$durationMs amp=$amplitude vibrator=${if (vibrator != null) "ok" else "NULL"}")
+    /** 振动类型（按反馈强度区分，便于映射到系统预定义波形） */
+    private enum class VibrationKind { TICK, CLICK, HEAVY }
+
+    /**
+     * 播放振动反馈（针对线性马达 LRA 优化）：
+     * - Android Q+ 优先使用系统预定义波形（厂商已按本机 LRA 调校，干脆利落、必能起振）
+     * - O~P 无预定义波形：用默认振幅 + 足时长，保证 LRA 质量块有足够时间起振
+     * - 避免短脉冲（<20ms）在 LRA 上几乎无位移导致“感觉不到”
+     */
+    private fun vibrate(kind: VibrationKind) {
         try {
             val v = vibrator ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(VibrationEffect.createOneShot(durationMs, amplitude))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val effectId = when (kind) {
+                    VibrationKind.TICK -> VibrationEffect.EFFECT_TICK
+                    VibrationKind.CLICK -> VibrationEffect.EFFECT_CLICK
+                    VibrationKind.HEAVY -> VibrationEffect.EFFECT_HEAVY_CLICK
+                }
+                v.vibrate(VibrationEffect.createPredefined(effectId))
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val dur = when (kind) {
+                    VibrationKind.TICK -> 30L
+                    VibrationKind.CLICK -> 45L
+                    VibrationKind.HEAVY -> 60L
+                }
+                v.vibrate(VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
-                v.vibrate(durationMs)
+                v.vibrate(40)
             }
-        } catch (e: Exception) {
-            logD("  VIBRATE exception: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
-    /** 按钮轻触反馈（按下，偏轻量） */
+    /** 按钮轻触反馈（按下） */
     private fun hapticButtonPress() {
-        vibrate(30, 120)
+        vibrate(VibrationKind.CLICK)
     }
 
     /** 按钮释放反馈（弱于按下，体现按键回弹） */
     private fun hapticButtonRelease() {
-        vibrate(20, 80)
+        vibrate(VibrationKind.TICK)
     }
 
     /** 选牌反馈（点击选中） */
     private fun hapticCardSelect() {
-        vibrate(25, 150)
+        vibrate(VibrationKind.CLICK)
     }
 
-    /** 取消选牌反馈（时长/强度区别于选中，便于区分） */
+    /** 取消选牌反馈 */
     private fun hapticCardDeselect() {
-        vibrate(25, 100)
+        vibrate(VibrationKind.TICK)
     }
 
     /** 滑动加选反馈（每张轻触） */
     private fun hapticSwipeCard() {
-        vibrate(15, 70)
+        vibrate(VibrationKind.TICK)
     }
 
     /** 按钮动作确认反馈（叫分/出牌/不出/提示成功时的明确振动） */
     private fun hapticActionConfirm() {
-        vibrate(35, 200)
+        vibrate(VibrationKind.HEAVY)
     }
 
     /** 播放出牌音效 */
@@ -268,7 +274,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 播放错误音效 */
     fun playErrorSound() {
         playTone(ToneGenerator.TONE_CDMA_ABBR_INTERCEPT, 150)
-        vibrate(50)
+        vibrate(VibrationKind.HEAVY)
     }
 
     /** 播放胜利音效 */
@@ -365,7 +371,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = event.x
         val y = event.y
-        logD("TOUCH ${actionName(event.action)} x=${x.toInt()} y=${y.toInt()} W=$screenWidth H=$screenHeight curP=${if (::gameEngine.isInitialized) gameEngine.stateMachine.currentPlayerIndex else "?"}")
 
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
@@ -377,7 +382,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     if (btn.rect.contains(x, y)) {
                         pressedAction = btn.action
                         hapticButtonPress()
-                        logD("  BTN down hit action=${btn.action}")
                         refresh()
                         return true
                     }
@@ -403,7 +407,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 // 处理按钮释放（允许轻微偏移，防误触）
                 val action = pressedAction
                 if (action != null) {
-                    logD("  BTN up action=$action")
                     handleButtonAction(action)
                     hapticButtonRelease()
                     pressedAction = null
@@ -442,7 +445,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 点击：切换某张牌的选中状态（支持取消选牌） */
     private fun toggleCardAt(touchX: Float, touchY: Float) {
         val idx = hitTestCard(touchX, touchY)
-        logD("  CARD tap idx=$idx (sel=${gameEngine.selectedCardIndices})")
         if (idx < 0) return
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
@@ -462,7 +464,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (idx < 0) return
         if (idx == lastDragCardIndex) return
         lastDragCardIndex = idx
-        logD("  CARD swipe idx=$idx (sel=${gameEngine.selectedCardIndices})")
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
             hapticCardDeselect()
