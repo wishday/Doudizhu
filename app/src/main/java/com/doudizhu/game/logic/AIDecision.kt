@@ -194,13 +194,13 @@ object AIDecision {
      */
     /** 手中 A~王 的总分：A=2, 2=4, 小王=6, 大王=6（用于"是否值得拆牌跟"的动态评分） */
     private fun bigCardScore(hand: List<Card>): Int =
-        hand.sumOf { c -> when (c.rank) {
+        hand.map { c -> when (c.rank) {
             14 -> 2
             15 -> 4
             16 -> 6
             17 -> 6
             else -> 0
-        } }
+        } }.sum()
 
     /** 拆牌代价：拆三张(3张)比拆对子(2张)更亏，用于同档内优先拆更便宜的牌组 */
     private fun breakCost(g: CardGroup, hand: List<Card>): Int {
@@ -938,7 +938,7 @@ object AIDecision {
         if (!canBeCountered && remaining.isNotEmpty() && canFinishRemaining(remaining)) return b
         // 3. 敌人无任何2/王且无反制炸弹：安全翻倍炸
         //    用 enemyMaxHold 只统计"敌人"的控牌（农民视角自动排除队友的2/王），避免误判有威胁而舍不得炸
-        val controls = (15..17).sumOf { r -> enemyMaxHold(r) }
+        val controls = (15..17).map { r -> enemyMaxHold(r) }.sum()
         if (controls == 0 && !canBeCountered) return b
         // 其余情况保存炸弹
         return null
