@@ -242,7 +242,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 剩最后一张牌的特殊提醒音效 */
     fun playLastCardAlert() {
-        playTone(ToneGenerator.TONE_CDMA_ALERT_AUTOREDIAL, 260)
+        playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 260)
     }
 
     /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震） */
