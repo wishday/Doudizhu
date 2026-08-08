@@ -841,13 +841,31 @@ object AIDecision {
         // A. 队友出大牌：坚决不压
         if (lastPlay.mainRank >= 13) return null
 
+        // 队友出的是炸弹/火箭：原则上绝不「抢炸」队友——队友的炸已掌控局面，再炸只会浪费自己炸弹。
+        // 仅在「我接炸后能保证必胜」时才允许再炸；否则直接放过，让队友的炸弹生效。
+        if (lastPlay.type == CardType.BOMB || lastPlay.type == CardType.ROCKET) {
+            val reBombs = validPlays
+                .filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
+                .filter { CardRuleEngine.isValidPlay(it, lastPlay) }
+                .sortedBy { it.mainRank }
+            for (b in reBombs) {
+                val remaining = hand.filter { c -> b.cards.none { it.id == c.id } }
+                if (canFinishGuaranteed(remaining, CardRuleEngine.findAllValidPlays(remaining, null)) != null) {
+                    return b
+                }
+            }
+            return null
+        }
+
         val sameType = validPlays.filter { it.type == lastPlay.type && !breaksBomb(it, hand) }
         if (sameType.isEmpty()) return null
+        // 安全闸：队友场景绝不出炸弹/火箭（正常牌型下 sameType 本就不含炸弹，这里兜底）
+        val pool = sameType.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
 
         // B. 地主快赢且我能接管清完 → 优先用"不拆牌组"的牌接管，实在没有再退而求其次（必胜出清）
         if (ctxMinOpponentCards <= 4) {
-            val takeover = sameType.filter { groupDisruption(it, hand) == 0 }.maxByOrNull { it.mainRank }
-                ?: sameType.maxByOrNull { it.mainRank }
+            val takeover = pool.filter { groupDisruption(it, hand) == 0 }.maxByOrNull { it.mainRank }
+                ?: pool.maxByOrNull { it.mainRank }
             if (takeover != null) {
                 val remaining = hand.filter { c -> takeover.cards.none { it.id == c.id } }
                 // 接管后能在 5 轮内清空，或剩余牌数极少（一手内走完）
@@ -862,14 +880,14 @@ object AIDecision {
 
         // C. 队友出单张/对子：坚决不拆任何牌组，只用真散牌顶；没有散牌就放过，绝不拆牌组
         if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR) {
-            val loose = sameType.filter { groupDisruption(it, hand) == 0 }
+            val loose = pool.filter { groupDisruption(it, hand) == 0 }
             if (loose.isNotEmpty()) return loose.minByOrNull { it.mainRank }
             return null
         }
         // 队友出其他牌型：优先不拆组的离散牌，避免为压队友拆自家牌组
-        val preserving = sameType.filter { preservesGroups(it.cards, hand) }
+        val preserving = pool.filter { preservesGroups(it.cards, hand) }
         if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
-        return sameType.minByOrNull { it.mainRank }
+        return pool.minByOrNull { it.mainRank }
     }
 
     // ==================== 炸弹纪律 ====================
