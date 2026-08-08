@@ -501,7 +501,7 @@ object AIDecision {
         canFinishGuaranteed(hand, validPlays)?.let { return it }
 
         // 2.5 对手将赢(≤2张)：领"对手接不住"的安全牌组控场，防被接走获胜
-        if (ctxMinOpponentCards <= 2) return endgameLeadAgainstFewCards(hand, validPlays, ctxMinOpponentCards)
+        if (ctxMinOpponentCards <= 2) return endgameLeadAgainstFewCards(hand, validPlays)
 
         // 3. 手牌少：残局枚举，最小剩余手数 + 防喂杀
         if (hand.size <= 5) return endgameLead(hand, validPlays)
@@ -548,21 +548,50 @@ object AIDecision {
             ?: validPlays.first()
     }
 
+    /** 聚合 unseen 中某点数剩余张数（54−自己−已出，含所有对手；下标即 rank） */
+    private fun unseenAt(r: Int): Int = if (r in ctxUnseenCounts.indices) ctxUnseenCounts[r] else 0
+
+    /**
+     * 对手(≤2张)是否"绝不可能压住"这手牌（用于残局领出 safe 判定）。
+     * 仅依据聚合 unseen 做**保守安全**判定：证明不可能才放行；只要还能找到能压住的点数就保持排除，绝不误判为安全。
+     *  - 单张：被任何更大单张压，或被王(作单张)压 → 区间扩到 17 含王；聚合里无任何更大点数才安全
+     *  - 对子：被更大对子压，或被火箭(双王)压 → 双王皆未见才算火箭可能；且无更大同点对子才安全
+     *  - 多张结构/炸弹：≤2张对手组不出，恒安全
+     * 注：农民侧 unseen 含队友，结论更强（连队友都没有更大牌则对手更没有），仍 sound。
+     */
+    private fun oppCannotBeatAgainstFew(group: CardGroup): Boolean {
+        return when (group.type) {
+            CardType.SINGLE ->
+                // 任何比 mainRank 大的未见点数（含王，王作单张比任何普通单张大）都不存在 → 安全
+                (group.mainRank + 1..17).none { r -> unseenAt(r) > 0 }
+            CardType.PAIR -> {
+                // 火箭(双王)能压对子；且无更大同点对子 → 安全
+                val rocketPossible = unseenAt(16) > 0 && unseenAt(17) > 0
+                !rocketPossible && (group.mainRank + 1..15).none { r -> unseenAt(r) >= 2 }
+            }
+            else -> true
+        }
+    }
+
     /**
      * 对手将赢(≤2张)时的残局领出（实现「先出对手接不住的牌组、保住控制」）。
      *
-     * 对手张数越少，能接住的牌型越少：
-     *  - 仅剩1张：只能压「单张/对子」，**永远接不住任何多张结构/炸弹** → 安全集 = 非单张；
-     *  - 剩≤2张：还可能压「对子」→ 安全集收紧为「非单张 且 非对子」（只领 顺子/连对/飞机/三带/炸弹/火箭），
-     *    这样 ≤2 张手牌无论如何组不出、也压不动，我方稳控场。
+     * 安全集(safe)判定改用 [oppCannotBeatAgainstFew]：仅依据聚合 unseen 证明"对手绝不可能压住"才放行——
+     * 多张结构/炸弹对手(≤2张)组不出、恒安全；单/对仅在对手凑不出更大同点时放行（如领 A/2 的单、
+     * 或对手没有更大同点对子），从而不必一刀切排除所有单/对、被迫交炸弹。
+     * 判定为保守安全：只要聚合里还能找到能压住的点数就排除，绝不误判为安全（农民侧 unseen 含队友，结论更强，仍 sound）；
+     * 火箭(双王)作为对手仅有的2张能压一切，已被保守拦下。
      * 优先 chooseStructureLead 选最优结构牌；无结构时在 safe 中按「保留炸弹 + 剩余手数最少 + 散单最少 + 消耗小牌」择优；
-     * 连结构/炸弹都没有时，≤2 张对手优先领对子（两单张的对手接不住）、再退单张。
+     * safe 为空（仅剩对手可能压住的散牌/对子）时，退化领最大对子(2张对手更难压对)、再退最大单张、再退最大可用牌。
      */
-    private fun endgameLeadAgainstFewCards(hand: List<Card>, validPlays: List<CardGroup>, oppCards: Int): CardGroup {
-        // opp<=2 时连对子也要避免（2 张对手可能正好持对子压掉）
-        val allowPair = oppCards > 2
+    private fun endgameLeadAgainstFewCards(hand: List<Card>, validPlays: List<CardGroup>): CardGroup {
+        // safe 判定见 [oppCannotBeatAgainstFew]：仅"对手(聚合 unseen 证明)绝不可能压住"的牌入 safe；
+        // 多张结构/炸弹恒安全，单/对仅在对手凑不出更大同点时放行。
         val safe = validPlays.filter {
-            it.type != CardType.SINGLE && (allowPair || it.type != CardType.PAIR) && !breaksBomb(it, hand)
+            !breaksBomb(it, hand) && when (it.type) {
+                CardType.SINGLE, CardType.PAIR -> oppCannotBeatAgainstFew(it)
+                else -> true
+            }
         }
         if (safe.isNotEmpty()) {
             // 优先用 chooseStructureLead 的「拆分变体 + 剩余手数最少 + 散单最少」优化器选出最优结构牌，
@@ -580,12 +609,10 @@ object AIDecision {
                 )
             )!!
         }
-        // 无结构/炸弹可领：≤2 张对手优先领对子（两单张的对手接不住），再退单张
-        if (!allowPair) {
-            val pair = validPlays.filter { it.type == CardType.PAIR && !breaksBomb(it, hand) }
-                .maxByOrNull { it.mainRank }
-            if (pair != null) return pair
-        }
+        // safe 为空（仅剩对手可能压住的散牌/对子）：退化领最大对子（2张对手更难压对）、再退最大单张、再退最大可用牌
+        val pair = validPlays.filter { it.type == CardType.PAIR && !breaksBomb(it, hand) }
+            .maxByOrNull { it.mainRank }
+        if (pair != null) return pair
         val single = validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
             .maxByOrNull { it.mainRank }
         if (single != null) return single
