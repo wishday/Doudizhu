@@ -663,12 +663,22 @@ object AIDecision {
                 )
             )!!
         }
-        // safe 为空（仅剩对手可能压住的散牌/对子）：退化领最大对子（2张对手更难压对）、再退最大单张、再退最大可用牌
+        // safe 为空（仅剩对手可能压住的散牌/对子）：退化领最大对子（2张对手更难压对）、再退单张、再退最大可用牌
         val pair = validPlays.filter { it.type == CardType.PAIR && !breaksBomb(it, hand) }
             .maxByOrNull { it.mainRank }
         if (pair != null) return pair
-        val single = validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
-            .maxByOrNull { it.mainRank }
+        val single = if (ctxMinOpponentCards == 2) {
+            // 对手2张：出最小非控散单探路，保留 boss(2/王)作回手压制（与 endgameLead 一致）；
+            // 不直接交最大单张，避免把控牌一次性用掉、被王反压即失权。
+            validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) && !isControlRank(it.mainRank) }
+                .minByOrNull { it.mainRank }
+                ?: validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+                    .minByOrNull { it.mainRank }
+        } else {
+            // 对手1张：出最大单张稳吃这一手（压过即对手出局）
+            validPlays.filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) }
+                .maxByOrNull { it.mainRank }
+        }
         if (single != null) return single
         // 极端兜底（仅剩炸弹/拆弹单张）：出最大可用
         return validPlays.maxByOrNull { it.mainRank } ?: validPlays.first()
