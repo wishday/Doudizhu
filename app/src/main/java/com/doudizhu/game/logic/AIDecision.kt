@@ -151,8 +151,8 @@ object AIDecision {
     private fun singleDisruption(rank: Int, hand: List<Card>): Int {
         val n = hand.count { it.rank == rank }
         return when {
-            n == 1 -> 0
             isStraightMember(rank, hand) -> 2
+            n == 1 -> 0
             n == 2 || n == 3 -> 1
             else -> 2
         }
@@ -169,8 +169,8 @@ object AIDecision {
             CardType.PAIR -> {
                 val n = counts[g.mainRank] ?: 0
                 when {
-                    n == 2 -> 0
                     isStraightPairMember(g.mainRank, hand) || isPlaneMember(g.mainRank, hand) -> 2
+                    n == 2 -> 0
                     n == 3 -> 1
                     else -> 2
                 }
@@ -313,6 +313,26 @@ object AIDecision {
 
     private fun isUrgent(): Boolean =
         ctxMinOpponentCards <= 3 || ctxTeammateCardCount in 1..2
+
+    /**
+     * 紧急(对手≤2张)跟牌选牌：优先用"离散(不拆连对/飞机/顺子)牌"，
+     *   1) 离散牌按 mainRank 降序取「第二大」；
+     *   2) 若只有 1 个离散牌能压，则取其最大（即那个离散牌）；
+     *   3) 若没有任何离散牌能压，才允许拆结构（在所有能压牌中取第二大，不足则取最大）。
+     * 单张/对子通用：既保出牌权(够大对手通常压不动)，又尽量保留最大牌与结构作后续控牌。
+     */
+    private fun urgentPick(sameType: List<CardGroup>, hand: List<Card>): CardGroup? {
+        val discrete = sameType.filter { groupDisruption(it, hand) == 0 }
+            .sortedByDescending { it.mainRank }
+        if (discrete.isNotEmpty()) {
+            return discrete.getOrNull(1) ?: discrete.first()
+        }
+        // 无离散可压，被迫拆结构：优先拆"最便宜"的结构(对子/三张 tier1 优于 顺子/连对/飞机 tier2)，
+        // 同档内再按拆牌代价、点数从小到大取，避免浪费高牌、拆贵结构。
+        return sameType.minWithOrNull(
+            compareBy({ groupDisruption(it, hand) }, { breakCost(it, hand) }, { it.mainRank })
+        )
+    }
 
     /**
      * 跟牌（单张）时是否允许动用"大单张"（A/2/王, rank >= BIG_SINGLE_FOLLOW_MIN_RANK）：
@@ -716,7 +736,7 @@ object AIDecision {
         val pairRanks = counts.filterValues { it >= 2 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
         addRunVariants(hand, pairRanks, 2, 3, CardType.STRAIGHT_PAIR, candidates)
         // 飞机（>=2连）：纯飞机 + 带单翼/双翼，翼用最小非控散牌吸收零散小牌
-        val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
+        val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..15 && it !in bombRanks }.sorted()
         val planes = mutableListOf<CardGroup>()
         addRunVariants(hand, tripleRanks, 3, 2, CardType.PLANE, planes)
         for (plane in planes) {
@@ -792,11 +812,21 @@ object AIDecision {
             }
         }
 
-        if (candidates.isEmpty()) return null
+        // 2(15)为控牌：仅当「打出后理想剩余手数 ≤ 3」才允许拆 222 去组三带/飞机，
+        // 避免早期手数还多就把 2 拆掉；其余点数不受影响。
+        // 残局豁免：对手 ≤2 张时保出牌权优先，拆 222 也放行（对手组不出多张结构、恒安全，
+        // 且 endgameLeadAgainstFewCards 会进一步确保领出安全结构）。
+        val endgameExempt = ctxMinOpponentCards <= 2
+        val gated = candidates.filter { g ->
+            if (!endgameExempt && g.cards.any { it.rank == 15 })
+                estimateHandTurns(hand.filter { c -> g.cards.none { x -> x.id == c.id } }) <= 3
+            else true
+        }
+        if (gated.isEmpty()) return null
 
         // 评估：剩余手数最少优先；同效率(剩余手数相同)时主牌小的优先（先消耗小牌）；
         // 再依次：带走低牌(3..7)越多越好、零散单张最少、被接走危险最低
-        return candidates.minWithOrNull(
+        return gated.minWithOrNull(
             compareBy(
                 { estimateHandTurns(hand.filter { c -> it.cards.none { x -> x.id == c.id } }) },
                 { it.mainRank },
@@ -943,8 +973,13 @@ object AIDecision {
                 // 对手报单：出最大牌稳吃这一手，确保不被第三家抢走出牌权（对手已无牌可回手）
                 val maxPlay = sameType.maxByOrNull { it.mainRank }
                 if (maxPlay != null) return maxPlay
+            } else if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR) {
+                // 对手剩2张：优先用离散(不拆结构)牌取第二大；仅一个离散则取其最大；
+                // 无离散可压才允许拆结构。单张/对子通用（见 urgentPick）。
+                urgentPick(sameType, hand)?.let { return it }
             } else {
-                // 对手剩2张：按"最小破坏→最小点数"在全部可压牌(含2/王)中选最小能压的，散牌优先于拆对
+                // 对手剩2张且领多张结构(三张/顺子/连对/飞机等)：对手≤2张组不出同型，
+                // 按"最小破坏→最小点数"取最小能压的，保结构优先。
                 val minPlay = sameType.minWithOrNull(compareBy({ groupDisruption(it, hand) }, { it.mainRank }))
                     ?: sameType.minByOrNull { it.mainRank }
                 if (minPlay != null) return minPlay
