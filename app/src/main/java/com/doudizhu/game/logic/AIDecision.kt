@@ -819,10 +819,17 @@ object AIDecision {
             return shouldInterceptTeammate(hand, validPlays, lastPlay, teammateIsNext)
         }
 
-        // 1.5 手牌已全是炸弹/火箭（无任何普通牌可出，含纯火箭、纯炸弹、炸弹+火箭）：
-        //     果断出炸弹接管，不拆弹拼同牌型，也不放走过牌。仅对对手/地主出牌生效，
-        //     队友仍走上面的 shouldInterceptTeammate（绝不炸队友）。
-        if (validPlays.none { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }) {
+        // 1.5 仅当手牌"真的全是炸弹/火箭"（无任何普通牌可出）时才接管出炸。
+        //     跟牌场景下若只是"当前牌型跟不上"（如地主出连对、我手上无更大连对、仅余炸弹），
+        //     应放走过牌、保留炸弹用于后续控场/抢胜，绝不盲目炸。
+        //     （此前用 validPlays.none{非炸} 判断会在"跟不上牌型"时误炸，已修正为按手牌实际构成判断。）
+        val countsAll = hand.groupBy { it.rank }.mapValues { it.value.size }
+        val rocketAll = (countsAll[16] ?: 0) == 1 && (countsAll[17] ?: 0) == 1
+        val handAllBombs = hand.all { c ->
+            val n = countsAll[c.rank]!!
+            n == 4 || (rocketAll && (c.rank == 16 || c.rank == 17))
+        }
+        if (handAllBombs) {
             val bomb = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
                 .minByOrNull { it.mainRank }   // 最小炸弹优先，保留更大的炸弹/火箭
             if (bomb != null) return bomb
