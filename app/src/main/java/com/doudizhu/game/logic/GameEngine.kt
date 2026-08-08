@@ -83,10 +83,15 @@ class GameEngine {
         // 洗牌发牌
         dealCards()
 
-        // 通知UI发牌完成
+        // 通知UI发牌完成（由UI触发 3 秒手牌展示动画，动画结束后再进入叫分阶段）
         callback?.onDealingComplete()
+    }
 
-        // 进入叫地主阶段（随机选第一个叫分玩家）
+    /**
+     * 进入叫地主阶段（在开局手牌展示动画结束后由 UI 回调）
+     * 随机选第一个叫分玩家，若 AI 先叫则自动处理
+     */
+    fun startBiddingPhase() {
         val firstBidder = (0..2).random()
         stateMachine.startBidding(firstBidder)
         callback?.onBiddingStart(firstBidder)

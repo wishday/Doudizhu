@@ -95,8 +95,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onDealingComplete() {
         runOnUiThread {
-            gameSurfaceView.showMessage("发牌完成", 1500)
-            gameSurfaceView.refresh()
+            // 启动 3 秒手牌逐张滑入动画，动画结束后进入叫分阶段
+            gameSurfaceView.startHandReveal { gameEngine.startBiddingPhase() }
         }
     }
 

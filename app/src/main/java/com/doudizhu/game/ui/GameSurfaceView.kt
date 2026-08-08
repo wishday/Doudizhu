@@ -168,6 +168,23 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
 
+    // ====== 开局手牌展示动画（3 秒内逐张滑入） ======
+    /** 动画起始时间戳（System.currentTimeMillis） */
+    @Volatile
+    private var dealRevealStart = 0L
+    /** 是否正在播放手牌展示动画 */
+    @Volatile
+    private var isHandReveal = false
+    /** 动画结束回调（由 MainActivity 注入，通常为进入叫分阶段） */
+    @Volatile
+    private var onRevealComplete: (() -> Unit)? = null
+    /** 逐张错峰间隔（ms） */
+    private val REVEAL_STAGGER_MS = 140L
+    /** 单张入场时长（ms） */
+    private val REVEAL_DUR_MS = 700L
+    /** 动画总时长：最后一张出发时刻 + 单张时长 */
+    private fun revealTotalMs(handSize: Int) = (handSize - 1) * REVEAL_STAGGER_MS + REVEAL_DUR_MS
+
     /** 音效播放器 */
     private var toneGenerator: ToneGenerator? = null
     private var vibrator: Vibrator? = null
@@ -333,6 +350,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun shouldDraw(): Boolean {
         if (redrawRequests.get() > 0) return true
         if (!::gameEngine.isInitialized) return false
+        if (isHandReveal) return true
         if (gameEngine.stateMachine.phase == GamePhase.PLAYING) return true
         return messageText.isNotEmpty() || errorText.isNotEmpty()
     }
@@ -340,6 +358,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 本帧已绘制完成（仅当恰好有一个待处理请求时清空，避免丢失绘制期间新到达的 refresh） */
     fun onFrameDrawn() {
         redrawRequests.compareAndSet(1, 0)
+    }
+
+    /** 启动开局手牌展示动画（逐张滑入，约 3 秒），结束后回调 onComplete */
+    fun startHandReveal(onComplete: () -> Unit) {
+        dealRevealStart = System.currentTimeMillis()
+        onRevealComplete = onComplete
+        isHandReveal = true
+        refresh()
+    }
+
+    /** 动画结束：停止动画并（仅一次）触发回调 */
+    private fun finishReveal() {
+        isHandReveal = false
+        val cb = onRevealComplete
+        onRevealComplete = null
+        cb?.let { runnable -> post { runnable() } }
     }
 
     fun showMessage(msg: String, durationMs: Long = 2000) {
@@ -415,12 +449,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                // 处理按钮释放（允许轻微偏移，防误触）
+                // 处理按钮释放：仅当抬起时触点仍在按钮范围内才生效，滑出范围视为取消
                 val action = pressedAction
                 if (action != null) {
-                    handleButtonAction(action)
-                    // “提示”按钮不振动
-                    if (action != "hint") hapticButtonRelease()
+                    val stillOnButton = currentButtons
+                        .firstOrNull { it.action == action }?.rect?.contains(x, y) == true
+                    if (stillOnButton) {
+                        handleButtonAction(action)
+                        // “提示”按钮不振动
+                        if (action != "hint") hapticButtonRelease()
+                    }
+                    // 滑出范围：仅取消按下态，不触发任何动作（玩家可滑开远离按钮来取消）
                     pressedAction = null
                     refresh()
                     return true
@@ -778,7 +817,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
-    /** 底部人类手牌（间距填满90%） */
+    /** 底部人类手牌（间距填满90%，开局有 3 秒逐张滑入动画） */
     private fun drawHumanHand(canvas: Canvas) {
         val hand = gameEngine.players[0].handCards
         if (hand.isEmpty()) return
@@ -788,6 +827,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val baseY = screenHeight - cardH - 40f
 
         val centerIdx = (hand.size - 1) / 2.0
+        val now = System.currentTimeMillis()
+        val elapsed = if (isHandReveal) now - dealRevealStart else Long.MAX_VALUE
 
         for ((i, card) in hand.withIndex()) {
             val isSelected = i in gameEngine.selectedCardIndices
@@ -795,12 +836,51 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
             // 微弧效果
             val distFromCenter = i - centerIdx
-            val yOffset = (-cos(distFromCenter * 0.04) * 6.0 + 6.0).toFloat()
+            val arcOffset = (-cos(distFromCenter * 0.04) * 6.0 + 6.0).toFloat()
             val rotation = (distFromCenter * 0.8).toFloat()
 
-            val cy = baseY - (if (isSelected) 60f else 0f) - yOffset
-            drawCard(canvas, cx, cy, card, isSelected, rotation)
+            // 默认位置（含选中上移、微弧偏移）
+            var cy = baseY - (if (isSelected) 60f else 0f) - arcOffset
+            var alpha = 1f
+            var scale = 1f
+
+            if (isHandReveal) {
+                val p = ((elapsed - i * REVEAL_STAGGER_MS).toFloat() / REVEAL_DUR_MS).coerceIn(0f, 1f)
+                if (p <= 0f) continue   // 尚未轮到该牌入场，留空
+                val e = easeOutBack(p)
+                cy += (1f - e) * cardH * 0.85f   // 从下方滑入
+                scale = 0.92f + 0.08f * e        // 轻微放大归位（带回弹）
+                alpha = (p * 1.4f).coerceIn(0.12f, 1f)
+            }
+
+            drawRevealingCard(canvas, cx, cy, card, isSelected, rotation, scale, alpha)
         }
+
+        if (isHandReveal && elapsed >= revealTotalMs(hand.size)) {
+            finishReveal()
+        }
+    }
+
+    /** 带缩放与淡入的卡牌绘制（用于开局滑入动画） */
+    private fun drawRevealingCard(canvas: Canvas, x: Float, y: Float, card: Card,
+                                  selected: Boolean, rotation: Float, scale: Float, alpha: Float) {
+        canvas.save()
+        val layerPaint = Paint().apply { this.alpha = (alpha * 255f).toInt().coerceIn(0, 255) }
+        canvas.saveLayer(null, layerPaint)
+        canvas.save()
+        canvas.scale(scale, scale, x + cardW / 2, y + cardH / 2)
+        drawCard(canvas, x, y, card, selected, rotation)
+        canvas.restore()
+        canvas.restore()
+        canvas.restore()
+    }
+
+    /** ease-out-back：落定带轻微回弹（过冲后归位），比纯线性更自然 */
+    private fun easeOutBack(t: Float): Float {
+        val c1 = 1.70158f
+        val c3 = c1 + 1f
+        val x = t - 1f
+        return 1f + c3 * x * x * x + c1 * x * x
     }
 
     /** 绘制单张扑克牌（手牌，大尺寸） */
