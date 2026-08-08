@@ -555,8 +555,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         val idx = hand.indexOfFirst { it.id == card.id }
                         if (idx >= 0) gameEngine.selectedCardIndices.add(idx)
                     }
-playTone(ToneGenerator.TONE_PROP_ACK, 50)
-                    hapticActionConfirm()
+                    playTone(ToneGenerator.TONE_PROP_ACK, 50)
                 } else {
                     showError("没有能出的牌", 1500)
                 }
