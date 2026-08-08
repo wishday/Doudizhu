@@ -1,8 +1,14 @@
 package com.doudizhu.game
 
+import android.graphics.Color
 import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.doudizhu.game.logic.GameEngine
 import com.doudizhu.game.logic.GameEngineCallback
@@ -20,6 +26,12 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     /** 游戏绘制视图 */
     private lateinit var gameSurfaceView: GameSurfaceView
+
+    /** 调试日志：可复制文本框（临时，排查振动不生效） */
+    private lateinit var debugLogView: TextView
+    private lateinit var debugScrollView: ScrollView
+    private val debugLog = StringBuilder()
+    private val DEBUG_LOG_MAX_LINES = 400
 
     companion object {
         private const val KEY_TOTAL_SCORE = "total_score"
@@ -77,7 +89,28 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameSurfaceView.setTotalScore(totalScore)
         gameSurfaceView.setStats(gameCount, winCount)
 
-        setContentView(gameSurfaceView)
+        // 临时调试覆盖层：可复制日志文本框（排查振动用）
+        val root = FrameLayout(this)
+        root.addView(gameSurfaceView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        debugLogView = TextView(this).apply {
+            setTextIsSelectable(true)
+            textSize = 11f
+            setTextColor(Color.parseColor("#33FF66"))
+            setBackgroundColor(Color.parseColor("#CC000000"))
+            text = "振动调试日志（长按可复制）：\n"
+        }
+        debugScrollView = ScrollView(this).apply { isVerticalScrollBarEnabled = true }
+        debugScrollView.addView(debugLogView, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        val dm = resources.displayMetrics
+        val logLp = FrameLayout.LayoutParams(
+            (dm.widthPixels * 0.6f).toInt(), (dm.heightPixels * 0.3f).toInt()
+        ).apply { gravity = android.view.Gravity.TOP or android.view.Gravity.START }
+        root.addView(debugScrollView, logLp)
+        setContentView(root)
+
+        gameSurfaceView.logListener = { appendDebugLog(it) }
     }
 
     override fun onResume() {
@@ -196,6 +229,22 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     override fun onRequestRefresh() {
         runOnUiThread {
             gameSurfaceView.refresh()
+        }
+    }
+
+    /** 临时：追加振动调试日志并滚到底（主线程更新 UI） */
+    private fun appendDebugLog(line: String) {
+        runOnUiThread {
+            debugLog.append(line).append('\n')
+            var n = 0
+            for (c in debugLog) if (c == '\n') n++
+            while (n > DEBUG_LOG_MAX_LINES) {
+                val i = debugLog.indexOf("\n")
+                if (i < 0) break
+                debugLog.delete(0, i + 1); n--
+            }
+            debugLogView.text = debugLog.toString()
+            debugScrollView.fullScroll(View.FOCUS_DOWN)
         }
     }
 }

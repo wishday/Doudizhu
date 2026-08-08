@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -137,6 +138,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
     private var pressedAction: String? = null
 
+    /** 调试日志回调（临时：排查振动不生效，真机复制文本分析） */
+    var logListener: ((String) -> Unit)? = null
+    private fun logD(msg: String) { logListener?.invoke(msg) }
+
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
 
@@ -207,33 +212,51 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private enum class VibrationKind { TICK, CLICK, HEAVY }
 
     /**
-     * 播放振动反馈（针对线性马达 LRA 优化）：
-     * - Android Q+ 优先使用系统预定义波形（厂商已按本机 LRA 调校，干脆利落、必能起振）
-     * - O~P 无预定义波形：用默认振幅 + 足时长，保证 LRA 质量块有足够时间起振
-     * - 避免短脉冲（<20ms）在 LRA 上几乎无位移导致“感觉不到”
+     * 播放振动反馈（临时诊断版）：
+     * 记录振动器来源/状态/异常，并额外探测 performHapticFeedback（打字振动同款路径），
+     * 用于定位“其他 App 能震、本 App 不震”的根因。
      */
     private fun vibrate(kind: VibrationKind) {
+        val src = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) "VibratorManager" else "VIBRATOR_SERVICE"
+        logD("VIB sdk=${Build.VERSION.SDK_INT} src=$src null=${vibrator == null} hasVib=${vibrator?.hasVibrator()} ampCtrl=${vibrator?.hasAmplitudeControl()}")
         try {
-            val v = vibrator ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val effectId = when (kind) {
-                    VibrationKind.TICK -> VibrationEffect.EFFECT_TICK
-                    VibrationKind.CLICK -> VibrationEffect.EFFECT_CLICK
-                    VibrationKind.HEAVY -> VibrationEffect.EFFECT_HEAVY_CLICK
+            val v = vibrator
+            if (v != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val effectId = when (kind) {
+                        VibrationKind.TICK -> VibrationEffect.EFFECT_TICK
+                        VibrationKind.CLICK -> VibrationEffect.EFFECT_CLICK
+                        VibrationKind.HEAVY -> VibrationEffect.EFFECT_HEAVY_CLICK
+                    }
+                    v.vibrate(VibrationEffect.createPredefined(effectId))
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val dur = when (kind) {
+                        VibrationKind.TICK -> 30L
+                        VibrationKind.CLICK -> 45L
+                        VibrationKind.HEAVY -> 60L
+                    }
+                    v.vibrate(VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    v.vibrate(40)
                 }
-                v.vibrate(VibrationEffect.createPredefined(effectId))
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val dur = when (kind) {
-                    VibrationKind.TICK -> 30L
-                    VibrationKind.CLICK -> 45L
-                    VibrationKind.HEAVY -> 60L
-                }
-                v.vibrate(VibrationEffect.createOneShot(dur, VibrationEffect.DEFAULT_AMPLITUDE))
+                logD("VIB Vibrator.vibrate() 已调用（无异常）")
             } else {
-                @Suppress("DEPRECATION")
-                v.vibrate(40)
+                logD("VIB vibrator 为 null，跳过 Vibrator 路径")
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            logD("VIB Vibrator 异常 ${e.javaClass.simpleName}: ${e.message}")
+        }
+        // 探测 performHapticFeedback 路径（键盘震动走这条）
+        try {
+            val ok = performHapticFeedback(
+                HapticFeedbackConstants.VIRTUAL_KEY,
+                HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
+            )
+            logD("VIB performHapticFeedback(VIRTUAL_KEY)=$ok")
+        } catch (e: Exception) {
+            logD("VIB performHapticFeedback 异常 ${e.javaClass.simpleName}: ${e.message}")
+        }
     }
 
     /** 按钮轻触反馈（按下） */
