@@ -236,8 +236,32 @@ object AIDecision {
             .minWithOrNull(compareBy(
                 { groupDisruption(it, hand) },
                 { breakCost(it, hand) },
-                { it.mainRank }
+                { it.mainRank },
+                { attachScore(it, hand) }   // 附件最小化：与领出对齐，优先最小且干净的离散牌
             ))
+    }
+
+    /**
+     * 带附件牌型（三带一/三带二/飞机带翼）的"附件质量"评分：越小越好，用作跟牌时选牌的最后一级排序。
+     * 与领出(chooseStructureLead)保持一致：优先用「最小且干净」的离散牌作附件，避免白送大牌/拆结构。
+     * 无附件的牌型（单/对/顺子/连对/裸飞机/炸弹）返回 0，不影响排序（这些由前面的键决定）。
+     */
+    private fun attachScore(group: CardGroup, hand: List<Card>): Int {
+        val (attachCount, maxCleanRank) = when (group.type) {
+            CardType.TRIPLE_ONE, CardType.PLANE_SINGLE -> 1 to 14   // 单附件：避开 A/2/王(>=14)
+            CardType.TRIPLE_TWO, CardType.PLANE_PAIR -> 2 to 10     // 对附件：优先 <10 干净对
+            else -> return 0
+        }
+        val counts = group.cards.groupBy { it.rank }.mapValues { it.value.size }
+        val attachRanks = counts.filter { it.value == attachCount }.keys
+        if (attachRanks.isEmpty()) return 0
+        return attachRanks.sumOf { r ->
+            val handCount = hand.count { it.rank == r }
+            val clean = handCount == attachCount
+                && r < maxCleanRank
+                && !isStraightMember(r, hand) && !isStraightPairMember(r, hand) && !isPlaneMember(r, hand)
+            (if (clean) 0 else 1000) + r
+        }
     }
 
     private fun isUrgent(): Boolean =
@@ -656,10 +680,12 @@ object AIDecision {
             .minByOrNull { rankOf(it.key) }?.key
         val cleanLowPairKicker = counts.entries
             .filter { it.key !in bombRanks && it.value == 2 && it.key < 10
+                && !isStraightMember(it.key, hand)
                 && !isStraightPairMember(it.key, hand) && !isPlaneMember(it.key, hand) }
             .minByOrNull { rankOf(it.key) }?.key
         val highPairKicker = counts.entries
             .filter { it.key !in bombRanks && it.value == 2 && it.key >= 10
+                && !isStraightMember(it.key, hand)
                 && !isStraightPairMember(it.key, hand) && !isPlaneMember(it.key, hand) }
             .minByOrNull { rankOf(it.key) }?.key
 
@@ -783,9 +809,13 @@ object AIDecision {
             return fullHand
         }
 
+        // 我下家是否为队友（农民视角；地主恒为false）。用于：① 跟队友领出时不压队友；
+        // ② 配合逻辑判断。
+        val teammateIsNext = role == PlayerRole.FARMER && myIndex >= 0 && (myIndex + 1) % 3 == ctxTeammateIndex
+
         // 1. 队友出的牌：大牌不压 | 快赢接管 | 否则小牌顶着消耗
         if (role == PlayerRole.FARMER && isTeammate(lastPlayerIndex, myIndex, role, landlordIndex)) {
-            return shouldInterceptTeammate(hand, validPlays, lastPlay)
+            return shouldInterceptTeammate(hand, validPlays, lastPlay, teammateIsNext)
         }
 
         // 1.5 手牌已全是炸弹/火箭（无任何普通牌可出，含纯火箭、纯炸弹、炸弹+火箭）：
@@ -811,7 +841,7 @@ object AIDecision {
                 .sortedBy { it.mainRank }
                 .firstOrNull { bomb ->
                     !hasUnseenHigherBombOrRocket(bomb.mainRank) &&
-                        canFinishRemaining(hand.filter { c -> bomb.cards.none { it.id == c.id } })
+                        canEmptyInOneHand(hand.filter { c -> bomb.cards.none { it.id == c.id } })
                 }
                 ?.let { return it }
         }
@@ -821,7 +851,6 @@ object AIDecision {
             !( !allowBig && g.type == CardType.SINGLE && g.mainRank >= BIG_SINGLE_FOLLOW_MIN_RANK )
         }
         val sameTypeSafe = sameType.filter(gateBig)
-        val teammateIsNext = role == PlayerRole.FARMER && myIndex >= 0 && (myIndex + 1) % 3 == ctxTeammateIndex
         val landlordPlayed = role == PlayerRole.FARMER && lastPlayerIndex == landlordIndex
         val myLastResponder = landlordPlayed && !teammateIsNext
 
@@ -840,12 +869,6 @@ object AIDecision {
             // 无普通牌可压时用炸弹阻止
             return decideBomb(validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }, hand)
         }
-
-        // 1.7 农民配合：下游就是队友时，把应地主的机会让给队友（除非自己能赢/抢胜）。
-        //     避免农民先出一张小牌、队友又得再压一张，白白多消耗一手队友的牌。
-        //     整手能赢(第0步)、紧急拦截(第2步)、炸弹抢胜(1.6) 均已先行处理；normalWinExists
-        //     为真表示普通同型跟牌已能导向一手清完，也应照常出。
-        if (teammateIsNext && !normalWinExists) return null
 
         // 3. 我是最后一个响应地主的人（队友已过牌）→ 尽量接过控制，按"最小破坏"选牌
         if (myLastResponder) {
@@ -879,7 +902,8 @@ object AIDecision {
     private fun shouldInterceptTeammate(
         hand: List<Card>,
         validPlays: List<CardGroup>,
-        lastPlay: CardGroup
+        lastPlay: CardGroup,
+        teammateIsNext: Boolean
     ): CardGroup? {
         // A. 队友出大牌：坚决不压
         if (lastPlay.mainRank >= 13) return null
@@ -921,6 +945,10 @@ object AIDecision {
         // 直接过牌让队友的牌留在台面；能否速胜已在上面 B 处理。
         if (ctxMinOpponentCards <= 1) return null
 
+        // 配合闸：我下家就是队友时，不压队友（把出牌权留在台面让队友掌控，
+        // 避免两家互顶、地主捡漏）。地主将赢的接管(B/B')已先行处理，不受此闸影响。
+        if (teammateIsNext) return null
+
         // C. 队友出单张/对子：坚决不拆任何牌组，只用真散牌顶；没有散牌就放过，绝不拆牌组
         if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR) {
             val loose = pool.filter { groupDisruption(it, hand) == 0 }
@@ -944,9 +972,9 @@ object AIDecision {
         val canBeCountered = hasUnseenHigherBombOrRocket(b.mainRank)
         // 1. 对手距获胜很近：必须炸阻止
         if (ctxMinOpponentCards <= 2) return b
-        // 2. 出炸后剩余牌可在一两手内收完：炸
+        // 2. 出炸后剩余牌可一手出完（直接清空手牌赢定）：炸
         val remaining = hand.filter { c -> b.cards.none { it.id == c.id } }
-        if (!canBeCountered && remaining.isNotEmpty() && canFinishRemaining(remaining)) return b
+        if (!canBeCountered && remaining.isNotEmpty() && canEmptyInOneHand(remaining)) return b
         // 3. 敌人无任何2/王且无反制炸弹：安全翻倍炸
         //    用 enemyMaxHold 只统计"敌人"的控牌（农民视角自动排除队友的2/王），避免误判有威胁而舍不得炸
         val controls = (15..17).map { r -> enemyMaxHold(r) }.sum()
@@ -959,6 +987,16 @@ object AIDecision {
         if (remaining.isEmpty()) return true
         if (remaining.size > 8) return false
         return estimateHandTurns(remaining) <= 2
+    }
+
+    /**
+     * 炸完炸弹后，剩余手牌能否"一手出完"（形成单组合法牌直接清空手牌）。
+     * 与 canFinishRemaining 的区别：只认"一手"、且对手不可拦截——能一手清空即赢定；
+     * 用于炸弹抢胜，避免 canFinishRemaining 的乐观估计导致误炸（如 [炸, K, 4] 被对手卡住）。
+     */
+    private fun canEmptyInOneHand(remaining: List<Card>): Boolean {
+        if (remaining.isEmpty()) return true
+        return CardRuleEngine.identify(remaining).type != CardType.INVALID
     }
 
     // ==================== 必胜判定 ====================
