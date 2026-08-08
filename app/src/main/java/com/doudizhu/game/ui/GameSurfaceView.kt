@@ -214,9 +214,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         try {
             val v = vibrator ?: return
             val (dur, amp) = when (kind) {
-                VibrationKind.TICK -> 50L to 50
-                VibrationKind.CLICK -> 90L to 64
-                VibrationKind.HEAVY -> 150L to 64
+                VibrationKind.TICK -> 50L to 25
+                VibrationKind.CLICK -> 90L to 32
+                VibrationKind.HEAVY -> 150L to 32
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 v.vibrate(VibrationEffect.createOneShot(dur, amp))
@@ -232,7 +232,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(VibrationEffect.createOneShot(800L, 128))
+                v.vibrate(VibrationEffect.createOneShot(800L, 64))
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(800L)
@@ -251,7 +251,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val timings = longArrayOf(0, 120, 80, 120, 80, 120)
-                val amps = intArrayOf(0, 128, 0, 128, 0, 128)
+                val amps = intArrayOf(0, 64, 0, 64, 0, 64)
                 v.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
             } else {
                 @Suppress("DEPRECATION")
