@@ -468,24 +468,31 @@ class GameEngine {
 
     /**
      * 获取AI建议的最优出牌组合（给人类玩家用）
-     * 复用 AI 决策引擎，按当前局面给出最优选择：
-     *  - 自由出牌：小牌诱饵/甩结构，保留大牌控制权
-     *  - 跟牌：用最小能压的牌
+     * 与当前模式一致：
+     *  - 大师模式：使用全信息求解器 [MasterAIDecision]（与大师 AI 同策略，含一步模拟对手/残局拦截等）
+     *  - 普通模式：使用普通 AI 启发式 [AIDecision]
+     * 底牌/跟牌兜底逻辑保持一致。
      */
     fun getHint(): List<Card>? {
         val hand = players[0].handCards
         val lastPlay = stateMachine.lastPlayedGroup
-        val decision = AIDecision.decide(
-            hand, lastPlay, players[0].difficulty, players[0].role, getCardCount(getTeammateIndex(0)),
-            lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
-            myIndex = 0,
-            opponentCardCounts = getOpponentCardCounts(0),
-            landlordIndex = stateMachine.landlordIndex,
-            unseenCounts = getUnseenRankCounts(0),
-            perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
-            primaryOpponentIndex = getPrimaryOpponentIndex(0),
-            teammateIndex = getTeammateIndex(0)
-        )
+
+        // 提示策略跟随当前难度：大师模式用全信息求解器，普通模式用普通 AI
+        val decision = if (aiDifficulty == Difficulty.MASTER) {
+            MasterAIDecision.decide(buildMasterSnapshot(0))
+        } else {
+            AIDecision.decide(
+                hand, lastPlay, Difficulty.NORMAL, players[0].role, getCardCount(getTeammateIndex(0)),
+                lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
+                myIndex = 0,
+                opponentCardCounts = getOpponentCardCounts(0),
+                landlordIndex = stateMachine.landlordIndex,
+                unseenCounts = getUnseenRankCounts(0),
+                perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
+                primaryOpponentIndex = getPrimaryOpponentIndex(0),
+                teammateIndex = getTeammateIndex(0)
+            )
+        }
         if (decision != null && decision.type != CardType.INVALID) {
             return decision.cards
         }

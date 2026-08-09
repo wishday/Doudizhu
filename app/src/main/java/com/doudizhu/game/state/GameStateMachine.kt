@@ -81,10 +81,16 @@ class GameStateMachine {
     }
 
     /**
-     * 进入主界面（难度选择）
+     * 进入主界面（难度选择）：清空本局残留状态（底牌、出牌记录等），避免主界面残留上局底牌
      */
     fun startMenu() {
         phase = GamePhase.MENU
+        bottomCards.clear()
+        playHistory.clear()
+        lastPlayedGroup = null
+        lastPlayedPlayerIndex = -1
+        landlordIndex = -1
+        hasLandlord = false
     }
 
     /**
