@@ -64,9 +64,33 @@ class GameEngine {
     private val playedByPlayer: Array<IntArray> = Array(3) { IntArray(18) }
 
     /**
+     * 大师模式搜索的「局代号」：每次开新局 / 退回主界面都自增，
+     * 用于丢弃后台搜索线程产出的过期结果（避免上一局残局的决策被误用到新局）。
+     */
+    private var searchEpoch = 0
+
+    /** 大师模式搜索后台线程（单线程串行，避免同时跑多个搜索） */
+    private val masterSearchExecutor: java.util.concurrent.ExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor()
+    }
+
+    /** 大师 AI 出牌前的「思考延迟」（毫秒），仅用于节奏，与搜索耗时叠加 */
+    private val MASTER_DELAY_MS = 500L
+    /** 大师 AI 后台搜索时长预算（毫秒） */
+    private val MASTER_DEADLINE_MS = 2000L
+    /** 大师 AI 后台搜索节点预算 */
+    private val MASTER_NODE_LIMIT = 6_000_000
+    /** 提示（getHint）同步搜索时长预算（毫秒），必须小以免卡 UI */
+    private val HINT_DEADLINE_MS = 200L
+    /** 提示（getHint）同步搜索节点预算 */
+    private val HINT_NODE_LIMIT = 300_000
+
+    /**
      * 开始新游戏
      */
     fun startNewGame() {
+        // 新局：使任何在途的后台搜索结果作废
+        searchEpoch++
         // 重置所有玩家状态
         players.forEach {
             it.handCards.clear()
@@ -95,6 +119,8 @@ class GameEngine {
      * 返回主界面（难度选择）：清空手牌并进入 MENU 阶段
      */
     fun returnToMenu() {
+        // 退回主界面同样废弃在途后台搜索
+        searchEpoch++
         players.forEach { it.handCards.clear() }
         stateMachine.startMenu()
     }
@@ -317,18 +343,17 @@ class GameEngine {
             if (stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
 
             val player = players[playerIndex]
-            val lastPlay = stateMachine.lastPlayedGroup
 
-            // 计算队友手牌数（农民时，仅凭公开出牌记录推导）
-            val teammateCount = if (player.role == PlayerRole.FARMER) {
-                getCardCount(getTeammateIndex(playerIndex))
-            } else 0
-
-            val decision = if (player.difficulty == Difficulty.MASTER) {
-                // 大师模式：构造全量快照（含所有玩家真实手牌）交由 MasterAIDecision 决策
-                MasterAIDecision.decide(buildMasterSnapshot(playerIndex))
+            if (player.difficulty == Difficulty.MASTER) {
+                // 大师模式：在后台线程跑完美信息搜索，主线程回调节点应用，避免卡 UI
+                scheduleMasterPlay(playerIndex)
             } else {
-                AIDecision.decide(
+                // 普通模式：走 AIDecision 启发式（语义与改动前完全一致）
+                val lastPlay = stateMachine.lastPlayedGroup
+                val teammateCount = if (player.role == PlayerRole.FARMER) {
+                    getCardCount(getTeammateIndex(playerIndex))
+                } else 0
+                val decision = AIDecision.decide(
                     player.handCards, lastPlay, player.difficulty, player.role, teammateCount,
                     lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
                     myIndex = playerIndex,
@@ -339,28 +364,61 @@ class GameEngine {
                     primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
                     teammateIndex = getTeammateIndex(playerIndex)
                 )
+                applyAIDecision(playerIndex, decision, lastPlay)
             }
+        }, if (players[playerIndex].difficulty == Difficulty.MASTER) MASTER_DELAY_MS else 1200L)
+    }
 
-            // 本轮首家（mustPlay）时 AI 必须出牌，不允许跳过
-            val aiMustPlay = stateMachine.mustPlay()
-            if (decision != null && decision.type != CardType.INVALID) {
-                processPlay(playerIndex, decision.cards, decision)
-            } else if (aiMustPlay) {
-                // 极端情况下决策异常仍兜底出最小的单张
-                val fallback = player.handCards.minByOrNull { it.rank }
-                if (fallback != null) {
-                    val single = CardGroup(
-                        CardType.SINGLE,
-                        fallback.rank, 1, listOf(fallback)
-                    )
-                    processPlay(playerIndex, listOf(fallback), single)
-                } else {
-                    processPass(playerIndex)
-                }
+    /**
+     * 大师模式：构造全量快照后在后台线程求解，主线程回调应用结果。
+     * 用 [searchEpoch] 防止过期结果被误用到新局。
+     */
+    private fun scheduleMasterPlay(playerIndex: Int) {
+        val snapshot = buildMasterSnapshot(playerIndex)
+        val epoch = searchEpoch
+        masterSearchExecutor.execute {
+            val decision = MasterAIDecision.decide(
+                snapshot,
+                deadlineMs = MASTER_DEADLINE_MS,
+                nodeLimit = MASTER_NODE_LIMIT
+            )
+            // 切回主线程应用，并二次校验局面未被新局/换人改变
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (epoch != searchEpoch) return@post
+                if (stateMachine.phase != GamePhase.PLAYING) return@post
+                if (stateMachine.currentPlayerIndex != playerIndex) return@post
+                applyAIDecision(playerIndex, decision, stateMachine.lastPlayedGroup)
+            }
+        }
+    }
+
+    /**
+     * 统一应用 AI 决策（普通 / 大师共用）：
+     *  - decision 合法且非 INVALID → 出牌；
+     *  - 否则本轮首家（mustPlay）必须出 → 兜底出最小单张；
+     *  - 否则过牌。
+     * 语义与改动前普通模式分支完全一致，大师模式复用同一套兜底。
+     */
+    private fun applyAIDecision(playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?) {
+        val player = players[playerIndex]
+        val aiMustPlay = stateMachine.mustPlay()
+        if (decision != null && decision.type != CardType.INVALID) {
+            processPlay(playerIndex, decision.cards, decision)
+        } else if (aiMustPlay) {
+            // 极端情况下决策异常仍兜底出最小的单张
+            val fallback = player.handCards.minByOrNull { it.rank }
+            if (fallback != null) {
+                val single = CardGroup(
+                    CardType.SINGLE,
+                    fallback.rank, 1, listOf(fallback)
+                )
+                processPlay(playerIndex, listOf(fallback), single)
             } else {
                 processPass(playerIndex)
             }
-        }, 1200)
+        } else {
+            processPass(playerIndex)
+        }
     }
 
     /**
@@ -438,7 +496,9 @@ class GameEngine {
     }
 
     /**
-     * 构造大师模式所需的全量快照（含三家真实手牌、完整历史），仅 MASTER 难度调用
+     * 构造大师模式所需的全量快照（含三家真实手牌），仅 MASTER 难度调用。
+     * 搜索求解器基于全量手牌做完美信息推演，故只需手牌与「上一手 / 轮到谁」，
+     * 不再需要出牌历史与大师集合（两步模拟已废弃）。
      */
     private fun buildMasterSnapshot(myIndex: Int): MasterAIDecision.Snapshot {
         val role = players[myIndex].role
@@ -446,7 +506,6 @@ class GameEngine {
         val hands = players.associate { it.index to it.handCards.toList() }
         val teammateIsMaster = role == PlayerRole.FARMER &&
             players.any { it.index != myIndex && it.index != landlordIndex && it.difficulty == Difficulty.MASTER }
-        val masters = players.filter { it.difficulty == Difficulty.MASTER }.map { it.index }.toSet()
         return MasterAIDecision.Snapshot(
             myIndex = myIndex,
             role = role,
@@ -455,9 +514,7 @@ class GameEngine {
             lastPlay = stateMachine.lastPlayedGroup,
             lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
             currentPlayerIndex = stateMachine.currentPlayerIndex,
-            history = stateMachine.playHistory.map { it.first to it.second },
-            teammateIsMaster = teammateIsMaster,
-            masters = masters
+            teammateIsMaster = teammateIsMaster
         )
     }
 
@@ -477,9 +534,13 @@ class GameEngine {
         val hand = players[0].handCards
         val lastPlay = stateMachine.lastPlayedGroup
 
-        // 提示策略跟随当前难度：大师模式用全信息求解器，普通模式用普通 AI
+        // 提示策略跟随当前难度：大师模式用全信息求解器（小预算同步搜索，避免卡 UI），普通模式用普通 AI
         val decision = if (aiDifficulty == Difficulty.MASTER) {
-            MasterAIDecision.decide(buildMasterSnapshot(0))
+            MasterAIDecision.decide(
+                buildMasterSnapshot(0),
+                deadlineMs = HINT_DEADLINE_MS,
+                nodeLimit = HINT_NODE_LIMIT
+            )
         } else {
             AIDecision.decide(
                 hand, lastPlay, Difficulty.NORMAL, players[0].role, getCardCount(getTeammateIndex(0)),
