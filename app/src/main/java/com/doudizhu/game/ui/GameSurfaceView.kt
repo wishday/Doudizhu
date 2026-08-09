@@ -5,7 +5,6 @@ import android.graphics.*
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
-import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -242,31 +241,27 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 @Suppress("DEPRECATION")
                 context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     /** 播放简单音效 */
     private fun playTone(toneType: Int, durationMs: Int = 100) {
         try {
             toneGenerator?.startTone(toneType, durationMs)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     /** 振动类型（按反馈强度区分，便于映射到系统预定义波形） */
     private enum class VibrationKind { TICK, CLICK, HEAVY }
 
     /**
-     * 统一振动出口：优先使用系统标定的预定义效果（createPredefined），
-     * 让各机型按自身硬件播放已调校的波形，避免自定义低振幅被部分 ROM（如小米 HyperOS）压到无感。
-     * 安卓 12+ 附带 VibrationAttributes(USAGE_TOUCH)，声明交互用途以正确通过勿扰/后台限制。
+     * 统一振动出口：1 参 vibrate（默认 usage），不绑定任何系统开关，也不调用
+     * 2 参 vibrate(effect, VibrationAttributes) 重载——后者在鸿蒙(HarmonyOS)等兼容层未实现，
+     * 会抛 AbstractMethodError 直接导致闪退；且 USAGE_TOUCH 会被"触摸振动"开关抑制。
+     * 长震/三段式用设备标定强度(DEFAULT_AMPLITUDE)，跨机型一致且不过震。
      */
     private fun emit(effect: VibrationEffect) {
-        val v = vibrator ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH))
-        } else {
-            v.vibrate(effect)
-        }
+        vibrator?.vibrate(effect)
     }
 
     /**
@@ -297,25 +292,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 @Suppress("DEPRECATION")
                 v.vibrate(dur)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
-    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：安卓 10+ 用重击预定义效果 */
+    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：0.8 秒持续，设备标定强度 */
     fun playBigVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
-                } else {
-                    VibrationEffect.createOneShot(800L, 255)
-                }
-                emit(effect)
+                emit(VibrationEffect.createOneShot(800L, VibrationEffect.DEFAULT_AMPLITUDE))
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(800L)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     /** 剩最后一张牌的特殊提醒音效 */
@@ -328,20 +318,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK)
-                } else {
-                    VibrationEffect.createWaveform(
-                        longArrayOf(0, 120, 80, 120, 80, 120),
-                        intArrayOf(0, 200, 0, 200, 0, 200), -1
-                    )
-                }
-                emit(effect)
+                // 振幅 0 = 该段使用设备默认强度（等价于 DEFAULT_AMPLITUDE），跨机型一致且不过震
+                emit(VibrationEffect.createWaveform(
+                    longArrayOf(0, 120, 80, 120, 80, 120),
+                    intArrayOf(0, 0, 0, 0, 0, 0), -1
+                ))
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(longArrayOf(0, 120, 80, 120, 80, 120), -1)
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     /** 按钮轻触反馈（按下） */
