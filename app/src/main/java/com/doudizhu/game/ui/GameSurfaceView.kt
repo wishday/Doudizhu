@@ -126,6 +126,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val aiHighlightPaint = Paint().apply {
         color = Color.argb(120, 255, 152, 0); style = Paint.Style.FILL
     }
+    private val modalDimPaint = Paint().apply { color = Color.argb(170, 0, 0, 0); style = Paint.Style.FILL }
+    private val panelPaint = Paint().apply { color = Color.parseColor("#263238"); style = Paint.Style.FILL }
+    private val panelBorderPaint = Paint().apply {
+        color = Color.parseColor("#546E7A"); style = Paint.Style.STROKE; strokeWidth = 3f
+    }
+    private val gearPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#B0BEC5") }
+    private val gearHolePaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#0D3B0D") }
     /** 背景渐变缓存（仅尺寸变化时重建） */
     private var bgGradient: LinearGradient? = null
     private var bgGradientW = 0f
@@ -168,6 +175,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 当前展示统计所用的难度（可点击右上角普通/大师切换查看） */
     private var displayMode: Difficulty = Difficulty.NORMAL
+
+    /** 主界面设置窗口与重置确认状态 */
+    private var settingsOpen = false
+    private var confirmResetMode: Difficulty? = null
+    /** 重置某模式统计的回调（由 MainActivity 注入，负责清零并持久化保存） */
+    var onResetStats: ((Difficulty) -> Unit)? = null
 
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
@@ -321,6 +334,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         screenHeight = height
         recalcSizes()
         initAudio()
+        refresh()           // 重新进入应用时强制至少重绘一帧，避免主界面/结算等静态界面黑屏
         startDrawThread()
     }
 
@@ -630,6 +644,33 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 hapticActionConfirm()
                 gameEngine.returnToMenu()
             }
+            action == "open_settings" -> {
+                settingsOpen = true
+                refresh()
+            }
+            action == "close_settings" -> {
+                settingsOpen = false
+                confirmResetMode = null
+                refresh()
+            }
+            action == "reset_normal" -> {
+                confirmResetMode = Difficulty.NORMAL
+                refresh()
+            }
+            action == "reset_master" -> {
+                confirmResetMode = Difficulty.MASTER
+                refresh()
+            }
+            action == "confirm_reset" -> {
+                confirmResetMode?.let { onResetStats?.invoke(it) }
+                settingsOpen = false
+                confirmResetMode = null
+                refresh()
+            }
+            action == "cancel_reset" -> {
+                confirmResetMode = null
+                refresh()
+            }
         }
     }
 
@@ -656,9 +697,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         drawTopBar(canvas)
         drawBottomCards(canvas)
 
-        // 横屏布局：AI在左右两侧
-        drawAIPlayer(canvas, 1, screenWidth - 260f, 100f)   // 右侧AI
-        drawAIPlayer(canvas, 2, 260f, 100f)                  // 左侧AI
+        // 横屏布局：AI在左右两侧（主界面不显示电脑A/电脑B信息框）
+        if (gameEngine.stateMachine.phase != GamePhase.MENU) {
+            drawAIPlayer(canvas, 1, screenWidth - 260f, 100f)   // 右侧AI
+            drawAIPlayer(canvas, 2, 260f, 100f)                  // 左侧AI
+        }
 
         // 桌面中央展示所有玩家出的牌
         drawTablePlayedCards(canvas)
@@ -1107,27 +1150,37 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         when {
             // 主界面：难度选择（按钮大小为出牌按钮2倍，居中排列，点击直接进入对应难度）
             phase == GamePhase.MENU -> {
-                val dW = btnW * 2f
-                val dH = btnH * 2f
-                val dGap = gap * 2f
-                val normalColor = Color.parseColor("#388E3C")
-                val normalPressed = Color.parseColor("#1B5E20")
-                val masterColor = Color.parseColor("#D32F2F")
-                val masterPressed = Color.parseColor("#B71C1C")
-                val horizTotal = dW * 2f + dGap
-                if (horizTotal <= screenWidth) {
-                    // 横屏：两个按钮左右居中
-                    val startX = (screenWidth - horizTotal) / 2f
-                    val y = screenHeight / 2f - dH / 2f
-                    addButton(canvas, target, "普通", startX, y, dW, dH, normalColor, normalPressed, "start_normal")
-                    addButton(canvas, target, "大师", startX + dW + dGap, y, dW, dH, masterColor, masterPressed, "start_master")
+                if (confirmResetMode != null) {
+                    // 二次确认弹窗（叠加在设置窗口之上；设置窗口仅画面板不注册按钮，避免重叠误触）
+                    drawSettingsWindow(canvas, target, showButtons = false)
+                    drawConfirmDialog(canvas, target, confirmResetMode!!)
+                } else if (settingsOpen) {
+                    drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
-                    // 屏幕过窄：改为上下居中竖排
-                    val x = (screenWidth - dW) / 2f
-                    val totalH = dH * 2f + dGap
-                    val startY = (screenHeight - totalH) / 2f
-                    addButton(canvas, target, "普通", x, startY, dW, dH, normalColor, normalPressed, "start_normal")
-                    addButton(canvas, target, "大师", x, startY + dH + dGap, dW, dH, masterColor, masterPressed, "start_master")
+                    val dW = btnW * 2f
+                    val dH = btnH * 2f
+                    val dGap = gap * 2f
+                    val normalColor = Color.parseColor("#388E3C")
+                    val normalPressed = Color.parseColor("#1B5E20")
+                    val masterColor = Color.parseColor("#D32F2F")
+                    val masterPressed = Color.parseColor("#B71C1C")
+                    val horizTotal = dW * 2f + dGap
+                    if (horizTotal <= screenWidth) {
+                        // 横屏：两个按钮左右居中
+                        val startX = (screenWidth - horizTotal) / 2f
+                        val y = screenHeight / 2f - dH / 2f
+                        addButton(canvas, target, "普通", startX, y, dW, dH, normalColor, normalPressed, "start_normal")
+                        addButton(canvas, target, "大师", startX + dW + dGap, y, dW, dH, masterColor, masterPressed, "start_master")
+                    } else {
+                        // 屏幕过窄：改为上下居中竖排
+                        val x = (screenWidth - dW) / 2f
+                        val totalH = dH * 2f + dGap
+                        val startY = (screenHeight - totalH) / 2f
+                        addButton(canvas, target, "普通", x, startY, dW, dH, normalColor, normalPressed, "start_normal")
+                        addButton(canvas, target, "大师", x, startY + dH + dGap, dW, dH, masterColor, masterPressed, "start_master")
+                    }
+                    // 右下角设置图标
+                    addSettingsButton(canvas, target)
                 }
             }
             // 叫地主阶段
@@ -1186,9 +1239,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING -> {
                 val bigW = 400f
                 val bigH = 120f
-                addButton(canvas, target, "再来一局", (screenWidth - bigW) / 2, screenHeight / 2 + 100f,
+                addButton(canvas, target, "再来一局", (screenWidth - bigW) / 2, screenHeight / 2 + 90f,
                     bigW, bigH, Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "restart")
-                addButton(canvas, target, "返回主界面", (screenWidth - bigW) / 2, screenHeight / 2 + 240f,
+                addButton(canvas, target, "返回主界面", (screenWidth - bigW) / 2, screenHeight / 2 + 250f,
                     bigW, bigH, Color.parseColor("#1976D2"), Color.parseColor("#0D47A1"), "to_menu")
             }
         }
@@ -1214,6 +1267,101 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         buttonTextPaint.textSize = 56f
         canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
+    }
+
+    /** 主界面右下角设置图标（齿轮） */
+    private fun addSettingsButton(canvas: Canvas, target: MutableList<ButtonRect>) {
+        val size = 96f
+        val margin = 36f
+        val x = screenWidth - margin - size
+        val y = screenHeight - margin - size
+        val rect = RectF(x, y, x + size, y + size)
+        val cx = x + size / 2f
+        val cy = y + size / 2f
+        val isPressed = pressedAction == "open_settings"
+        drawGearIcon(
+            canvas, cx, cy, size * 0.46f,
+            if (isPressed) Color.parseColor("#FFFFFF") else Color.parseColor("#B0BEC5")
+        )
+        target.add(ButtonRect("设置", rect, 0, 0, "open_settings"))
+    }
+
+    /** 绘制齿轮图标（中心 cx,cy，半径 r） */
+    private fun drawGearIcon(canvas: Canvas, cx: Float, cy: Float, r: Float, color: Int) {
+        gearPaint.color = color
+        gearHolePaint.color = Color.parseColor("#0D3B0D")
+        canvas.save()
+        canvas.translate(cx, cy)
+        val teeth = 8
+        val toothW = r * 0.30f
+        for (i in 0 until teeth) {
+            canvas.save()
+            canvas.rotate(360f / teeth * i)
+            canvas.drawRoundRect(RectF(-toothW / 2, -r * 0.95f, toothW / 2, -r * 0.62f), 3f, 3f, gearPaint)
+            canvas.restore()
+        }
+        canvas.drawCircle(0f, 0f, r * 0.62f, gearPaint)
+        canvas.drawCircle(0f, 0f, r * 0.30f, gearHolePaint)
+        canvas.restore()
+    }
+
+    /** 设置窗口（重置统计）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
+    private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
+        canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
+        val panelW = minOf(screenWidth * 0.72f, 760f)
+        val panelH = 520f
+        val px = (screenWidth - panelW) / 2f
+        val py = (screenHeight - panelH) / 2f
+        val panel = RectF(px, py, px + panelW, py + panelH)
+        canvas.drawRoundRect(panel, 28f, 28f, panelPaint)
+        canvas.drawRoundRect(panel, 28f, 28f, panelBorderPaint)
+
+        buttonTextPaint.textSize = 52f
+        buttonTextPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("设置", px + panelW / 2f, py + 70f, buttonTextPaint)
+
+        if (!showButtons) return
+
+        val bw = panelW - 120f
+        val bh = 96f
+        val bx = px + 60f
+        var by = py + 140f
+        addButton(canvas, target, "重置普通模式统计数据", bx, by, bw, bh,
+            Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "reset_normal")
+        by += bh + 36f
+        addButton(canvas, target, "重置大师模式统计数据", bx, by, bw, bh,
+            Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "reset_master")
+        by += bh + 36f
+        addButton(canvas, target, "关闭", bx, by, bw, bh,
+            Color.parseColor("#616161"), Color.parseColor("#424242"), "close_settings")
+    }
+
+    /** 二次确认弹窗：确认/取消重置某模式统计 */
+    private fun drawConfirmDialog(canvas: Canvas, target: MutableList<ButtonRect>, mode: Difficulty) {
+        canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
+        val cw = minOf(screenWidth * 0.62f, 600f)
+        val ch = 300f
+        val cx0 = (screenWidth - cw) / 2f
+        val cy0 = (screenHeight - ch) / 2f
+        val panel = RectF(cx0, cy0, cx0 + cw, cy0 + ch)
+        canvas.drawRoundRect(panel, 24f, 24f, panelPaint)
+        canvas.drawRoundRect(panel, 24f, 24f, panelBorderPaint)
+
+        val label = if (mode == Difficulty.MASTER) "大师" else "普通"
+        buttonTextPaint.textSize = 40f
+        buttonTextPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("确认重置${label}模式", cx0 + cw / 2f, cy0 + 70f, buttonTextPaint)
+        canvas.drawText("统计数据？", cx0 + cw / 2f, cy0 + 120f, buttonTextPaint)
+
+        val bw = (cw - 120f - 40f) / 2f
+        val bh = 84f
+        val by = cy0 + ch - bh - 36f
+        val confirmX = cx0 + 60f
+        val cancelX = confirmX + bw + 40f
+        addButton(canvas, target, "确认", confirmX, by, bw, bh,
+            Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "confirm_reset")
+        addButton(canvas, target, "取消", cancelX, by, bw, bh,
+            Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_reset")
     }
 
     /** 消息提示 */
@@ -1277,22 +1425,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 胜率（积分左侧）
         val rateRight = rightX - sScore - gap
         canvas.drawText(rateText, rateRight, y, textPaint)
-        // 模式指示（胜率左侧，仅展示当前模式，不可点击切换）
+        // 仅显示当前激活模式（红色大字），不显示"模式"标签与非激活状态文字
         val rateLeft = rateRight - sRate
-        val chipW = 130f
-        val chipGap = 12f
-        val masterX = rateLeft - gap - chipW
-        val normalX = masterX - chipGap - chipW
-
-        val normalActive = displayMode == Difficulty.NORMAL
-        textPaint.color = if (normalActive) Color.parseColor("#4CAF50") else Color.parseColor("#888888")
-        canvas.drawText("普通", normalX + chipW, y, textPaint)
-        textPaint.color = if (!normalActive) Color.parseColor("#EF5350") else Color.parseColor("#888888")
-        canvas.drawText("大师", masterX + chipW, y, textPaint)
-
-        // 模式字样（普通/大师左侧）
-        textPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("模式", normalX - 16f, y, textPaint)
+        val modeText = if (displayMode == Difficulty.MASTER) "大师" else "普通"
+        textPaint.color = Color.parseColor("#EF5350")      // 红字
+        textPaint.textSize = 42f
+        canvas.drawText(modeText, rateLeft, y, textPaint)
 
         textPaint.textAlign = Paint.Align.CENTER
     }

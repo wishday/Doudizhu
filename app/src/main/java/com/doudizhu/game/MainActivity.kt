@@ -81,6 +81,14 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         }
         gameSurfaceView.setDisplayMode(Difficulty.NORMAL)
 
+        // 主界面设置：重置某模式统计数据（清零并持久化）
+        gameSurfaceView.onResetStats = { mode ->
+            stats[mode]?.let { it.score = 0; it.games = 0; it.wins = 0 }
+            saveStats()
+            gameSurfaceView.setModeStats(mode, 0, 0, 0)
+            gameSurfaceView.refresh()
+        }
+
         setContentView(gameSurfaceView)
     }
 
