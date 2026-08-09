@@ -165,8 +165,12 @@ class GameEngine {
     private fun calculateAIBid(player: Player): Int {
         val hand = player.handCards
         val currentMaxBid = stateMachine.currentMaxBid
-        // 使用AI决策引擎的智能叫分（区分难度、手牌强度、当前最高分）
-        return AIDecision.decideBid(hand, currentMaxBid, player.difficulty)
+        // 大师模式走 MasterAIDecision（其叫分复用更激进的 MASTER 阈值），其余走普通决策
+        return if (player.difficulty == Difficulty.MASTER) {
+            MasterAIDecision.decideBid(hand, currentMaxBid)
+        } else {
+            AIDecision.decideBid(hand, currentMaxBid, player.difficulty)
+        }
     }
 
     /**
@@ -320,17 +324,22 @@ class GameEngine {
                 getCardCount(getTeammateIndex(playerIndex))
             } else 0
 
-            val decision = AIDecision.decide(
-                player.handCards, lastPlay, player.difficulty, player.role, teammateCount,
-                lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
-                myIndex = playerIndex,
-                opponentCardCounts = getOpponentCardCounts(playerIndex),
-                landlordIndex = stateMachine.landlordIndex,
-                unseenCounts = getUnseenRankCounts(playerIndex),
-                perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
-                primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
-                teammateIndex = getTeammateIndex(playerIndex)
-            )
+            val decision = if (player.difficulty == Difficulty.MASTER) {
+                // 大师模式：构造全量快照（含所有玩家真实手牌）交由 MasterAIDecision 决策
+                MasterAIDecision.decide(buildMasterSnapshot(playerIndex))
+            } else {
+                AIDecision.decide(
+                    player.handCards, lastPlay, player.difficulty, player.role, teammateCount,
+                    lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
+                    myIndex = playerIndex,
+                    opponentCardCounts = getOpponentCardCounts(playerIndex),
+                    landlordIndex = stateMachine.landlordIndex,
+                    unseenCounts = getUnseenRankCounts(playerIndex),
+                    perPlayerPlayed = playedByPlayer.map { it.clone() }.toTypedArray(),
+                    primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
+                    teammateIndex = getTeammateIndex(playerIndex)
+                )
+            }
 
             // 本轮首家（mustPlay）时 AI 必须出牌，不允许跳过
             val aiMustPlay = stateMachine.mustPlay()
@@ -426,6 +435,28 @@ class GameEngine {
         if (stateMachine.landlordIndex < 0) return -1
         if (players[myIndex].role == PlayerRole.FARMER) return stateMachine.landlordIndex
         return (myIndex + 1) % 3
+    }
+
+    /**
+     * 构造大师模式所需的全量快照（含三家真实手牌、完整历史），仅 MASTER 难度调用
+     */
+    private fun buildMasterSnapshot(myIndex: Int): MasterAIDecision.Snapshot {
+        val role = players[myIndex].role
+        val landlordIndex = stateMachine.landlordIndex
+        val hands = players.associate { it.index to it.handCards.toList() }
+        val teammateIsMaster = role == PlayerRole.FARMER &&
+            players.any { it.index != myIndex && it.index != landlordIndex && it.difficulty == Difficulty.MASTER }
+        return MasterAIDecision.Snapshot(
+            myIndex = myIndex,
+            role = role,
+            landlordIndex = landlordIndex,
+            hands = hands,
+            lastPlay = stateMachine.lastPlayedGroup,
+            lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
+            currentPlayerIndex = stateMachine.currentPlayerIndex,
+            history = stateMachine.playHistory.map { it.first to it.second },
+            teammateIsMaster = teammateIsMaster
+        )
     }
 
     /**

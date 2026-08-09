@@ -401,12 +401,14 @@ object AIDecision {
             (myIndex >= 0 && lastPlayerIndex == myIndex)
 
         return when (difficulty) {
-            Difficulty.NORMAL, Difficulty.MASTER ->
+            Difficulty.NORMAL ->
                 if (isFreeLead) {
                     normalFreeLead(hand, role, myIndex, landlordIndex)
                 } else {
                     normalFollow(hand, lastPlay!!, role, lastPlayerIndex, myIndex, landlordIndex)
                 }
+            // 大师模式已由 GameEngine 分流到 MasterAIDecision，此处不会到达
+            else -> null
         }
     }
 
