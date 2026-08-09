@@ -56,11 +56,36 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         }
     }
 
+    /** 大师模式 AI 策略持久化（独立文件，与普通统计无关） */
+    private val strategyPrefs by lazy { getSharedPreferences("master_strategy", MODE_PRIVATE) }
+    private var farmerTeammateStrategy = Difficulty.NORMAL
+    private var playerHintStrategy = Difficulty.NORMAL
+
+    private fun loadStrategy(key: String, default: Difficulty): Difficulty {
+        val s = strategyPrefs.getString(key, default.name) ?: default.name
+        return try { Difficulty.valueOf(s) } catch (_: IllegalArgumentException) { default }
+    }
+
+    private fun loadMasterStrategy() {
+        farmerTeammateStrategy = loadStrategy("farmer_teammate_strategy", Difficulty.NORMAL)
+        playerHintStrategy = loadStrategy("player_hint_strategy", Difficulty.NORMAL)
+    }
+
+    private fun saveMasterStrategy() {
+        strategyPrefs.edit().apply {
+            putString("farmer_teammate_strategy", farmerTeammateStrategy.name)
+            putString("player_hint_strategy", playerHintStrategy.name)
+            apply()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // 恢复历史积分与胜率
         loadStats()
+        // 恢复大师模式 AI 策略设置
+        loadMasterStrategy()
 
         // 全屏显示
         requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -86,6 +111,21 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             stats[mode]?.let { it.score = 0; it.games = 0; it.wins = 0 }
             saveStats()
             gameSurfaceView.setModeStats(mode, 0, 0, 0)
+            gameSurfaceView.refresh()
+        }
+
+        // 恢复大师模式 AI 策略到引擎与 UI 显示
+        gameEngine.farmerTeammateStrategy = farmerTeammateStrategy
+        gameEngine.playerHintStrategy = playerHintStrategy
+        gameSurfaceView.setMasterStrategy(farmerTeammateStrategy, playerHintStrategy)
+
+        // 主界面设置：大师模式 AI 策略变更（持久化保存并实时生效）
+        gameSurfaceView.onMasterStrategyChange = { farmer, hint ->
+            farmerTeammateStrategy = farmer
+            playerHintStrategy = hint
+            gameEngine.farmerTeammateStrategy = farmer
+            gameEngine.playerHintStrategy = hint
+            saveMasterStrategy()
             gameSurfaceView.refresh()
         }
 
@@ -219,6 +259,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         super.onPause()
         // 兜底保存：应用退到后台时持久化积分与胜率，避免异常退出丢数据
         saveStats()
+        saveMasterStrategy()
     }
 
     override fun onRequestRefresh() {

@@ -54,6 +54,18 @@ class GameEngine {
     /** 当前 AI 难度（由主界面难度选择决定，新开对局时应用到两个 AI 玩家） */
     var aiDifficulty: Difficulty = Difficulty.NORMAL
 
+    /**
+     * 大师模式「队友 AI 策略」：人类是农民、且该 AI 也是农民（即玩家农民的队友）时，
+     * 其出牌是否使用大师全信息策略。仅在大师模式内生效；普通模式恒走普通策略。默认普通（无开挂）。
+     */
+    var farmerTeammateStrategy: Difficulty = Difficulty.NORMAL
+
+    /**
+     * 大师模式「玩家提示 AI 策略」：人类玩家点「提示」时是否使用大师全信息策略。
+     * 仅在大师模式内生效；普通模式恒走普通提示。默认普通（无开挂）。
+     */
+    var playerHintStrategy: Difficulty = Difficulty.NORMAL
+
     /** 回调接口 */
     var callback: GameEngineCallback? = null
 
@@ -343,6 +355,24 @@ class GameEngine {
     /**
      * AI自动出牌
      */
+
+    /**
+     * 判断某 AI 玩家出牌是否走大师全信息策略。仅在「大师模式」内生效：
+     *  - 非大师模式：恒 false（走普通策略，无开挂）。
+     *  - 该 AI 是地主：true（对手恒开挂）。
+     *  - 该 AI 是农民 且 人类是地主（即两 AI 农民都是对手）：true（恒开挂）。
+     *  - 该 AI 是农民 且 人类是农民（即该 AI 是人类农民的队友）：取 [farmerTeammateStrategy] 设置。
+     */
+    private fun shouldUseMasterPlay(playerIndex: Int): Boolean {
+        if (aiDifficulty != Difficulty.MASTER) return false
+        val p = players[playerIndex]
+        if (p.isHuman) return false
+        if (p.role == PlayerRole.LANDLORD) return true
+        // 农民：人类是地主 → 两 AI 农民均为对手，恒开挂；否则看队友设置
+        return if (players[0].role == PlayerRole.LANDLORD) true
+               else farmerTeammateStrategy == Difficulty.MASTER
+    }
+
     private fun scheduleAIPlay(playerIndex: Int) {
         // 「轮到自己」的时刻：用于保证单回合总耗时不少于 MIN_AI_TURN_MS
         val turnStartMs = System.currentTimeMillis()
@@ -353,17 +383,17 @@ class GameEngine {
 
             val player = players[playerIndex]
 
-            if (player.difficulty == Difficulty.MASTER) {
+            if (shouldUseMasterPlay(playerIndex)) {
                 // 大师模式：在后台线程跑完美信息搜索，主线程回调节点应用，避免卡 UI
                 scheduleMasterPlay(playerIndex, turnStartMs)
             } else {
-                // 普通模式：走 AIDecision 启发式（语义与改动前完全一致）
+                // 普通模式（或大师模式下被设置降级为普通的农民队友）：走 AIDecision 启发式，强制 NORMAL 难度
                 val lastPlay = stateMachine.lastPlayedGroup
                 val teammateCount = if (player.role == PlayerRole.FARMER) {
                     getCardCount(getTeammateIndex(playerIndex))
                 } else 0
                 val decision = AIDecision.decide(
-                    player.handCards, lastPlay, player.difficulty, player.role, teammateCount,
+                    player.handCards, lastPlay, Difficulty.NORMAL, player.role, teammateCount,
                     lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
                     myIndex = playerIndex,
                     opponentCardCounts = getOpponentCardCounts(playerIndex),
@@ -375,7 +405,7 @@ class GameEngine {
                 )
                 applyAIDecisionPaced(playerIndex, decision, lastPlay, turnStartMs, epoch)
             }
-        }, if (players[playerIndex].difficulty == Difficulty.MASTER) MASTER_DELAY_MS else 1200L)
+        }, if (shouldUseMasterPlay(playerIndex)) MASTER_DELAY_MS else 1200L)
     }
 
     /**
@@ -583,8 +613,9 @@ class GameEngine {
         val hand = players[0].handCards
         val lastPlay = stateMachine.lastPlayedGroup
 
-        // 提示策略跟随当前难度：大师模式用全信息求解器（小预算同步搜索，避免卡 UI），普通模式用普通 AI
-        val decision = if (aiDifficulty == Difficulty.MASTER) {
+        // 提示策略：仅在大师模式且「玩家提示 AI 策略」设为大师时使用全信息求解器（小预算同步搜索，避免卡 UI）；
+        // 普通模式、或该设置=普通时，均用普通 AI 启发式（无开挂）。
+        val decision = if (aiDifficulty == Difficulty.MASTER && playerHintStrategy == Difficulty.MASTER) {
             MasterAIDecision.decide(
                 buildMasterSnapshot(0),
                 deadlineMs = HINT_DEADLINE_MS,

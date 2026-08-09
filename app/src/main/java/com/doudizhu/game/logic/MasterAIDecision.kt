@@ -156,10 +156,10 @@ object MasterAIDecision {
     }
 
     /**
-     * 大师模式叫分（复用普通模式里更激进的 MASTER 叫分阈值；不改动 [AIDecision] 本身）
+     * 大师模式叫分（与普通模式保持一致，不再使用更激进的 MASTER 叫分阈值；不改动 [AIDecision] 本身）
      */
     fun decideBid(hand: List<Card>, currentMaxBid: Int): Int =
-        AIDecision.decideBid(hand, currentMaxBid, Difficulty.MASTER)
+        AIDecision.decideBid(hand, currentMaxBid, Difficulty.NORMAL)
 
     // ===================== 折算工具 =====================
 
