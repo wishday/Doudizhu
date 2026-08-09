@@ -5,6 +5,7 @@ package com.doudizhu.game.state
  * 定义游戏流程中的所有阶段
  */
 enum class GamePhase {
+    MENU,           // 主界面（难度选择）
     DEALING,        // 发牌中
     BIDDING,        // 叫地主阶段
     PLAYING,        // 出牌阶段
@@ -18,7 +19,7 @@ enum class GamePhase {
  */
 class GameStateMachine {
     /** 当前游戏阶段 */
-    var phase: GamePhase = GamePhase.DEALING
+    var phase: GamePhase = GamePhase.MENU
         private set
 
     /** 当前操作的玩家索引（0/1/2） */
@@ -77,6 +78,13 @@ class GameStateMachine {
         hasLandlord = false
         playHistory.clear()
         bombCount = 0
+    }
+
+    /**
+     * 进入主界面（难度选择）
+     */
+    fun startMenu() {
+        phase = GamePhase.MENU
     }
 
     /**

@@ -14,6 +14,7 @@ import android.view.SurfaceView
 import com.doudizhu.game.logic.GameEngine
 import com.doudizhu.game.model.Card
 import com.doudizhu.game.model.CardType
+import com.doudizhu.game.model.Difficulty
 import com.doudizhu.game.state.GamePhase
 import kotlin.math.cos
 import kotlin.math.abs
@@ -158,12 +159,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 本次拖拽中最近处理过的牌索引（防止手指停留同一张牌时反复切换） */
     private var lastDragCardIndex = -1
 
-    /** 计分系统 */
-    private var totalScore = 0
+    /** 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立） */
+    private data class ModeStat(var score: Int = 0, var games: Int = 0, var wins: Int = 0)
+    private val modeStats = mutableMapOf(
+        Difficulty.NORMAL to ModeStat(),
+        Difficulty.MASTER to ModeStat()
+    )
 
-    /** 游戏局数与玩家胜场统计 */
-    private var gameCount = 0
-    private var winCount = 0
+    /** 当前展示统计所用的难度（可点击右上角普通/大师切换查看） */
+    private var displayMode: Difficulty = Difficulty.NORMAL
 
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
@@ -392,17 +396,18 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         playErrorSound()
     }
 
-    /** 设置计分 */
-    fun setTotalScore(score: Int) {
-        totalScore = score
+    /** 设置某模式的统计（积分/局数/胜场） */
+    fun setModeStats(diff: Difficulty, score: Int, games: Int, wins: Int) {
+        modeStats[diff]?.let {
+            it.score = score
+            it.games = games
+            it.wins = wins
+        }
     }
 
-    fun getTotalScore(): Int = totalScore
-
-    /** 设置游戏局数与胜场统计 */
-    fun setStats(games: Int, wins: Int) {
-        gameCount = games
-        winCount = wins
+    /** 设置右上角统计面板当前展示的难度（普通/大师，可点击切换） */
+    fun setDisplayMode(diff: Difficulty) {
+        displayMode = diff
     }
 
     /** 设置任意玩家的桌面出牌展示 */
@@ -618,7 +623,23 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 hapticActionConfirm()
                 gameEngine.startNewGame()
             }
+            action == "start_normal" -> startGameAt(Difficulty.NORMAL)
+            action == "start_master" -> startGameAt(Difficulty.MASTER)
+            action == "to_menu" -> {
+                clearAllPlayedCards()
+                hapticActionConfirm()
+                gameEngine.returnToMenu()
+            }
         }
+    }
+
+    /** 主界面难度按钮：设置 AI 难度并直接进入对应难度对局 */
+    private fun startGameAt(diff: Difficulty) {
+        gameEngine.aiDifficulty = diff
+        displayMode = diff
+        hapticActionConfirm()
+        clearAllPlayedCards()
+        gameEngine.startNewGame()
     }
 
     // ==================== 主绘制 ====================
@@ -658,7 +679,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         drawError(canvas)
 
         // 计分显示
-        drawScore(canvas)
+        drawStats(canvas)
 
         // 结算时显示所有玩家剩余牌（正面）
         if (gameEngine.stateMachine.phase == GamePhase.GAME_OVER || 
@@ -697,7 +718,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawTopBar(canvas: Canvas) {
         val barH = 80f
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH, topBarPaint)
-        // 顶部状态栏：显示当前回合指示（仅出牌阶段），右上角"积分"由 drawScore 绘制
+        // 顶部状态栏：显示当前回合指示（仅出牌阶段），右上角统计面板由 drawStats 绘制
         if (gameEngine.stateMachine.phase == GamePhase.PLAYING) {
             textPaint.textSize = 44f
             textPaint.color = Color.parseColor("#FFD600")
@@ -1084,6 +1105,31 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val gap = 48f
 
         when {
+            // 主界面：难度选择（按钮大小为出牌按钮2倍，居中排列，点击直接进入对应难度）
+            phase == GamePhase.MENU -> {
+                val dW = btnW * 2f
+                val dH = btnH * 2f
+                val dGap = gap * 2f
+                val normalColor = Color.parseColor("#388E3C")
+                val normalPressed = Color.parseColor("#1B5E20")
+                val masterColor = Color.parseColor("#D32F2F")
+                val masterPressed = Color.parseColor("#B71C1C")
+                val horizTotal = dW * 2f + dGap
+                if (horizTotal <= screenWidth) {
+                    // 横屏：两个按钮左右居中
+                    val startX = (screenWidth - horizTotal) / 2f
+                    val y = screenHeight / 2f - dH / 2f
+                    addButton(canvas, target, "普通", startX, y, dW, dH, normalColor, normalPressed, "start_normal")
+                    addButton(canvas, target, "大师", startX + dW + dGap, y, dW, dH, masterColor, masterPressed, "start_master")
+                } else {
+                    // 屏幕过窄：改为上下居中竖排
+                    val x = (screenWidth - dW) / 2f
+                    val totalH = dH * 2f + dGap
+                    val startY = (screenHeight - totalH) / 2f
+                    addButton(canvas, target, "普通", x, startY, dW, dH, normalColor, normalPressed, "start_normal")
+                    addButton(canvas, target, "大师", x, startY + dH + dGap, dW, dH, masterColor, masterPressed, "start_master")
+                }
+            }
             // 叫地主阶段
             phase == GamePhase.BIDDING && currentPlayer == 0 -> {
                 // 只显示允许的分数（必须高于当前最高分，否则不叫）
@@ -1142,6 +1188,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 val bigH = 120f
                 addButton(canvas, target, "再来一局", (screenWidth - bigW) / 2, screenHeight / 2 + 100f,
                     bigW, bigH, Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "restart")
+                addButton(canvas, target, "返回主界面", (screenWidth - bigW) / 2, screenHeight / 2 + 240f,
+                    bigW, bigH, Color.parseColor("#1976D2"), Color.parseColor("#0D47A1"), "to_menu")
             }
         }
     }
@@ -1204,17 +1252,57 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText(errorText, screenWidth / 2f, screenHeight * 0.26f + 54f, textPaint)
     }
 
-    /** 计分与统计显示 */
-    private fun drawScore(canvas: Canvas) {
-        textPaint.textSize = 38f
-        textPaint.color = Color.parseColor("#FFFFFF")
+    /** 右上角统计面板：模式(普通/大师) + 胜率 + 积分，按模式分开统计；主界面不显示，进入游戏后显示 */
+    private fun drawStats(canvas: Canvas) {
+        // 主界面(MENU)不显示状态栏，选择难度进入游戏后再显示
+        if (gameEngine.stateMachine.phase == GamePhase.MENU) return
+
+        val stat = modeStats[displayMode] ?: ModeStat()
         textPaint.textAlign = Paint.Align.RIGHT
-        canvas.drawText("积分: $totalScore", screenWidth - 28f, 56f, textPaint)
-        // 右上角积分左侧显示游戏局数与玩家胜率
-        val winRate = if (gameCount > 0) (winCount * 100.0 / gameCount) else 0.0
-        val rateText = "胜率: ${winCount}/$gameCount (${"%.0f".format(winRate)}%)"
-        canvas.drawText(rateText, screenWidth - 28f - textPaint.measureText("积分: $totalScore") - 40f, 56f, textPaint)
+        textPaint.textSize = 36f
+        textPaint.color = Color.parseColor("#FFFFFF")
+
+        val rightX = screenWidth - rightInset()
+        val y = 56f
+        val gap = 28f
+
+        val scoreText = "积分: ${stat.score}"
+        val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
+        val rateText = "胜率: ${"%.0f".format(rate)}%"
+        val sScore = textPaint.measureText(scoreText)
+        val sRate = textPaint.measureText(rateText)
+
+        // 积分（最右）
+        canvas.drawText(scoreText, rightX, y, textPaint)
+        // 胜率（积分左侧）
+        val rateRight = rightX - sScore - gap
+        canvas.drawText(rateText, rateRight, y, textPaint)
+        // 模式指示（胜率左侧，仅展示当前模式，不可点击切换）
+        val rateLeft = rateRight - sRate
+        val chipW = 130f
+        val chipGap = 12f
+        val masterX = rateLeft - gap - chipW
+        val normalX = masterX - chipGap - chipW
+
+        val normalActive = displayMode == Difficulty.NORMAL
+        textPaint.color = if (normalActive) Color.parseColor("#4CAF50") else Color.parseColor("#888888")
+        canvas.drawText("普通", normalX + chipW, y, textPaint)
+        textPaint.color = if (!normalActive) Color.parseColor("#EF5350") else Color.parseColor("#888888")
+        canvas.drawText("大师", masterX + chipW, y, textPaint)
+
+        // 模式字样（普通/大师左侧）
+        textPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("模式", normalX - 16f, y, textPaint)
+
         textPaint.textAlign = Paint.Align.CENTER
+    }
+
+    /** 右上角面板右移安全边距：基础边距 + 刘海/圆角内缩，自动适配圆角屏 */
+    private fun rightInset(): Float {
+        val cut = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            context.display?.cutout?.safeInsetRight ?: 0
+        } else 0
+        return cut + 40f
     }
 
     /** 绘制线程 */

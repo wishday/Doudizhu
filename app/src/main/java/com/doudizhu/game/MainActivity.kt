@@ -9,6 +9,7 @@ import com.doudizhu.game.logic.GameEngineCallback
 import com.doudizhu.game.model.Card
 import com.doudizhu.game.model.CardGroup
 import com.doudizhu.game.model.CardType
+import com.doudizhu.game.model.Difficulty
 import com.doudizhu.game.ui.GameSurfaceView
 
 /**
@@ -23,35 +24,34 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 游戏绘制视图 */
     private lateinit var gameSurfaceView: GameSurfaceView
 
-    companion object {
-        private const val KEY_TOTAL_SCORE = "total_score"
-        private const val KEY_GAME_COUNT = "game_count"
-        private const val KEY_WIN_COUNT = "win_count"
-    }
-
-    /** 累计积分 */
-    private var totalScore = 0
-
-    /** 游戏局数统计 */
-    private var gameCount = 0
-
-    /** 玩家获胜局数统计 */
-    private var winCount = 0
+    /** 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立） */
+    private data class GameStats(var score: Int = 0, var games: Int = 0, var wins: Int = 0)
+    private val stats = mutableMapOf(
+        Difficulty.NORMAL to GameStats(),
+        Difficulty.MASTER to GameStats()
+    )
 
     /** 统计持久化：使用 Activity 级 SharedPreferences，进程重启后仍能恢复 */
     private val statsPrefs by lazy { getPreferences(MODE_PRIVATE) }
 
+    private fun statKey(mode: Difficulty, suffix: String) = "${mode.name.lowercase()}_$suffix"
+
     private fun loadStats() {
-        totalScore = statsPrefs.getInt(KEY_TOTAL_SCORE, 0)
-        gameCount = statsPrefs.getInt(KEY_GAME_COUNT, 0)
-        winCount = statsPrefs.getInt(KEY_WIN_COUNT, 0)
+        for (mode in stats.keys) {
+            val st = stats[mode]!!
+            st.score = statsPrefs.getInt(statKey(mode, "score"), 0)
+            st.games = statsPrefs.getInt(statKey(mode, "games"), 0)
+            st.wins = statsPrefs.getInt(statKey(mode, "wins"), 0)
+        }
     }
 
     private fun saveStats() {
         statsPrefs.edit().apply {
-            putInt(KEY_TOTAL_SCORE, totalScore)
-            putInt(KEY_GAME_COUNT, gameCount)
-            putInt(KEY_WIN_COUNT, winCount)
+            for ((mode, st) in stats) {
+                putInt(statKey(mode, "score"), st.score)
+                putInt(statKey(mode, "games"), st.games)
+                putInt(statKey(mode, "wins"), st.wins)
+            }
             apply()
         }
     }
@@ -76,8 +76,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameEngine = GameEngine()
         gameEngine.callback = this
         gameSurfaceView.gameEngine = gameEngine
-        gameSurfaceView.setTotalScore(totalScore)
-        gameSurfaceView.setStats(gameCount, winCount)
+        for ((mode, st) in stats) {
+            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins)
+        }
+        gameSurfaceView.setDisplayMode(Difficulty.NORMAL)
 
         setContentView(gameSurfaceView)
     }
@@ -182,20 +184,24 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             val multiplier = Math.pow(2.0, bombCount.toDouble()).toInt()
             val roundScore = baseScore * multiplier
 
+            // 按本局 AI 难度归入对应模式的统计
+            val mode = gameEngine.aiDifficulty
+            val st = stats[mode]!!
+
             if (isHumanWin) {
-                totalScore += roundScore
+                st.score += roundScore
                 gameSurfaceView.showMessage("恭喜获胜！本局 +$roundScore 分", 5000)
                 gameSurfaceView.playWinSound()
             } else {
-                totalScore -= roundScore
+                st.score -= roundScore
                 gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$roundScore 分", 5000)
             }
 
-            // 统计游戏局数与玩家胜率
-            gameCount++
-            if (isHumanWin) winCount++
-            gameSurfaceView.setStats(gameCount, winCount)
-            gameSurfaceView.setTotalScore(totalScore)
+            // 统计该模式的游戏局数与胜场
+            st.games++
+            if (isHumanWin) st.wins++
+            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins)
+            gameSurfaceView.setDisplayMode(mode)
             gameSurfaceView.refresh()
             saveStats()
         }

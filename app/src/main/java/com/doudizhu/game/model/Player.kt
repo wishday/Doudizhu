@@ -27,7 +27,7 @@ data class Player(
     val index: Int,
     val name: String,
     val isHuman: Boolean,
-    val difficulty: Difficulty = Difficulty.NORMAL
+    var difficulty: Difficulty = Difficulty.NORMAL
 ) {
     /** 手牌列表（CopyOnWrite：绘制线程与UI线程并发读写安全） */
     val handCards: MutableList<Card> = java.util.concurrent.CopyOnWriteArrayList()

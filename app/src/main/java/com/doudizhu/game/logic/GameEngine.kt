@@ -51,6 +51,9 @@ class GameEngine {
     /** 游戏状态机 */
     val stateMachine = GameStateMachine()
 
+    /** 当前 AI 难度（由主界面难度选择决定，新开对局时应用到两个 AI 玩家） */
+    var aiDifficulty: Difficulty = Difficulty.NORMAL
+
     /** 回调接口 */
     var callback: GameEngineCallback? = null
 
@@ -69,6 +72,7 @@ class GameEngine {
             it.handCards.clear()
             it.role = PlayerRole.FARMER
             it.bidScore = 0
+            if (!it.isHuman) it.difficulty = aiDifficulty
         }
         // 清零出牌记录
         playedByPlayer.forEach { it.fill(0) }
@@ -85,6 +89,14 @@ class GameEngine {
 
         // 通知UI发牌完成（由UI触发 3 秒手牌展示动画，动画结束后再进入叫分阶段）
         callback?.onDealingComplete()
+    }
+
+    /**
+     * 返回主界面（难度选择）：清空手牌并进入 MENU 阶段
+     */
+    fun returnToMenu() {
+        players.forEach { it.handCards.clear() }
+        stateMachine.startMenu()
     }
 
     /**
