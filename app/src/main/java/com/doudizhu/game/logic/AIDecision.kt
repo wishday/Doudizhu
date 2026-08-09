@@ -401,35 +401,13 @@ object AIDecision {
             (myIndex >= 0 && lastPlayerIndex == myIndex)
 
         return when (difficulty) {
-            Difficulty.EASY -> if (isFreeLead) easyFreeLead(hand) else easyFollow(hand, lastPlay)
-            Difficulty.NORMAL -> if (isFreeLead) {
-                normalFreeLead(hand, role, myIndex, landlordIndex)
-            } else {
-                normalFollow(hand, lastPlay!!, role, lastPlayerIndex, myIndex, landlordIndex)
-            }
+            Difficulty.NORMAL, Difficulty.MASTER ->
+                if (isFreeLead) {
+                    normalFreeLead(hand, role, myIndex, landlordIndex)
+                } else {
+                    normalFollow(hand, lastPlay!!, role, lastPlayerIndex, myIndex, landlordIndex)
+                }
         }
-    }
-
-    // ==================== 简单难度 ====================
-
-    private fun easyFreeLead(hand: List<Card>): CardGroup? {
-        val plays = CardRuleEngine.findAllValidPlays(hand, null)
-        val singles = plays.filter { it.type == CardType.SINGLE }
-        if (singles.isNotEmpty()) return singles.minByOrNull { it.mainRank }
-        val pairs = plays.filter { it.type == CardType.PAIR }
-        if (pairs.isNotEmpty()) return pairs.minByOrNull { it.mainRank }
-        return plays.randomOrNull()
-    }
-
-    private fun easyFollow(hand: List<Card>, lastPlay: CardGroup?): CardGroup? {
-        val validPlays = CardRuleEngine.findAllValidPlays(hand, lastPlay)
-        if (validPlays.isEmpty()) return null
-        if (lastPlay == null || lastPlay.type == CardType.INVALID) return easyFreeLead(hand)
-        val nonBomb = validPlays.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-        if (nonBomb.isNotEmpty() && Math.random() < 0.7) return nonBomb.minByOrNull { it.mainRank }
-        val bombs = validPlays.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }
-        if (bombs.isNotEmpty() && Math.random() < 0.4) return bombs.minByOrNull { it.mainRank }
-        return null
     }
 
     // ==================== 叫分 ====================
@@ -439,16 +417,16 @@ object AIDecision {
         val escalation = if (currentMaxBid >= 2) 6 else 0
 
         return when (difficulty) {
-            Difficulty.EASY -> when {
-                strength >= 85 + escalation -> 3
-                strength >= 70 + escalation && currentMaxBid < 2 -> 2
-                strength >= 58 + escalation && currentMaxBid < 1 -> 1
-                else -> 0
-            }
             Difficulty.NORMAL -> when {
                 strength >= 72 + escalation -> 3
                 strength >= 58 + escalation && currentMaxBid < 2 -> 2
                 strength >= 46 + escalation && currentMaxBid < 1 -> 1
+                else -> 0
+            }
+            Difficulty.MASTER -> when {
+                strength >= 70 + escalation -> 3
+                strength >= 54 + escalation && currentMaxBid < 2 -> 2
+                strength >= 40 + escalation && currentMaxBid < 1 -> 1
                 else -> 0
             }
         }
@@ -720,12 +698,6 @@ object AIDecision {
             ?: validPlays.firstOrNull { it.type != CardType.BOMB && it.type != CardType.ROCKET && !breaksBomb(it, hand) }
             ?: validPlays.firstOrNull { it.type == CardType.BOMB || it.type == CardType.ROCKET }
             ?: validPlays.first())
-    }
-
-    private fun isStructure(g: CardGroup): Boolean = when (g.type) {
-        CardType.STRAIGHT, CardType.STRAIGHT_PAIR, CardType.PLANE, CardType.PLANE_SINGLE,
-        CardType.PLANE_PAIR, CardType.TRIPLE, CardType.TRIPLE_ONE, CardType.TRIPLE_TWO -> true
-        else -> false
     }
 
     /**

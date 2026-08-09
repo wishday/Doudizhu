@@ -24,9 +24,6 @@ class GameStateMachine {
     /** 当前操作的玩家索引（0/1/2） */
     var currentPlayerIndex: Int = 0
 
-    /** 叫地主阶段的当前叫分玩家 */
-    var biddingPlayerIndex: Int = 0
-
     /** 当前最高叫分 */
     var currentMaxBid: Int = 0
 
@@ -88,7 +85,6 @@ class GameStateMachine {
      */
     fun startBidding(firstBidPlayer: Int) {
         phase = GamePhase.BIDDING
-        biddingPlayerIndex = firstBidPlayer
         currentPlayerIndex = firstBidPlayer
     }
 
@@ -119,7 +115,6 @@ class GameStateMachine {
 
         // 下一个玩家
         currentPlayerIndex = (playerIndex + 1) % 3
-        biddingPlayerIndex = currentPlayerIndex
         return false
     }
 

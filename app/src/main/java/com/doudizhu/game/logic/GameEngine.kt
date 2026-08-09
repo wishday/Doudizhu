@@ -395,12 +395,6 @@ class GameEngine {
     }
 
     /**
-     * 获取指定玩家已打出的每 rank 张数（用于对手高牌精确推演）
-     * @return IntArray[18]
-     */
-    fun getPerPlayed(playerIndex: Int): IntArray = playedByPlayer[playerIndex].clone()
-
-    /**
      * 获取我方视角下的队友索引：
      *  - 地主返回 -1
      *  - 农民返回「非我且非地主的玩家」

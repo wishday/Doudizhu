@@ -54,10 +54,6 @@ data class Card(
     val isRed: Boolean
         get() = suit == Suit.HEART || suit == Suit.DIAMOND || rank >= 16
 
-    /** 是否为王牌 */
-    val isJoker: Boolean
-        get() = suit == Suit.JOKER
-
     /** 按rank比较大小 */
     override fun compareTo(other: Card): Int = this.rank.compareTo(other.rank)
 

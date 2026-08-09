@@ -12,8 +12,8 @@ enum class PlayerRole {
  * 玩家难度枚举
  */
 enum class Difficulty {
-    EASY,   // 简单
-    NORMAL  // 普通
+    NORMAL, // 普通
+    MASTER  // 大师
 }
 
 /**
