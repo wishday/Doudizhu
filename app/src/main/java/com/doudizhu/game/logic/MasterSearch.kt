@@ -778,9 +778,17 @@ internal object MasterSearch {
             v += (maxF - minF) * 3
             // 控牌资源：看较强的那家农民与地主对比
             v += (control(hands[landlord]) - maxOf(control(hands[f0]), control(hands[f1]))) * 6
-            // 主动权：谁握着上一手（或即将自由出牌）谁占优
+            // 主动权：谁握着上一手（或即将自由出牌）谁占优。
+            // 但开局/中局不应为"占着出牌权"过度牺牲大牌：权重随持权方手牌数衰减，
+            // 仅残局（持权方手牌很少）才给满权重，避免 AI 为保主动权开局就甩 2/王。
             val holder = if (last == null) turn else lastPlayer
-            v += if (holder == landlord) 25 else -25
+            val holderSize = sizes[holder]
+            val initW = when {
+                holderSize <= 6 -> 25
+                holderSize >= 12 -> 8
+                else -> 8 + (25 - 8) * (12 - holderSize) / 6
+            }
+            v += if (holder == landlord) initW else -initW
 
             return if (rootIsLandlord) v else -v
         }
