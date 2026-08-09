@@ -5,6 +5,7 @@ import android.graphics.*
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Build
+import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -255,19 +256,43 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private enum class VibrationKind { TICK, CLICK, HEAVY }
 
     /**
-     * 播放振动反馈（针对线性马达 LRA 优化）：
-     * 用显式长脉冲 + 中等振幅，确保 LRA 质量块起振且可清晰感知（振幅已按手感减半）。
+     * 统一振动出口：优先使用系统标定的预定义效果（createPredefined），
+     * 让各机型按自身硬件播放已调校的波形，避免自定义低振幅被部分 ROM（如小米 HyperOS）压到无感。
+     * 安卓 12+ 附带 VibrationAttributes(USAGE_GAME)，声明游戏用途以正确通过勿扰/后台限制。
+     */
+    private fun emit(effect: VibrationEffect) {
+        val v = vibrator ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_GAME))
+        } else {
+            v.vibrate(effect)
+        }
+    }
+
+    /**
+     * 播放振动反馈：
+     * 安卓 10+ 用系统预定义效果（TICK/CLICK/HEAVY_CLICK），跨机型感知一致；
+     * 更低版本回退到中高振幅的 createOneShot（避免低振幅被压没）。
      */
     private fun vibrate(kind: VibrationKind) {
         try {
             val v = vibrator ?: return
             val (dur, amp) = when (kind) {
-                VibrationKind.TICK -> 50L to 25
-                VibrationKind.CLICK -> 90L to 32
-                VibrationKind.HEAVY -> 150L to 32
+                VibrationKind.TICK -> 50L to 128
+                VibrationKind.CLICK -> 90L to 128
+                VibrationKind.HEAVY -> 150L to 200
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(VibrationEffect.createOneShot(dur, amp))
+                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    when (kind) {
+                        VibrationKind.TICK -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+                        VibrationKind.CLICK -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK)
+                        VibrationKind.HEAVY -> VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+                    }
+                } else {
+                    VibrationEffect.createOneShot(dur, amp)
+                }
+                emit(effect)
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(dur)
@@ -275,12 +300,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } catch (_: Exception) {}
     }
 
-    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：0.8 秒（振幅已减半） */
+    /** 大出牌（炸弹/火箭/一次出≥8张）的长振动反馈：安卓 10+ 用重击预定义效果 */
     fun playBigVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                v.vibrate(VibrationEffect.createOneShot(800L, 64))
+                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+                } else {
+                    VibrationEffect.createOneShot(800L, 255)
+                }
+                emit(effect)
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(800L)
@@ -293,14 +323,24 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 260)
     }
 
-    /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震，振幅减半） */
+    /** 剩最后一张牌的三段脉冲振动提醒（安卓 10+ 用三段 TICK 原语拼接） */
     fun playLastCardVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val timings = longArrayOf(0, 120, 80, 120, 80, 120)
-                val amps = intArrayOf(0, 64, 0, 64, 0, 64)
-                v.vibrate(VibrationEffect.createWaveform(timings, amps, -1))
+                val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    VibrationEffect.Composition()
+                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
+                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
+                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
+                        .compose()
+                } else {
+                    VibrationEffect.createWaveform(
+                        longArrayOf(0, 120, 80, 120, 80, 120),
+                        intArrayOf(0, 200, 0, 200, 0, 200), -1
+                    )
+                }
+                emit(effect)
             } else {
                 @Suppress("DEPRECATION")
                 v.vibrate(longArrayOf(0, 120, 80, 120, 80, 120), -1)
