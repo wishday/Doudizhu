@@ -506,6 +506,15 @@ class GameEngine {
         val hands = players.associate { it.index to it.handCards.toList() }
         val teammateIsMaster = role == PlayerRole.FARMER &&
             players.any { it.index != myIndex && it.index != landlordIndex && it.difficulty == Difficulty.MASTER }
+        // 对手是否含人类：地主的对手是两家农民，农民的对手是地主。
+        // 该字段仅在地主根（rootIsLandlord）时生效，用于提升地主面对人类农民时的获胜率，
+        // 不影响「2个AI都是农民」的协作局，也不影响普通模式。
+        val opponents = if (role == PlayerRole.LANDLORD) {
+            players.filter { it.index != myIndex && it.index != landlordIndex }
+        } else {
+            players.filter { it.index == landlordIndex }
+        }
+        val opponentsHuman = opponents.any { it.isHuman }
         return MasterAIDecision.Snapshot(
             myIndex = myIndex,
             role = role,
@@ -514,7 +523,8 @@ class GameEngine {
             lastPlay = stateMachine.lastPlayedGroup,
             lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
             currentPlayerIndex = stateMachine.currentPlayerIndex,
-            teammateIsMaster = teammateIsMaster
+            teammateIsMaster = teammateIsMaster,
+            opponentsHuman = opponentsHuman
         )
     }
 

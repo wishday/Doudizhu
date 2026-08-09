@@ -40,8 +40,8 @@ object MasterAIDecision {
      * @param currentPlayerIndex 当前轮到谁（必等于 [myIndex]）
      * @param teammateIsMaster 队友农民是否也是大师 AI（决定过牌惩罚：队友是人类时给一点惩罚，
      *        因为搜索假设队友也最优，但人类队友未必会按最优接管）
-     *
-     * 注：旧版还携带 [history] / [masters]，搜索版不再需要（不再做一步模拟），保留字段无副作用。
+     * @param opponentsHuman 是否存在「人类对手」：地主视角下指两家农民中至少有一个是人类（非大师）；
+     *        用于地主面对人类农民时额外抢占主动权。农民视角下此字段不参与计算（见 [decide]）。
      */
     data class Snapshot(
         val myIndex: Int,
@@ -51,7 +51,8 @@ object MasterAIDecision {
         val lastPlay: CardGroup?,
         val lastPlayerIndex: Int,
         val currentPlayerIndex: Int,
-        val teammateIsMaster: Boolean
+        val teammateIsMaster: Boolean,
+        val opponentsHuman: Boolean = false
     )
 
     /**
@@ -65,6 +66,12 @@ object MasterAIDecision {
      * 补偿「人类队友不会按最优接管」这一搜索假设偏差。
      */
     private const val HUMAN_TEAMMATE_PASS_PENALTY = 30
+
+    /**
+     * 地主面对人类农民时的额外过牌惩罚（鼓励抢占/保留主动权，利用人类对手的次优走法）。
+     * 仅当地主根且对手含人类时生效；农民局（含「2个AI都是农民」的协作）不受影响。
+     */
+    private const val LANDLORD_HUMAN_OPP_PENALTY = 45
 
     /**
      * 大师模式出牌决策入口。
@@ -90,7 +97,11 @@ object MasterAIDecision {
             val rootIsLandlord = snapshot.role == PlayerRole.LANDLORD
             // 队友是人类（农民局且队友不是大师）时给一点点过牌惩罚。
             val teammateIsHuman = !rootIsLandlord && !snapshot.teammateIsMaster
-            val passPenalty = if (teammateIsHuman) HUMAN_TEAMMATE_PASS_PENALTY else 0
+            // 地主根且对手含人类（人类农民）时，额外过牌惩罚，鼓励地主抢占/保留主动权，
+            // 利用人类对手的次优走法。此分支仅在 rootIsLandlord 时生效，
+            // 因此「2个AI都是农民」的协作局（根=农民）绝不会被影响。
+            val oppPenalty = if (rootIsLandlord && snapshot.opponentsHuman) LANDLORD_HUMAN_OPP_PENALTY else 0
+            val passPenalty = (if (teammateIsHuman) HUMAN_TEAMMATE_PASS_PENALTY else 0) + oppPenalty
 
             val hands = LongArray(3) { i -> packHand(snapshot.hands[i] ?: emptyList()) }
             val lastMove = cardGroupToMove(snapshot.lastPlay)
