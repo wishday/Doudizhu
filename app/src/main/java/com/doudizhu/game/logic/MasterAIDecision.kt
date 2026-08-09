@@ -109,10 +109,15 @@ object MasterAIDecision {
             if (isBomb(g)) sc -= 100000            // 炸弹/火箭绝不开局领出
             sc -= g.mainRank                       // 偏好领小牌试探
             sc += g.size * 4                       // 偏好一次多出牌（清手更快）
-            // 避免把三张拆成单张试探：领单张但该 rank 自己还握着 3 张以上则罚
-            if (g.type == CardType.SINGLE && hand.count { it.rank == g.mainRank } >= 3) sc -= 200
+            // 避免拆散已有结构：领单张但该 rank 自己还握着多张则罚（三张 > 对子）
+            if (g.type == CardType.SINGLE) {
+                val cnt = hand.count { it.rank == g.mainRank }
+                if (cnt >= 3) sc -= 200
+                else if (cnt >= 2) sc -= 80
+            }
+            // 偏好连续牌型（顺子/连对/飞机）一次清更多牌
             if (g.type == CardType.STRAIGHT || g.type == CardType.STRAIGHT_PAIR ||
-                g.type == CardType.PLANE) sc += 5  // 偏好连续牌型清手
+                g.type == CardType.PLANE) sc += 15
             return sc
         }
         return candidates.maxByOrNull { score(it) }
@@ -222,7 +227,10 @@ object MasterAIDecision {
             val tmCanNonBomb = CardRuleEngine.findAllValidPlays(teammateHand, g).any { !isBomb(it) }
             val ldCan = canBeat(landlordHand, g)
             var sc = 0
-            if (tmCanNonBomb && !ldCan) sc += 1000   // 队友能接、地主接不住 = 安全交棒，最优
+            if (tmCanNonBomb && !ldCan) {
+                sc += 1000                            // 队友能接、地主接不住 = 安全交棒，最优
+                if (info.teammateCardCount <= 2) sc += 300  // 队友快赢，更积极交棒
+            }
             if (!ldCan) sc += 300                    // 地主接不住也算安全
             sc -= g.mainRank                          // 领小牌试探
             sc += g.size * 3                          // 偏好一次多出牌（清手更快）
@@ -257,8 +265,10 @@ object MasterAIDecision {
         // ① 一步制胜：能一手出完直接出（优先非炸弹），协作也让位于制胜
         findWinningMove(beaters, hand.size)?.let { return it }
 
-        // ② 地主即将获胜（≤2 张），必须拦截，不谦让队友
-        if (landlordCards <= 2) {
+        // ② 地主即将获胜必拦截；队友也接不住时阈值放宽到 ≤3 张，避免被 3 张地主逃脱
+        val teammateCanBeat = canBeat(teammateHand, lastPlay)
+        val mustIntercept = landlordCards <= 2 || (landlordCards <= 3 && !teammateCanBeat)
+        if (mustIntercept) {
             if (normalBeats.isNotEmpty()) return normalBeats.minByOrNull { it.mainRank }
             if (bombBeats.isNotEmpty()) return bombBeats.minByOrNull { it.mainRank }
         }

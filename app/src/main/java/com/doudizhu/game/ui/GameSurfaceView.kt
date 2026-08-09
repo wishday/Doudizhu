@@ -121,6 +121,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val buttonHighlightPaint = Paint().apply {
         color = Color.parseColor("#20FFFFFF"); style = Paint.Style.FILL
     }
+    /** 主界面难度按钮：模式名（大/加粗，白色） */
+    private val modeNamePaint = Paint().apply {
+        isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
+        color = Color.WHITE; textSize = 64f
+    }
+    /** 主界面难度按钮：统计信息（小/不加粗，浅灰） */
+    private val modeStatPaint = Paint().apply {
+        isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
+        color = Color.parseColor("#E0E0E0"); textSize = 32f
+    }
     private val msgBgPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
     private val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
     private val aiHighlightPaint = Paint().apply {
@@ -1169,15 +1179,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         // 横屏：两个按钮左右居中
                         val startX = (screenWidth - horizTotal) / 2f
                         val y = screenHeight / 2f - dH / 2f
-                        addButton(canvas, target, "普通", startX, y, dW, dH, normalColor, normalPressed, "start_normal")
-                        addButton(canvas, target, "大师", startX + dW + dGap, y, dW, dH, masterColor, masterPressed, "start_master")
+                        addModeButton(canvas, target, Difficulty.NORMAL, startX, y, dW, dH, normalColor, normalPressed, "start_normal")
+                        addModeButton(canvas, target, Difficulty.MASTER, startX + dW + dGap, y, dW, dH, masterColor, masterPressed, "start_master")
                     } else {
                         // 屏幕过窄：改为上下居中竖排
                         val x = (screenWidth - dW) / 2f
                         val totalH = dH * 2f + dGap
                         val startY = (screenHeight - totalH) / 2f
-                        addButton(canvas, target, "普通", x, startY, dW, dH, normalColor, normalPressed, "start_normal")
-                        addButton(canvas, target, "大师", x, startY + dH + dGap, dW, dH, masterColor, masterPressed, "start_master")
+                        addModeButton(canvas, target, Difficulty.NORMAL, x, startY, dW, dH, normalColor, normalPressed, "start_normal")
+                        addModeButton(canvas, target, Difficulty.MASTER, x, startY + dH + dGap, dW, dH, masterColor, masterPressed, "start_master")
                     }
                     // 右下角设置图标
                     addSettingsButton(canvas, target)
@@ -1267,6 +1277,44 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         buttonTextPaint.textSize = 56f
         canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
+    }
+
+    /**
+     * 主界面难度按钮（多行）：第 1 行模式名(大/加粗)，第 2、3 行统计(胜率/积分，不加粗)。
+     * 点击区域与动作与普通按钮一致；统计与右上角同源 [modeStats]。
+     */
+    private fun addModeButton(
+        canvas: Canvas, target: MutableList<ButtonRect>, mode: Difficulty,
+        x: Float, y: Float, w: Float, h: Float, color: Int, pressedColor: Int, action: String
+    ) {
+        val rect = RectF(x, y, x + w, y + h)
+        target.add(ButtonRect(mode.name, rect, color, pressedColor, action))
+
+        val isPressed = action == pressedAction
+        buttonPaint.color = if (isPressed) pressedColor else color
+        canvas.drawRoundRect(rect, 22f, 22f, buttonPaint)
+        if (isPressed) canvas.drawRoundRect(rect, 22f, 22f, buttonOverlayPaint)
+        canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
+
+        val stat = modeStats[mode] ?: ModeStat()
+        val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
+        val rateLine = "胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
+        val scoreLine = "积分:${stat.score}"
+
+        val nameH = 64f
+        val statH = 32f
+        val lineGap = 14f
+        val totalH = nameH + statH * 2 + lineGap * 2
+        val blockTop = y + (h - totalH) / 2f
+        val c0 = blockTop + nameH / 2f
+        val c1 = blockTop + nameH + lineGap + statH / 2f
+        val c2 = blockTop + nameH + lineGap + statH + lineGap + statH / 2f
+        canvas.drawText(
+            if (mode == Difficulty.MASTER) "大师" else "普通",
+            x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
+        )
+        canvas.drawText(rateLine, x + w / 2f, c1 + statH * 0.32f, modeStatPaint)
+        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
     }
 
     /** 主界面右下角设置图标（齿轮） */
