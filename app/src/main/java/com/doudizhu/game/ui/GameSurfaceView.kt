@@ -716,6 +716,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 桌面中央展示所有玩家出的牌
         drawTablePlayedCards(canvas)
 
+        // 电脑思考中提示（画在出牌区之后，避免被中央牌面遮挡）
+        if (gameEngine.stateMachine.phase != GamePhase.MENU) {
+            drawAiTurnTip(canvas, 1, screenWidth - 260f, 100f)
+            drawAiTurnTip(canvas, 2, 260f, 100f)
+        }
+
         // 底部人类手牌
         drawHumanHand(canvas)
 
@@ -724,6 +730,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 按钮
         drawButtons(canvas, pendingButtons)
+
+        // 轮到你出牌提示（出牌按钮下方、手牌上方）
+        drawHumanTurnTip(canvas)
 
         // 消息
         drawMessage(canvas)
@@ -771,18 +780,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawTopBar(canvas: Canvas) {
         val barH = 80f
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH, topBarPaint)
-        // 顶部状态栏：显示当前回合指示（仅出牌阶段），右上角统计面板由 drawStats 绘制
-        if (gameEngine.stateMachine.phase == GamePhase.PLAYING) {
-            textPaint.textSize = 44f
-            textPaint.color = Color.parseColor("#FFD600")
-            textPaint.textAlign = Paint.Align.CENTER
-            val text = when (gameEngine.stateMachine.currentPlayerIndex) {
-                0 -> "轮到你出牌"
-                1 -> "电脑A思考中..."
-                else -> "电脑B思考中..."
-            }
-            canvas.drawText(text, screenWidth / 2f, 58f, textPaint)
-        }
+        // 回合指示已下放到各玩家牌堆附近绘制（AI 见 drawAiTurnTip，人类见 drawHumanTurnTip），
+        // 顶部状态栏仅保留背景条，右上角统计面板由 drawStats 绘制
     }
 
     /** 绘制底牌（顶部中央，放大2.5倍） */
@@ -847,6 +846,35 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         for (i in 0 until count) {
             drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
         }
+    }
+
+    /**
+     * 电脑「思考中」提示：绘制在该电脑玩家牌堆下方。
+     * 单独成函数并在桌面出牌之后绘制，避免被中央出牌区遮挡。
+     * 坐标与 drawAIPlayer 的牌背区保持一致（panelH = 180f）。
+     */
+    private fun drawAiTurnTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
+        if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
+        if (gameEngine.stateMachine.currentPlayerIndex != playerIndex) return
+        textPaint.textSize = 44f
+        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.textAlign = Paint.Align.CENTER
+        val tip = if (playerIndex == 1) "电脑A思考中..." else "电脑B思考中..."
+        canvas.drawText(tip, centerX, topY + 180f + 16f + aiBackH + 52f, textPaint)
+    }
+
+    /**
+     * 「轮到你出牌」提示：绘制在出牌按钮下方、玩家手牌上方。
+     * 按钮顶部 y = screenHeight - cardH - 380f，高 130f，故按钮底部 = screenHeight - cardH - 250f；
+     * 手牌高亮框顶部 = screenHeight - cardH - 110f，取两者之间的空隙居中。
+     */
+    private fun drawHumanTurnTip(canvas: Canvas) {
+        if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
+        if (gameEngine.stateMachine.currentPlayerIndex != 0) return
+        textPaint.textSize = 44f
+        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.textAlign = Paint.Align.CENTER
+        canvas.drawText("轮到你出牌", screenWidth / 2f, screenHeight - cardH - 165f, textPaint)
     }
 
     /** 桌面中央展示所有玩家的出牌（放大） */
