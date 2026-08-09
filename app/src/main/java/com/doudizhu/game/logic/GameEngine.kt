@@ -80,6 +80,12 @@ class GameEngine {
     private val MASTER_DEADLINE_MS = 2000L
     /** 大师 AI 后台搜索节点预算 */
     private val MASTER_NODE_LIMIT = 6_000_000
+    /**
+     * 电脑玩家单回合最短耗时（毫秒）：从轮到自己起算，若「思考 + 决策」不足此时长，
+     * 则补足延时后再出牌，避免电脑出牌过快导致玩家看不清节奏。
+     * 只作用于电脑自动出牌链路，不影响玩家点「提示」（getHint 为同步调用，与此无关）。
+     */
+    private val MIN_AI_TURN_MS = 2000L
     /** 提示（getHint）同步搜索时长预算（毫秒），必须小以免卡 UI */
     private val HINT_DEADLINE_MS = 200L
     /** 提示（getHint）同步搜索节点预算 */
@@ -338,6 +344,9 @@ class GameEngine {
      * AI自动出牌
      */
     private fun scheduleAIPlay(playerIndex: Int) {
+        // 「轮到自己」的时刻：用于保证单回合总耗时不少于 MIN_AI_TURN_MS
+        val turnStartMs = System.currentTimeMillis()
+        val epoch = searchEpoch
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (stateMachine.phase != GamePhase.PLAYING) return@postDelayed
             if (stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
@@ -346,7 +355,7 @@ class GameEngine {
 
             if (player.difficulty == Difficulty.MASTER) {
                 // 大师模式：在后台线程跑完美信息搜索，主线程回调节点应用，避免卡 UI
-                scheduleMasterPlay(playerIndex)
+                scheduleMasterPlay(playerIndex, turnStartMs)
             } else {
                 // 普通模式：走 AIDecision 启发式（语义与改动前完全一致）
                 val lastPlay = stateMachine.lastPlayedGroup
@@ -364,16 +373,38 @@ class GameEngine {
                     primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
                     teammateIndex = getTeammateIndex(playerIndex)
                 )
-                applyAIDecision(playerIndex, decision, lastPlay)
+                applyAIDecisionPaced(playerIndex, decision, lastPlay, turnStartMs, epoch)
             }
         }, if (players[playerIndex].difficulty == Difficulty.MASTER) MASTER_DELAY_MS else 1200L)
+    }
+
+    /**
+     * 按最短回合时长节流后再应用电脑决策：
+     * 若从轮到自己（[turnStartMs]）到决策完成不足 [MIN_AI_TURN_MS]，则补足剩余时间再出牌。
+     * 延时期间局面可能变化（新局 / 换人 / 阶段切换），触发时需重新校验。
+     */
+    private fun applyAIDecisionPaced(
+        playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?,
+        turnStartMs: Long, epoch: Int
+    ) {
+        val remain = MIN_AI_TURN_MS - (System.currentTimeMillis() - turnStartMs)
+        if (remain <= 0L) {
+            applyAIDecision(playerIndex, decision, lastPlay)
+            return
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            if (epoch != searchEpoch) return@postDelayed
+            if (stateMachine.phase != GamePhase.PLAYING) return@postDelayed
+            if (stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
+            applyAIDecision(playerIndex, decision, lastPlay)
+        }, remain)
     }
 
     /**
      * 大师模式：构造全量快照后在后台线程求解，主线程回调应用结果。
      * 用 [searchEpoch] 防止过期结果被误用到新局。
      */
-    private fun scheduleMasterPlay(playerIndex: Int) {
+    private fun scheduleMasterPlay(playerIndex: Int, turnStartMs: Long) {
         val snapshot = buildMasterSnapshot(playerIndex)
         val epoch = searchEpoch
         masterSearchExecutor.execute {
@@ -387,7 +418,7 @@ class GameEngine {
                 if (epoch != searchEpoch) return@post
                 if (stateMachine.phase != GamePhase.PLAYING) return@post
                 if (stateMachine.currentPlayerIndex != playerIndex) return@post
-                applyAIDecision(playerIndex, decision, stateMachine.lastPlayedGroup)
+                applyAIDecisionPaced(playerIndex, decision, stateMachine.lastPlayedGroup, turnStartMs, epoch)
             }
         }
     }
