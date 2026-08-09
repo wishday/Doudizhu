@@ -85,11 +85,11 @@ class GameEngine {
      * 则补足延时后再出牌，避免电脑出牌过快导致玩家看不清节奏。
      * 只作用于电脑自动出牌链路，不影响玩家点「提示」（getHint 为同步调用，与此无关）。
      */
-    private val MIN_AI_TURN_MS = 2000L
+    private val MIN_AI_TURN_MS = 1500L
     /** 提示（getHint）同步搜索时长预算（毫秒），必须小以免卡 UI */
-    private val HINT_DEADLINE_MS = 200L
+    private val HINT_DEADLINE_MS = 300L
     /** 提示（getHint）同步搜索节点预算 */
-    private val HINT_NODE_LIMIT = 300_000
+    private val HINT_NODE_LIMIT = 450_000
 
     /**
      * 开始新游戏
