@@ -258,12 +258,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /**
      * 统一振动出口：优先使用系统标定的预定义效果（createPredefined），
      * 让各机型按自身硬件播放已调校的波形，避免自定义低振幅被部分 ROM（如小米 HyperOS）压到无感。
-     * 安卓 12+ 附带 VibrationAttributes(USAGE_GAME)，声明游戏用途以正确通过勿扰/后台限制。
+     * 安卓 12+ 附带 VibrationAttributes(USAGE_TOUCH)，声明交互用途以正确通过勿扰/后台限制。
      */
     private fun emit(effect: VibrationEffect) {
         val v = vibrator ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_GAME))
+            v.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH))
         } else {
             v.vibrate(effect)
         }
@@ -323,17 +323,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 260)
     }
 
-    /** 剩最后一张牌的三段脉冲振动提醒（安卓 10+ 用三段 TICK 原语拼接） */
+    /** 剩最后一张牌的特殊振动提醒（安卓 10+ 用系统双击预定义效果，区别于普通重击） */
     fun playLastCardVibration() {
         try {
             val v = vibrator ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    VibrationEffect.Composition()
-                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
-                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
-                        .addPrimitive(VibrationEffect.PRIMITIVE_TICK)
-                        .compose()
+                    VibrationEffect.createPredefined(VibrationEffect.EFFECT_DOUBLE_CLICK)
                 } else {
                     VibrationEffect.createWaveform(
                         longArrayOf(0, 120, 80, 120, 80, 120),
