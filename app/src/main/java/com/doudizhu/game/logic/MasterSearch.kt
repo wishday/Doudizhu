@@ -381,6 +381,38 @@ internal object MasterSearch {
 
     // ===================== 搜索 =====================
 
+    /**
+     * 近似「典型人类农民」的确定性出牌策略，仅供地主搜索做对手建模使用
+     * （[Solver.humanNodeValue] 调用，仿真也可用同一策略当「真实人类」），本身不参与任何真实决策、
+     * 不影响农民方搜索与普通模式。特征：可预测、偏次优 ——
+     *  - 自由出牌：优先领最小的单张（人类常先打小牌）；无单张再领最小对子，再其他非炸弹。
+     *  - 跟牌：出能压住的最小非炸弹走法；压不住则过牌（不轻易动炸弹）。
+     */
+    fun humanPolicy(hand: Long, last: Move?, lastPlayer: Int, turn: Int): Move? {
+        val free = last == null || lastPlayer == turn || lastPlayer < 0 || lastPlayer > 2
+        val effLast = if (free) null else last
+        val moves = generate(hand, effLast)
+        if (moves.isEmpty()) return null
+        if (free) {
+            val nonBomb = moves.filter { !it.isBomb }
+            val pool = if (nonBomb.isNotEmpty()) nonBomb else moves
+            val singles = pool.filter { it.type == CardType.SINGLE }
+            if (singles.isNotEmpty()) return minByRank(singles)
+            val pairs = pool.filter { it.type == CardType.PAIR }
+            if (pairs.isNotEmpty()) return minByRank(pairs)
+            return minByRank(pool)
+        } else {
+            val beats = moves.filter { !it.isBomb }.sortedBy { it.mainRank }
+            return if (beats.isNotEmpty()) beats.first() else null
+        }
+    }
+
+    private fun minByRank(list: List<Move>): Move {
+        var best = list[0]
+        for (i in 1 until list.size) if (list[i].mainRank < best.mainRank) best = list[i]
+        return best
+    }
+
     private class TTEntry(val value: Int, val depth: Int, val flag: Int)
 
     /** 求解结果：[move] 为 null 表示「过牌」 */
@@ -403,7 +435,9 @@ internal object MasterSearch {
         private val rootIsLandlord: Boolean,
         private val deadlineMs: Long,
         private val nodeLimit: Int,
-        private val passPenalty: Int
+        private val passPenalty: Int,
+        private val humanFarmer: Int = -1,
+        private val pModel: Int = 0
     ) {
         private val hands = initialHands.copyOf()
         private val sizes = IntArray(3) { sizeOf(hands[it]) }
@@ -524,6 +558,15 @@ internal object MasterSearch {
                 return 0
             }
 
+            // 人类农民对手建模（仅地主根 + 存在人类农民时生效，且只对「人类农民节点」生效）：
+            // 不再把人类农民当最优 minimizer，而是按一个确定性、可预测的「典型人类农民」策略走子，
+            // 这样地主就能针对人类农民可预测的次优走法做多步规划、主动设套。
+            // 该分支绝不会在地主/AI农民节点触发，因此农民方搜索与普通模式完全不受影响；
+            // 且只有 rootIsLandlord 时才可能进入（humanFarmer 由上层仅在地主根时传入有效索引）。
+            if (rootIsLandlord && humanFarmer >= 0 && turnIn == humanFarmer) {
+                return humanNodeValue(turnIn, lastIn, lastPlayerIn, depth, alphaIn, betaIn, ply)
+            }
+
             // 归一化「自由出牌」：上一手是自己出的（其余两家都过了）等价于无上一手，
             // 这样不同路径到达的同一局面能命中同一个置换表条目
             val freeLead = lastIn == null || lastPlayerIn == turnIn
@@ -588,6 +631,73 @@ internal object MasterSearch {
                 tt[key] = TTEntry(best, depth, flag)
             }
             return best
+        }
+
+        /**
+         * 人类农民节点的走子值（仅地主根 + 存在人类农民时进入）。
+         * 采用 expectimax 混合：以概率 pModel/1000 人类农民按确定性「典型人类」策略走子（可被地主设套），
+         * 以概率 (1-pModel/1000) 人类农民仍按最优 minimizer 走子（保住最坏情况下限，避免过拟合）。
+         *  - pModel=0：退化为普通 min 节点（与农民方搜索完全一致，最稳健，不影响任何其它路径）。
+         *  - pModel 越大：越利用人类可预测的次优，但越冒险（真实人类若不同则可能被反噬）。
+         * 该节点返回的是一个确定性的期望值，父节点（AI农民 min / 地主 max）按精确值剪枝即可。
+         */
+        private fun humanNodeValue(
+            turnIn: Int,
+            lastIn: Move?,
+            lastPlayerIn: Int,
+            depth: Int,
+            alpha: Int,
+            beta: Int,
+            ply: Int
+        ): Int {
+            val free = lastIn == null || lastPlayerIn == turnIn
+            val effLast = if (free) null else lastIn
+            val effLastPlayer = if (free) turnIn else lastPlayerIn
+            val moves = generate(hands[turnIn], effLast)
+            val next = (turnIn + 1) % 3
+            if (moves.isEmpty()) {
+                return search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1)
+            }
+            if (pModel <= 0) {
+                // 纯最优 min 节点（与正常农民节点行为一致），最稳健
+                var best = INF
+                var b = beta
+                for (a in moves) {
+                    apply(turnIn, a)
+                    val v = search(next, a, turnIn, depth - 1, alpha, b, ply + 1)
+                    undo(turnIn, a)
+                    if (aborted) return 0
+                    if (v < best) best = v
+                    if (best < b) b = best
+                    if (alpha >= b) break
+                }
+                return best
+            }
+            // 最优分支：人类农民尽力压低地主胜率（min）
+            var optBest = INF
+            val a0 = alpha
+            var b0 = beta
+            for (a in moves) {
+                apply(turnIn, a)
+                val v = search(next, a, turnIn, depth - 1, a0, b0, ply + 1)
+                undo(turnIn, a)
+                if (aborted) return 0
+                if (v < optBest) optBest = v
+                if (optBest < b0) b0 = optBest
+                if (a0 >= b0) break
+            }
+            // 人类策略分支：人类农民按建模策略走子
+            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+            val hv = if (hm == null) {
+                search(next, effLast, effLastPlayer, depth - 1, a0, b0, ply + 1)
+            } else {
+                apply(turnIn, hm)
+                val v = search(next, hm, turnIn, depth - 1, a0, b0, ply + 1)
+                undo(turnIn, hm)
+                v
+            }
+            // 期望混合（整数权重，避免浮点）
+            return (hv * pModel + optBest * (1000 - pModel)) / 1000
         }
 
         private fun apply(p: Int, m: Move) {

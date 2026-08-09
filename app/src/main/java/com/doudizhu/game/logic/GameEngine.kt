@@ -515,6 +515,13 @@ class GameEngine {
             players.filter { it.index == landlordIndex }
         }
         val opponentsHuman = opponents.any { it.isHuman }
+        // 仅地主根时，记录人类农民的索引（供地主搜索做对手建模）。农民根恒为 -1，
+        // 因此农民方搜索与普通模式永远不会进入人类建模分支。
+        val humanFarmerIndex = if (role == PlayerRole.LANDLORD) {
+            opponents.firstOrNull { it.isHuman }?.index ?: -1
+        } else {
+            -1
+        }
         return MasterAIDecision.Snapshot(
             myIndex = myIndex,
             role = role,
@@ -524,7 +531,8 @@ class GameEngine {
             lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
             currentPlayerIndex = stateMachine.currentPlayerIndex,
             teammateIsMaster = teammateIsMaster,
-            opponentsHuman = opponentsHuman
+            opponentsHuman = opponentsHuman,
+            humanFarmerIndex = humanFarmerIndex
         )
     }
 
