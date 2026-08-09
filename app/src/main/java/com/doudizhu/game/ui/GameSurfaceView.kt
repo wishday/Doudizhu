@@ -43,7 +43,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var cardH = 230f
     /** 手牌圆角 */
     private var cardRadius = 16f
-    /** 手牌间距（动态计算，填满底部90%） */
+    /** 手牌间距（动态计算，最多填满底部95%） */
     private var handSpacing = 80f
     /** 桌面展示牌宽度（放大2倍） */
     private var tableCardW = 140f
@@ -62,11 +62,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         cardW = (160f * scale).coerceAtLeast(120f)
         cardH = (230f * scale).coerceAtLeast(170f)
         cardRadius = (16f * scale).coerceAtLeast(12f)
-        // 动态计算手牌间距，填满底部90%宽度
+        // 动态计算手牌间距，最多填满底部95%宽度
         val hand = if (::gameEngine.isInitialized) gameEngine.players[0].handCards else emptyList()
         if (hand.size > 1) {
-            val availableWidth = screenWidth * 0.90f
-            handSpacing = ((availableWidth - cardW) / (hand.size - 1)).coerceIn(cardW * 0.35f, cardW * 0.85f)
+            val availableWidth = screenWidth * 0.95f
+            handSpacing = ((availableWidth - cardW) / (hand.size - 1)).coerceIn(cardW * 0.35f, cardW * 0.90f)
         } else {
             handSpacing = cardW * 0.5f
         }
@@ -821,22 +821,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, aiInfoPaint)
 
-        // 名称（放大2.5倍: 32*2.5=80 -> 用60f合适）
+        // 角色（身份：地主/农民）移到顶部，字号用原名称的 50f，颜色保持不变
+        val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
         textPaint.textSize = 50f
-        textPaint.color = Color.WHITE
-        canvas.drawText(player.name, centerX, topY + 55f, textPaint)
+        textPaint.color = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD)
+            Color.parseColor("#FFD600") else Color.parseColor("#A5D6A7")
+        canvas.drawText(roleText, centerX, topY + 55f, textPaint)
 
         // 剩余张数（放大2.5倍: 30*2.5=75 -> 用50f）
         textPaint.textSize = 46f
         textPaint.color = Color.parseColor("#FFD600")
         canvas.drawText("${player.cardCount}张", centerX, topY + 110f, textPaint)
 
-        // 角色（放大2.5倍: 24*2.5=60 -> 用40f）
-        val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
+        // 名称（电脑A/电脑B）移到底部，字号用原角色的 38f，颜色改为灰白色
         textPaint.textSize = 38f
-        textPaint.color = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD)
-            Color.parseColor("#FFD600") else Color.parseColor("#A5D6A7")
-        canvas.drawText(roleText, centerX, topY + 160f, textPaint)
+        textPaint.color = Color.parseColor("#D9D9D9")
+        canvas.drawText(player.name, centerX, topY + 160f, textPaint)
 
         // 牌背扇形（放大2倍）
         val count = minOf(player.cardCount, 12)
@@ -924,7 +924,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
-    /** 底部人类手牌（间距填满90%，开局有 3 秒逐张滑入动画） */
+    /** 底部人类手牌（间距最多填满95%宽度，开局有 3 秒逐张滑入动画） */
     private fun drawHumanHand(canvas: Canvas) {
         val hand = gameEngine.players[0].handCards
         if (hand.isEmpty()) return
@@ -1279,7 +1279,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 val bigH = 120f
                 addButton(canvas, target, "再来一局", (screenWidth - bigW) / 2, screenHeight / 2 + 90f,
                     bigW, bigH, Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "restart")
-                addButton(canvas, target, "返回主界面", (screenWidth - bigW) / 2, screenHeight / 2 + 250f,
+                addButton(canvas, target, "返回主界面", (screenWidth - bigW) / 2, screenHeight / 2 + 270f,
                     bigW, bigH, Color.parseColor("#1976D2"), Color.parseColor("#0D47A1"), "to_menu")
             }
         }
@@ -1482,11 +1482,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (gameEngine.stateMachine.phase == GamePhase.MENU) return
 
         val stat = modeStats[displayMode] ?: ModeStat()
-        textPaint.textAlign = Paint.Align.RIGHT
+        textPaint.textAlign = Paint.Align.LEFT
         textPaint.textSize = 36f                            // 模式与胜率/积分统一字号
         textPaint.color = Color.parseColor("#FFFFFF")
 
-        val rightX = screenWidth - rightInset()
         val y = 56f
         val gap = 28f                                      // 积分与胜率之间的间距
         val charSpace = textPaint.measureText("　")         // 一个全角字空格，置于胜率与模式之间
@@ -1495,29 +1494,28 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
         // 胜率格式保留：胜率:胜场/总场 (胜率%)
         val rateText = "胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
+        val modeText = if (displayMode == Difficulty.MASTER) "大师" else "普通"
+
         val sScore = textPaint.measureText(scoreText)
         val sRate = textPaint.measureText(rateText)
+        val sMode = textPaint.measureText(modeText)
 
-        // 积分（最右）
-        canvas.drawText(scoreText, rightX, y, textPaint)
-        // 胜率（积分左侧）
-        val rateRight = rightX - sScore - gap
-        canvas.drawText(rateText, rateRight, y, textPaint)
-        // 仅显示当前激活模式（红字，与胜率同字号），胜率左侧留一个字空格
-        val modeText = if (displayMode == Difficulty.MASTER) "大师" else "普通"
-        val modeRight = rateRight - sRate - charSpace
+        // 整体（模式 + 胜率 + 积分）水平居中于顶部状态栏
+        val totalW = sMode + charSpace + sRate + gap + sScore
+        val startX = (screenWidth - totalW) / 2f
+
+        // 模式（最左）
         textPaint.color = Color.parseColor("#EF5350")      // 红字
-        canvas.drawText(modeText, modeRight, y, textPaint)
+        canvas.drawText(modeText, startX, y, textPaint)
+        // 胜率（模式右侧）
+        val rateLeft = startX + sMode + charSpace
+        textPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText(rateText, rateLeft, y, textPaint)
+        // 积分（胜率右侧）
+        val scoreLeft = rateLeft + sRate + gap
+        canvas.drawText(scoreText, scoreLeft, y, textPaint)
 
         textPaint.textAlign = Paint.Align.CENTER
-    }
-
-    /** 右上角面板右移安全边距：基础边距 + 刘海/圆角内缩，自动适配圆角屏 */
-    private fun rightInset(): Float {
-        val cut = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            context.display?.cutout?.safeInsetRight ?: 0
-        } else 0
-        return cut + 40f
     }
 
     /** 绘制线程 */
