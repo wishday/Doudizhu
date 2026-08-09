@@ -446,6 +446,7 @@ class GameEngine {
         val hands = players.associate { it.index to it.handCards.toList() }
         val teammateIsMaster = role == PlayerRole.FARMER &&
             players.any { it.index != myIndex && it.index != landlordIndex && it.difficulty == Difficulty.MASTER }
+        val masters = players.filter { it.difficulty == Difficulty.MASTER }.map { it.index }.toSet()
         return MasterAIDecision.Snapshot(
             myIndex = myIndex,
             role = role,
@@ -455,7 +456,8 @@ class GameEngine {
             lastPlayerIndex = stateMachine.lastPlayedPlayerIndex,
             currentPlayerIndex = stateMachine.currentPlayerIndex,
             history = stateMachine.playHistory.map { it.first to it.second },
-            teammateIsMaster = teammateIsMaster
+            teammateIsMaster = teammateIsMaster,
+            masters = masters
         )
     }
 

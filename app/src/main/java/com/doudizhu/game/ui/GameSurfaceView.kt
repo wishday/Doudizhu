@@ -1407,16 +1407,18 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         val stat = modeStats[displayMode] ?: ModeStat()
         textPaint.textAlign = Paint.Align.RIGHT
-        textPaint.textSize = 36f
+        textPaint.textSize = 36f                            // 模式与胜率/积分统一字号
         textPaint.color = Color.parseColor("#FFFFFF")
 
         val rightX = screenWidth - rightInset()
         val y = 56f
-        val gap = 28f
+        val gap = 28f                                      // 积分与胜率之间的间距
+        val charSpace = textPaint.measureText("　")         // 一个全角字空格，置于胜率与模式之间
 
         val scoreText = "积分: ${stat.score}"
         val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
-        val rateText = "胜率: ${"%.0f".format(rate)}%"
+        // 胜率格式保留：胜率:胜场/总场 (胜率%)
+        val rateText = "胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
         val sScore = textPaint.measureText(scoreText)
         val sRate = textPaint.measureText(rateText)
 
@@ -1425,12 +1427,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 胜率（积分左侧）
         val rateRight = rightX - sScore - gap
         canvas.drawText(rateText, rateRight, y, textPaint)
-        // 仅显示当前激活模式（红色大字），不显示"模式"标签与非激活状态文字
-        val rateLeft = rateRight - sRate
+        // 仅显示当前激活模式（红字，与胜率同字号），胜率左侧留一个字空格
         val modeText = if (displayMode == Difficulty.MASTER) "大师" else "普通"
+        val modeRight = rateRight - sRate - charSpace
         textPaint.color = Color.parseColor("#EF5350")      // 红字
-        textPaint.textSize = 42f
-        canvas.drawText(modeText, rateLeft, y, textPaint)
+        canvas.drawText(modeText, modeRight, y, textPaint)
 
         textPaint.textAlign = Paint.Align.CENTER
     }

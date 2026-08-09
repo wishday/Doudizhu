@@ -51,18 +51,23 @@ object MasterAIDecision {
         val lastPlayerIndex: Int,
         val currentPlayerIndex: Int,
         val history: List<Pair<Int, List<Card>>>,
-        val teammateIsMaster: Boolean
+        val teammateIsMaster: Boolean,
+        /**
+         * 大师玩家索引集合（全信息）。用于一步模拟对手/队友的真实决策，
+         * 仅对其中成员使用模拟，人类对手仍走启发式，避免误判。
+         */
+        val masters: Set<Int> = emptySet()
     )
 
     /**
      * 大师模式出牌决策入口
      */
-    fun decide(snapshot: Snapshot): CardGroup? {
+    fun decide(snapshot: Snapshot, allowSim: Boolean = true): CardGroup? {
         return when {
             snapshot.role == PlayerRole.LANDLORD ->
-                decideLandlord(snapshot)             // 全信息地主最优
+                decideLandlord(snapshot, allowSim)   // 全信息地主最优
             snapshot.role == PlayerRole.FARMER && snapshot.teammateIsMaster ->
-                decideCooperativeFarmer(snapshot)    // 农民联盟协作
+                decideCooperativeFarmer(snapshot, allowSim)  // 农民联盟协作
             else ->
                 decideNormalFarmer(snapshot)         // 复制普通农民策略
         }
@@ -76,17 +81,18 @@ object MasterAIDecision {
 
     // ===================== 地主（全信息最优） =====================
 
-    private fun decideLandlord(s: Snapshot): CardGroup? {
+    private fun decideLandlord(s: Snapshot, allowSim: Boolean): CardGroup? {
         val hand = s.hands[s.myIndex].orEmpty()
         val lastPlay = s.lastPlay
         val isFreeLead = lastPlay == null || lastPlay.type == CardType.INVALID ||
             s.lastPlayerIndex == s.myIndex
         return if (isFreeLead) landlordFreeLead(s, hand)
-        else landlordFollow(s, hand, lastPlay!!)
+        else landlordFollow(s, hand, lastPlay!!, allowSim)
     }
 
     /**
-     * 地主自由出牌：优先领「两家农民都压不住」的安全牌，最省着清手；能一手出完直接出。
+     * 地主自由出牌：优先领「两家农民都压不住」的安全普通牌，最省着清手；能一手出完直接出。
+     * 关键：炸弹/火箭绝不在开局作为「安全领出」被选中（否则会第一手甩王炸），仅在制胜或别无选择时出。
      */
     private fun landlordFreeLead(s: Snapshot, hand: List<Card>): CardGroup? {
         val candidates = CardRuleEngine.findAllValidPlays(hand, null)
@@ -98,10 +104,13 @@ object MasterAIDecision {
         fun score(g: CardGroup): Int {
             val oppCanBeat = farmerHands.any { canBeat(it, g) }
             var sc = 0
-            sc += if (oppCanBeat) 0 else 1000      // 农民压不住 = 安全领出，加分
-            if (isBomb(g)) sc -= 500              // 尽量不拆炸弹领出
+            // 仅「普通牌」且农民压不住才给安全分；炸弹/火箭不可作为安全领出
+            if (!isBomb(g) && !oppCanBeat) sc += 1000
+            if (isBomb(g)) sc -= 100000            // 炸弹/火箭绝不开局领出
             sc -= g.mainRank                       // 偏好领小牌试探
-            sc += g.size * 2                       // 偏好一次多出牌
+            sc += g.size * 4                       // 偏好一次多出牌（清手更快）
+            // 避免把三张拆成单张试探：领单张但该 rank 自己还握着 3 张以上则罚
+            if (g.type == CardType.SINGLE && hand.count { it.rank == g.mainRank } >= 3) sc -= 200
             if (g.type == CardType.STRAIGHT || g.type == CardType.STRAIGHT_PAIR ||
                 g.type == CardType.PLANE) sc += 5  // 偏好连续牌型清手
             return sc
@@ -112,10 +121,17 @@ object MasterAIDecision {
     /**
      * 地主跟牌（上一手必为某农民所出）：
      *  - 一步制胜 / 有农民即将获胜（≤2 张）必拦截；
-     *  - 否则若另一家农民也能压，则过牌让两家农民内耗，地主坐收渔利；
-     *  - 只有地主能压时，用最小代价接管（领出农民快赢则必压，否则尽量不浪费大牌）。
+     *  - 否则若另一家农民「真会压」则过牌让两家内耗；双大师局里协作农民对队友领出必过，
+     *    故用全信息一步模拟其真实决策，避免误判反送主动权；
+     *  - 只有地主能压时，用最小代价接管（领出农民快赢则必压，否则尽量不浪费大牌，
+     *    但自身已无重夺手段时必接管，不把局送掉）。
      */
-    private fun landlordFollow(s: Snapshot, hand: List<Card>, lastPlay: CardGroup): CardGroup? {
+    private fun landlordFollow(
+        s: Snapshot,
+        hand: List<Card>,
+        lastPlay: CardGroup,
+        allowSim: Boolean
+    ): CardGroup? {
         val beaters = CardRuleEngine.findAllValidPlays(hand, lastPlay)
         if (beaters.isEmpty()) return null
 
@@ -138,8 +154,17 @@ object MasterAIDecision {
             if (bombBeats.isNotEmpty()) return bombBeats.minByOrNull { it.mainRank }
         }
 
-        // 另一家农民也能压制 -> 两家会内耗，地主过牌
-        if (otherFarmerHand.isNotEmpty() && canBeat(otherFarmerHand, lastPlay)) return null
+        // 另一家农民「真会压」才过牌让内耗；否则地主自己接管。
+        // 双大师局：协作农民对队友领出必过牌，模拟后发现其不会压，地主应转而接管。
+        if (otherFarmerHand.isNotEmpty()) {
+            val otherWillBeat = if (allowSim && s.masters.contains(otherFarmer)) {
+                // 模拟另一家农民「接在 leader 这手之后」的真实决策（lastPlayer 仍是 leader）
+                simulateDecision(s, otherFarmer, lastPlay, s.lastPlayerIndex) != null
+            } else {
+                canBeat(otherFarmerHand, lastPlay)
+            }
+            if (otherWillBeat) return null
+        }
 
         // 只有地主能压
         if (normalBeats.isNotEmpty()) {
@@ -147,7 +172,10 @@ object MasterAIDecision {
             val isHigh = cheapest.mainRank >= 15          // 2 / 王
             // 领出农民快赢了必压；否则若不是大牌也压，保留 2/王 等大牌
             if (!isHigh || leaderFarmerCards <= 5) return cheapest
-            return null
+            // 想保留大牌而过牌时，必须确认自己仍有重夺手段（更大单牌或炸弹），否则必接管
+            val hasRetake = bombBeats.isNotEmpty() ||
+                hand.any { it.rank > cheapest.mainRank && it.rank <= 17 }
+            return if (hasRetake) null else cheapest
         }
         // 只能用炸弹
         if (bombBeats.isNotEmpty()) {
@@ -159,7 +187,7 @@ object MasterAIDecision {
 
     // ===================== 协作农民（农民联盟，全信息） =====================
 
-    private fun decideCooperativeFarmer(s: Snapshot): CardGroup? {
+    private fun decideCooperativeFarmer(s: Snapshot, allowSim: Boolean): CardGroup? {
         val info = deriveFullInfo(s)
         val hand = s.hands[s.myIndex].orEmpty()
         val lastPlay = s.lastPlay
@@ -170,7 +198,7 @@ object MasterAIDecision {
         if (!isFreeLead && s.lastPlayerIndex == info.teammateIndex) return null
 
         return if (isFreeLead) cooperativeFreeLead(s, hand, info)
-        else cooperativeFollow(s, hand, lastPlay!!, info)
+        else cooperativeFollow(s, hand, lastPlay!!, info, allowSim)
     }
 
     /**
@@ -197,7 +225,7 @@ object MasterAIDecision {
             if (tmCanNonBomb && !ldCan) sc += 1000   // 队友能接、地主接不住 = 安全交棒，最优
             if (!ldCan) sc += 300                    // 地主接不住也算安全
             sc -= g.mainRank                          // 领小牌试探
-            sc += g.size                              // 多出牌
+            sc += g.size * 3                          // 偏好一次多出牌（清手更快）
             return sc
         }
         return candidates.maxByOrNull { score(it) }
@@ -206,14 +234,17 @@ object MasterAIDecision {
     /**
      * 协作农民跟牌（上一手必为地主）：
      *  - 一步制胜 / 地主即将获胜（≤2 张）必拦截，不谦让队友；
-     *  - 我方能用非炸弹压制时，仅当队友能用更小牌接管才让出（不对称比较，避免两家互让死锁）；
+     *  - 我方能用非炸弹压制时，用全信息一步模拟队友「真实是否会出」来决定让出：
+     *    队友真会压（含其一步制胜/地主≤2拦截等）则让出，否则自己接管；
+     *    嵌套模拟强制启发式（不递归），并以严格小于比较兜底，避免两家互让死锁；
      *  - 自己接管取最小代价。
      */
     private fun cooperativeFollow(
         s: Snapshot,
         hand: List<Card>,
         lastPlay: CardGroup,
-        info: FullInfo
+        info: FullInfo,
+        allowSim: Boolean
     ): CardGroup? {
         val teammateHand = s.hands[info.teammateIndex].orEmpty()
         val beaters = CardRuleEngine.findAllValidPlays(hand, lastPlay)
@@ -233,16 +264,17 @@ object MasterAIDecision {
         }
 
         val myMin = normalBeats.minOfOrNull { it.mainRank } ?: Int.MAX_VALUE
-        // 队友用真实手牌能压制的非炸弹最小 rank（全信息，协作依据）
-        val tmMin = CardRuleEngine.findAllValidPlays(teammateHand, lastPlay)
-            .filter { !isBomb(it) }.minOfOrNull { it.mainRank } ?: Int.MAX_VALUE
-
-        // 协作：我方有非炸弹压制时，仅当队友能用「更小牌」接管才让出。
-        // 用严格小于（不对称）比较，避免两家都让导致地主不战而胜的死锁：
-        // 出更小牌的那家出、另一家过；相等或队友更大时我方出（队友随后会因
-        // 「上一手是队友」自动过牌，不会内斗）。
         if (myMin != Int.MAX_VALUE) {
-            return if (tmMin < myMin) null else normalBeats.minByOrNull { it.mainRank }
+            // 全信息一步模拟队友对这手牌的真实决策；队友真会出则让出，否则自己接管。
+            val teammateWillBeat = if (allowSim && s.masters.contains(info.teammateIndex)) {
+                simulateDecision(s, info.teammateIndex, lastPlay, s.landlordIndex) != null
+            } else {
+                // 启发式兜底：队友能以「更小非炸弹」接管才让出（严格小于，避免死锁）
+                val tmMin = CardRuleEngine.findAllValidPlays(teammateHand, lastPlay)
+                    .filter { !isBomb(it) }.minOfOrNull { it.mainRank } ?: Int.MAX_VALUE
+                tmMin < myMin
+            }
+            return if (teammateWillBeat) null else normalBeats.minByOrNull { it.mainRank }
         }
 
         // 我方只能用炸弹：地主快赢（<=2 张）才炸（已在②处理），否则让出由队友接管
@@ -346,6 +378,38 @@ object MasterAIDecision {
         val wins = candidates.filter { it.size == handSize }
         if (wins.isEmpty()) return null
         return wins.firstOrNull { !isBomb(it) } ?: wins.first()
+    }
+
+    /** 某农民玩家的队友索引（另一名农民） */
+    private fun teammateOf(index: Int, landlordIndex: Int): Int =
+        (0..2).firstOrNull { it != index && it != landlordIndex } ?: -1
+
+    /**
+     * 用全信息一步模拟某玩家对 [lastPlay]（由 [lastPlayerIndex] 所出）的真实决策。
+     * 内部以 allowSim=false 调用 [decide]，确保被模拟方只走启发式、不会反向再模拟我方，
+     * 从而避免无限递归。人类对手（不在 masters 中）也用普通求解，结果仅供上层参考。
+     */
+    private fun simulateDecision(
+        s: Snapshot,
+        index: Int,
+        lastPlay: CardGroup?,
+        lastPlayerIndex: Int
+    ): CardGroup? {
+        val role = if (index == s.landlordIndex) PlayerRole.LANDLORD else PlayerRole.FARMER
+        val sub = Snapshot(
+            myIndex = index,
+            role = role,
+            landlordIndex = s.landlordIndex,
+            hands = s.hands,
+            lastPlay = lastPlay,
+            lastPlayerIndex = lastPlayerIndex,
+            currentPlayerIndex = index,
+            history = s.history,
+            teammateIsMaster = role == PlayerRole.FARMER &&
+                s.masters.contains(teammateOf(index, s.landlordIndex)),
+            masters = s.masters
+        )
+        return decide(sub, allowSim = false)
     }
 
     /** [deriveFullInfo] 的派生结果载体 */
