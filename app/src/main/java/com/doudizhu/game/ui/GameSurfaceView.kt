@@ -121,15 +121,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val buttonHighlightPaint = Paint().apply {
         color = Color.parseColor("#20FFFFFF"); style = Paint.Style.FILL
     }
-    /** 主界面难度按钮：模式名（大/加粗，白色） */
+    /** 主界面难度按钮：模式名（大/加粗，白色）；字号整体放大2号 */
     private val modeNamePaint = Paint().apply {
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
-        color = Color.WHITE; textSize = 64f
+        color = Color.WHITE; textSize = 66f
     }
-    /** 主界面难度按钮：统计信息（小/不加粗，浅灰） */
+    /** 主界面难度按钮：统计信息（小/不加粗，浅灰）；字号整体放大2号 */
     private val modeStatPaint = Paint().apply {
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
-        color = Color.parseColor("#E0E0E0"); textSize = 32f
+        color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
     private val msgBgPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
     private val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
@@ -671,6 +671,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 refresh()
             }
             action == "close_settings" -> {
+                // 关闭前持久化保存两个框的设置项（大师策略 + 数据重置已在各自按钮中保存，这里再确保大师策略落盘）
+                onMasterStrategyChange?.invoke(masterFarmerStrategy, masterHintStrategy)
                 settingsOpen = false
                 confirmResetMode = null
                 refresh()
@@ -1227,8 +1229,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 } else if (settingsOpen) {
                     drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
-                    val dW = btnW * 2f
-                    val dH = btnH * 2f
+                    val dW = btnW * 2f + 40f
+                    val dH = btnH * 2f + 24f
                     val dGap = gap * 2f
                     val normalColor = Color.parseColor("#388E3C")
                     val normalPressed = Color.parseColor("#1B5E20")
@@ -1335,6 +1337,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 按钮高光
         canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
 
+        // 文字颜色固定白色：buttonTextPaint 被设置窗口等复用且会被改成灰色，
+        // 若此处不显式复位，退出设置后游戏内按钮会继承灰色（叫分/提示/出牌变灰）。
+        buttonTextPaint.color = Color.WHITE
         buttonTextPaint.textSize = 56f
         canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
     }
@@ -1377,12 +1382,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
     }
 
-    /** 主界面右下角设置图标（齿轮） */
+    /** 主界面右下角设置图标（齿轮），位置向左上偏移便于点击 */
     private fun addSettingsButton(canvas: Canvas, target: MutableList<ButtonRect>) {
         val size = 96f
         val margin = 36f
-        val x = screenWidth - margin - size
-        val y = screenHeight - margin - size
+        val offset = 60f   // 向「左上」移动：x 左移、y 上移
+        val x = screenWidth - margin - size - offset
+        val y = screenHeight - margin - size - offset
         val rect = RectF(x, y, x + size, y + size)
         val cx = x + size / 2f
         val cy = y + size / 2f
@@ -1413,7 +1419,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.restore()
     }
 
-    /** 设置窗口（数据设置 + 大师模式设置，左右并排）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
+    /** 设置窗口（大师模式设置 + 数据设置，左右并排；关闭按钮独立置于两框下方居中）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
     private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
 
@@ -1424,13 +1430,23 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val startX = (screenWidth - totalW) / 2f
         val py = (screenHeight - panelH) / 2f
 
-        // 左面板：数据设置
-        drawDataPanel(canvas, target, showButtons, startX, py, panelW, panelH)
-        // 右面板：大师模式设置
-        drawMasterStrategyPanel(canvas, target, showButtons, startX + panelW + gap, py, panelW, panelH)
+        // 左面板：大师模式设置（原右面板，位置互换）
+        drawMasterStrategyPanel(canvas, target, showButtons, startX, py, panelW, panelH)
+        // 右面板：数据设置（原左面板，位置互换）
+        drawDataPanel(canvas, target, showButtons, startX + panelW + gap, py, panelW, panelH)
+
+        // 关闭按钮独立出来，置于两个框下方居中
+        if (showButtons) {
+            val cw = 320f
+            val ch = 96f
+            val cx = (screenWidth - cw) / 2f
+            val cy = py + panelH + 40f
+            addButton(canvas, target, "关闭", cx, cy, cw, ch,
+                Color.parseColor("#616161"), Color.parseColor("#424242"), "close_settings")
+        }
     }
 
-    /** 左面板：数据设置（重置统计 + 关闭） */
+    /** 右面板：数据设置（标题「重置胜率数据」+ 两个简化重置按钮：普通模式 / 大师模式） */
     private fun drawDataPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
                                px: Float, py: Float, pw: Float, ph: Float) {
         val panel = RectF(px, py, px + pw, py + ph)
@@ -1439,25 +1455,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         buttonTextPaint.textSize = 48f
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("数据设置", px + pw / 2f, py + 64f, buttonTextPaint)
+        canvas.drawText("重置胜率数据", px + pw / 2f, py + 64f, buttonTextPaint)
 
         if (!showButtons) return
 
         val bw = pw - 80f
-        val bh = 90f
+        val bh = 110f
         val bx = px + 40f
-        var by = py + 130f
-        addButton(canvas, target, "重置普通模式统计数据", bx, by, bw, bh,
+        var by = py + 150f
+        addButton(canvas, target, "普通模式", bx, by, bw, bh,
             Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "reset_normal")
-        by += bh + 30f
-        addButton(canvas, target, "重置大师模式统计数据", bx, by, bw, bh,
+        by += bh + 40f
+        addButton(canvas, target, "大师模式", bx, by, bw, bh,
             Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "reset_master")
-        by += bh + 30f
-        addButton(canvas, target, "关闭", bx, by, bw, bh,
-            Color.parseColor("#616161"), Color.parseColor("#424242"), "close_settings")
     }
 
-    /** 右面板：大师模式设置（两个策略开关，普通/大师二选一） */
+    /** 左面板：大师模式设置（两个策略开关，普通/大师二选一；去掉“策略”二字，底部仅保留一行说明） */
     private fun drawMasterStrategyPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
                                          px: Float, py: Float, pw: Float, ph: Float) {
         val panel = RectF(px, py, px + pw, py + ph)
@@ -1475,26 +1488,25 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val bx = px + 40f
         val optGap = 24f
 
-        // 第一行：农民队友ai策略
+        // 第一行：农民队友ai
         buttonTextPaint.textSize = 34f
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("农民队友ai策略", px + pw / 2f, py + 124f, buttonTextPaint)
-        drawStrategyToggle(canvas, target, bx, py + 144f, bw, bh, optGap,
+        canvas.drawText("农民队友ai", px + pw / 2f, py + 150f, buttonTextPaint)
+        drawStrategyToggle(canvas, target, bx, py + 170f, bw, bh, optGap,
             "普通", "大师", masterFarmerStrategy, "master_farmer_normal", "master_farmer_master")
 
-        // 第二行：玩家提示ai策略
+        // 第二行：玩家提示ai
         buttonTextPaint.textSize = 34f
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("玩家提示ai策略", px + pw / 2f, py + 270f, buttonTextPaint)
-        drawStrategyToggle(canvas, target, bx, py + 290f, bw, bh, optGap,
+        canvas.drawText("玩家提示ai", px + pw / 2f, py + 320f, buttonTextPaint)
+        drawStrategyToggle(canvas, target, bx, py + 340f, bw, bh, optGap,
             "普通", "大师", masterHintStrategy, "master_hint_normal", "master_hint_master")
 
-        // 说明文字
-        buttonTextPaint.textSize = 26f
+        // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
+        buttonTextPaint.textSize = 24f
         buttonTextPaint.color = Color.parseColor("#9E9E9E")
-        canvas.drawText("（仅大师模式生效）", px + pw / 2f, py + 430f, buttonTextPaint)
-        canvas.drawText("队友普通=无开挂，大师=全信息", px + pw / 2f, py + 468f, buttonTextPaint)
-        canvas.drawText("提示普通=无开挂，大师=全信息", px + pw / 2f, py + 502f, buttonTextPaint)
+        canvas.drawText("（仅大师模式生效，农民队友ai设为普通，", px + pw / 2f, py + panelH - 90f, buttonTextPaint)
+        canvas.drawText("玩家难度更高）", px + pw / 2f, py + panelH - 50f, buttonTextPaint)
     }
 
     /** 策略二选一开关：选中项高亮（绿），未选中灰 */

@@ -781,10 +781,12 @@ internal object MasterSearch {
             // 主动权：谁握着上一手（或即将自由出牌）谁占优。
             // 但开局/中局不应为"占着出牌权"过度牺牲大牌：权重随持权方手牌数衰减，
             // 仅残局（持权方手牌很少）才给满权重，避免 AI 为保主动权开局就甩 2/王。
+            // 分档：≤6→25（深残局满抢权）/ 7~11 线性 22→8 / 12~15→8（中局）/ 16~20→2（开局，握权几乎不值钱）。
             val holder = if (last == null) turn else lastPlayer
             val holderSize = sizes[holder]
             val initW = when {
                 holderSize <= 6 -> 25
+                holderSize >= 16 -> 2
                 holderSize >= 12 -> 8
                 else -> 8 + (25 - 8) * (12 - holderSize) / 6
             }

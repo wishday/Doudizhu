@@ -118,13 +118,14 @@ object MasterAIDecision {
             val useModeling = rootIsLandlord && snapshot.humanFarmerIndex >= 0
             // 残局感知：人类农民手牌越少越接近最优，建模权重与抢权惩罚随之衰减，
             // 回退到纯最优 minimizer（pModel=0 的稳健基线），避免在残局基于"人类会犯错"的假设踏空。
-            // 三档分级（按人类农民手牌数）：≤4 强衰减 / ≤8 中衰减 / ≤12 轻衰减 / >12 不衰减。
+            // 分级（按人类农民手牌数）：≤6 强衰减 / ≤10 中衰减 / ≤12 轻衰减 / ≤16 微衰减 / >16 不衰减。
             val humanHandSize = if (useModeling) (snapshot.hands[snapshot.humanFarmerIndex]?.size ?: 0) else 0
             val (modelW, oppP) = when {
                 !useModeling -> 0 to 0
-                humanHandSize <= 4 -> 0 to 0
-                humanHandSize <= 8 -> (LANDLORD_HUMAN_MODEL_WEIGHT * 3 / 8) to (LANDLORD_HUMAN_OPP_PENALTY / 3)
+                humanHandSize <= 6 -> 0 to 0
+                humanHandSize <= 10 -> (LANDLORD_HUMAN_MODEL_WEIGHT * 3 / 8) to (LANDLORD_HUMAN_OPP_PENALTY / 3)
                 humanHandSize <= 12 -> (LANDLORD_HUMAN_MODEL_WEIGHT * 7 / 10) to (LANDLORD_HUMAN_OPP_PENALTY * 2 / 3)
+                humanHandSize <= 16 -> (LANDLORD_HUMAN_MODEL_WEIGHT * 9 / 10) to (LANDLORD_HUMAN_OPP_PENALTY * 5 / 6)
                 else -> LANDLORD_HUMAN_MODEL_WEIGHT to LANDLORD_HUMAN_OPP_PENALTY
             }
             val oppPenalty = oppP
