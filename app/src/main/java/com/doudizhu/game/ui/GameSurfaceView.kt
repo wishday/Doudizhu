@@ -1505,8 +1505,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
         buttonTextPaint.textSize = 24f
         buttonTextPaint.color = Color.parseColor("#9E9E9E")
-        canvas.drawText("（仅大师模式生效，农民队友ai设为普通，", px + pw / 2f, py + panelH - 90f, buttonTextPaint)
-        canvas.drawText("玩家难度更高）", px + pw / 2f, py + panelH - 50f, buttonTextPaint)
+        canvas.drawText("（仅大师模式生效，农民队友ai设为普通，", px + pw / 2f, py + ph - 90f, buttonTextPaint)
+        canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 50f, buttonTextPaint)
     }
 
     /** 策略二选一开关：选中项高亮（绿），未选中灰 */
