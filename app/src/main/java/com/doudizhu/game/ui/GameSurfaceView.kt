@@ -1248,7 +1248,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 } else if (settingsOpen) {
                     drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
-                    val dW = btnW * 2f + 40f
+                    // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
+                    val dW = (btnW * 2f + 40f) / 2f
                     val dH = btnH * 2f + 24f
                     val dGap = gap * 2f
                     val normalColor = Color.parseColor("#388E3C")
@@ -1256,6 +1257,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     val masterColor = Color.parseColor("#D32F2F")
                     val masterPressed = Color.parseColor("#B71C1C")
                     val horizTotal = dW * 2f + dGap
+                    val blockTop = if (horizTotal <= screenWidth) {
+                        screenHeight / 2f - dH / 2f
+                    } else {
+                        (screenHeight - (dH * 2f + dGap)) / 2f
+                    }
+                    // 标题字号与「普通/大师」一致（复用 modeNamePaint：加粗白字、居中）
+                    canvas.drawText("请选择难度", screenWidth / 2f, blockTop - 60f, modeNamePaint)
                     if (horizTotal <= screenWidth) {
                         // 横屏：两个按钮左右居中
                         val startX = (screenWidth - horizTotal) / 2f
