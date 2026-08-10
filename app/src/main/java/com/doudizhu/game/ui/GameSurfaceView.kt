@@ -195,8 +195,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 大师模式 AI 策略（本地显示状态，由 MainActivity 启动时初始化） */
     private var masterFarmerStrategy: Difficulty = Difficulty.NORMAL
     private var masterHintStrategy: Difficulty = Difficulty.NORMAL
+    /** 大师模式 AI 最大思考时间（秒），本地显示状态，2~60，默认 3；仅在关闭设置时落盘 */
+    private var masterThinkSeconds: Int = 3
     /** 大师模式 AI 策略变更回调（由 MainActivity 注入，负责持久化保存） */
     var onMasterStrategyChange: ((Difficulty, Difficulty) -> Unit)? = null
+    /** 大师模式 AI 思考时间变更回调（关闭设置时由 MainActivity 注入，负责落盘并写入引擎） */
+    var onMasterThinkTimeChange: ((Int) -> Unit)? = null
 
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
@@ -446,6 +450,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         masterHintStrategy = playerHint
     }
 
+    /** 初始化大师模式 AI 思考时间显示（秒），由 MainActivity 启动时调用 */
+    fun setMasterThinkSeconds(seconds: Int) {
+        masterThinkSeconds = seconds.coerceIn(2, 60)
+    }
+
     /** 设置任意玩家的桌面出牌展示 */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
         tablePlayedCards[playerIndex] = cards
@@ -671,8 +680,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 refresh()
             }
             action == "close_settings" -> {
-                // 关闭前持久化保存两个框的设置项（大师策略 + 数据重置已在各自按钮中保存，这里再确保大师策略落盘）
+                // 关闭前持久化保存设置项（大师策略实时落盘；思考时间与之一并落盘）
                 onMasterStrategyChange?.invoke(masterFarmerStrategy, masterHintStrategy)
+                onMasterThinkTimeChange?.invoke(masterThinkSeconds)
                 settingsOpen = false
                 confirmResetMode = null
                 refresh()
@@ -713,6 +723,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             action == "master_hint_master" -> {
                 masterHintStrategy = Difficulty.MASTER
                 onMasterStrategyChange?.invoke(masterFarmerStrategy, masterHintStrategy)
+                refresh()
+            }
+            action == "master_think_dec" -> {
+                // 步进器：仅调整本地显示，不立即落盘（关闭设置时统一保存）
+                masterThinkSeconds = (masterThinkSeconds - 1).coerceAtLeast(2)
+                refresh()
+            }
+            action == "master_think_inc" -> {
+                masterThinkSeconds = (masterThinkSeconds + 1).coerceAtMost(60)
                 refresh()
             }
         }
@@ -1423,8 +1442,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
 
-        val panelW = minOf(screenWidth * 0.34f, 420f)
-        val panelH = 560f
+        val panelW = minOf(screenWidth * 0.40f, 470f)
+        val panelH = 700f
         val gap = 60f
         val totalW = panelW * 2f + gap
         val startX = (screenWidth - totalW) / 2f
@@ -1501,6 +1520,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText("玩家提示ai", px + pw / 2f, py + 320f, buttonTextPaint)
         drawStrategyToggle(canvas, target, bx, py + 340f, bw, bh, optGap,
             "普通", "大师", masterHintStrategy, "master_hint_normal", "master_hint_master")
+
+        // 第三行：ai最大思考时间(秒)，步进器 −/+（2~60，默认3，关闭时落盘）
+        buttonTextPaint.textSize = 26f
+        buttonTextPaint.color = Color.parseColor("#E0E0E0")
+        canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 470f, buttonTextPaint)
+        buttonTextPaint.textSize = 36f
+        buttonTextPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, py + 502f, buttonTextPaint)
+        val sbw = (pw - 80f - 24f) / 2f
+        val sbx = px + 40f
+        addButton(canvas, target, "−", sbx, py + 520f, sbw, 80f,
+            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_dec")
+        addButton(canvas, target, "+", sbx + sbw + 24f, py + 520f, sbw, 80f,
+            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_inc")
 
         // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
         buttonTextPaint.textSize = 24f

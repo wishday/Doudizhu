@@ -58,8 +58,14 @@ class GameStateMachine {
     /** 本局底分（叫地主最终分数） */
     var currentBidScore: Int = 0
 
-    /** 本局炸弹/火箭次数（不计入倍数） */
+    /** 本局炸弹/火箭次数（每个使结算倍数 ×2） */
     var bombCount: Int = 0
+
+    /** 出牌阶段：地主出牌手数（用于判定反春天） */
+    var landlordPlayCount: Int = 0
+
+    /** 出牌阶段：农民出牌手数（用于判定春天） */
+    var farmerPlayCount: Int = 0
 
     /**
      * 转换到发牌阶段
@@ -78,6 +84,8 @@ class GameStateMachine {
         hasLandlord = false
         playHistory.clear()
         bombCount = 0
+        landlordPlayCount = 0
+        farmerPlayCount = 0
     }
 
     /**
@@ -110,7 +118,7 @@ class GameStateMachine {
      */
     fun processBid(playerIndex: Int, score: Int): Boolean {
         // 叫分必须高于当前最高分，否则视为不叫（防止越叫越低）
-        val realScore = if (score > 0 && score <= currentMaxBid) 0 else score
+        val realScore = computeRealBid(score)
         if (realScore > 0) {
             currentMaxBid = realScore
             maxBidPlayerIndex = playerIndex
@@ -131,6 +139,13 @@ class GameStateMachine {
         currentPlayerIndex = (playerIndex + 1) % 3
         return false
     }
+
+    /**
+     * 计算有效叫分：叫分必须高于当前最高分，非法叫分（≤当前最高分）视为不叫(0)
+     * 供状态机与引擎共用，避免两处规则不一致
+     */
+    fun computeRealBid(score: Int): Int =
+        if (score > 0 && score <= currentMaxBid) 0 else score
 
     /**
      * 结束叫地主阶段
@@ -169,6 +184,8 @@ class GameStateMachine {
             cards.type == com.doudizhu.game.model.CardType.ROCKET) {
             bombCount++
         }
+        // 统计地主/农民出牌手数，用于判定春天/反春天
+        if (playerIndex == landlordIndex) landlordPlayCount++ else farmerPlayCount++
         playHistory.add(Pair(playerIndex, cards.cards))
         return nextPlayer(playerIndex)
     }

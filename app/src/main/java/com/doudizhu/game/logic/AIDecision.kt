@@ -426,9 +426,10 @@ object AIDecision {
                 else -> 0
             }
             Difficulty.MASTER -> when {
-                strength >= 70 + escalation -> 3
-                strength >= 54 + escalation && currentMaxBid < 2 -> 2
-                strength >= 40 + escalation && currentMaxBid < 1 -> 1
+                // 大师模式叫分更保守（门槛高于普通模式），降低叫地主积极性
+                strength >= 80 + escalation -> 3
+                strength >= 66 + escalation && currentMaxBid < 2 -> 2
+                strength >= 54 + escalation && currentMaxBid < 1 -> 1
                 else -> 0
             }
         }

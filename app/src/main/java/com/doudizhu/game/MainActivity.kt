@@ -60,6 +60,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private val strategyPrefs by lazy { getSharedPreferences("master_strategy", MODE_PRIVATE) }
     private var farmerTeammateStrategy = Difficulty.NORMAL
     private var playerHintStrategy = Difficulty.NORMAL
+    private var masterThinkSeconds = 3
 
     private fun loadStrategy(key: String, default: Difficulty): Difficulty {
         val s = strategyPrefs.getString(key, default.name) ?: default.name
@@ -69,12 +70,14 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private fun loadMasterStrategy() {
         farmerTeammateStrategy = loadStrategy("farmer_teammate_strategy", Difficulty.NORMAL)
         playerHintStrategy = loadStrategy("player_hint_strategy", Difficulty.NORMAL)
+        masterThinkSeconds = strategyPrefs.getInt("master_think_seconds", 3)
     }
 
     private fun saveMasterStrategy() {
         strategyPrefs.edit().apply {
             putString("farmer_teammate_strategy", farmerTeammateStrategy.name)
             putString("player_hint_strategy", playerHintStrategy.name)
+            putInt("master_think_seconds", masterThinkSeconds)
             apply()
         }
     }
@@ -117,7 +120,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         // 恢复大师模式 AI 策略到引擎与 UI 显示
         gameEngine.farmerTeammateStrategy = farmerTeammateStrategy
         gameEngine.playerHintStrategy = playerHintStrategy
+        gameEngine.masterDeadlineMs = masterThinkSeconds * 1000L
         gameSurfaceView.setMasterStrategy(farmerTeammateStrategy, playerHintStrategy)
+        gameSurfaceView.setMasterThinkSeconds(masterThinkSeconds)
 
         // 主界面设置：大师模式 AI 策略变更（持久化保存并实时生效）
         gameSurfaceView.onMasterStrategyChange = { farmer, hint ->
@@ -125,6 +130,14 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             playerHintStrategy = hint
             gameEngine.farmerTeammateStrategy = farmer
             gameEngine.playerHintStrategy = hint
+            saveMasterStrategy()
+            gameSurfaceView.refresh()
+        }
+
+        // 主界面设置：大师模式 AI 思考时间（关闭设置时落盘并写入引擎，下次大师出牌即生效）
+        gameSurfaceView.onMasterThinkTimeChange = { sec ->
+            masterThinkSeconds = sec
+            gameEngine.masterDeadlineMs = sec * 1000L
             saveMasterStrategy()
             gameSurfaceView.refresh()
         }
@@ -229,20 +242,33 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             // 计算本局得分
             val baseScore = gameEngine.stateMachine.currentBidScore
             val bombCount = gameEngine.stateMachine.bombCount
-            val multiplier = Math.pow(2.0, bombCount.toDouble()).toInt()
-            val roundScore = baseScore * multiplier
+            // 倍数 = 2^bombCount（用位运算，避免 Math.pow 浮点误差与 Int 溢出）
+            var multiplier = 1L shl bombCount
+            // 春天：地主获胜且农民全程未出过牌；反春天：农民获胜且地主只出过首手
+            val isSpring = if (isLandlordWin) {
+                gameEngine.stateMachine.farmerPlayCount == 0
+            } else {
+                gameEngine.stateMachine.landlordPlayCount == 1
+            }
+            if (isSpring) multiplier *= 2
+
+            // 农民视角单份分数 = 底分 × 倍数
+            val unitScore = baseScore * multiplier
+            // 标准斗地主中地主输赢为农民的 2 倍；本项目以人类视角单人记账，故人类是地主时翻倍
+            val humanGain = if (isHumanLandlord) unitScore * 2 else unitScore
+            val springTag = if (isSpring) "（春天×2）" else ""
 
             // 按本局 AI 难度归入对应模式的统计
             val mode = gameEngine.aiDifficulty
             val st = stats[mode]!!
 
             if (isHumanWin) {
-                st.score += roundScore
-                gameSurfaceView.showMessage("恭喜获胜！本局 +$roundScore 分", 5000)
+                st.score += humanGain.toInt()
+                gameSurfaceView.showMessage("恭喜获胜！本局 +$humanGain 分$springTag", 5000)
                 gameSurfaceView.playWinSound()
             } else {
-                st.score -= roundScore
-                gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$roundScore 分", 5000)
+                st.score -= humanGain.toInt()
+                gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$humanGain 分$springTag", 5000)
             }
 
             // 统计该模式的游戏局数与胜场

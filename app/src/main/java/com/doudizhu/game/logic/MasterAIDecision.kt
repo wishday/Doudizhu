@@ -157,10 +157,10 @@ object MasterAIDecision {
     }
 
     /**
-     * 大师模式叫分（与普通模式保持一致，不再使用更激进的 MASTER 叫分阈值；不改动 [AIDecision] 本身）
+     * 大师模式叫分：使用更保守的 MASTER 阈值（门槛高于普通模式），降低叫地主积极性
      */
     fun decideBid(hand: List<Card>, currentMaxBid: Int): Int =
-        AIDecision.decideBid(hand, currentMaxBid, Difficulty.NORMAL)
+        AIDecision.decideBid(hand, currentMaxBid, Difficulty.MASTER)
 
     // ===================== 折算工具 =====================
 

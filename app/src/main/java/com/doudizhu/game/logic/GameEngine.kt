@@ -88,8 +88,9 @@ class GameEngine {
 
     /** 大师 AI 出牌前的「思考延迟」（毫秒），仅用于节奏，与搜索耗时叠加 */
     private val MASTER_DELAY_MS = 500L
-    /** 大师 AI 后台搜索时长预算（毫秒） */
-    private val MASTER_DEADLINE_MS = 2000L
+    /** 大师 AI 后台搜索时长预算（毫秒），可由设置项「ai最大思考时间(秒)」覆盖（秒×1000） */
+    @Volatile
+    var masterDeadlineMs: Long = 3000L
     /** 大师 AI 后台搜索节点预算 */
     private val MASTER_NODE_LIMIT = 6_000_000
     /**
@@ -209,7 +210,7 @@ class GameEngine {
     private fun calculateAIBid(player: Player): Int {
         val hand = player.handCards
         val currentMaxBid = stateMachine.currentMaxBid
-        // 大师模式走 MasterAIDecision（其叫分复用更激进的 MASTER 阈值），其余走普通决策
+        // 大师模式走 MasterAIDecision（其叫分使用更保守的 MASTER 阈值，低于普通模式积极性），其余走普通决策
         return if (player.difficulty == Difficulty.MASTER) {
             MasterAIDecision.decideBid(hand, currentMaxBid)
         } else {
@@ -221,8 +222,8 @@ class GameEngine {
      * 处理叫分逻辑
      */
     private fun processBid(playerIndex: Int, score: Int) {
-        // 叫分必须高于当前最高分，非法叫分一律视为不叫（与状态机规则保持一致）
-        val realScore = if (score > 0 && score <= stateMachine.currentMaxBid) 0 else score
+        // 有效叫分规则统一由状态机 computeRealBid 计算，避免两处不一致
+        val realScore = stateMachine.computeRealBid(score)
         players[playerIndex].bidScore = realScore
         callback?.onPlayerBid(playerIndex, realScore)
 
@@ -440,7 +441,7 @@ class GameEngine {
         masterSearchExecutor.execute {
             val decision = MasterAIDecision.decide(
                 snapshot,
-                deadlineMs = MASTER_DEADLINE_MS,
+                deadlineMs = masterDeadlineMs,
                 nodeLimit = MASTER_NODE_LIMIT
             )
             // 切回主线程应用，并二次校验局面未被新局/换人改变
