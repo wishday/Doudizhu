@@ -12,8 +12,12 @@ android {
         applicationId = "com.doudizhu.game"
         minSdk = 24          // 兼容 Android 7.0
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // 版本号可由 CI 注入：-PappVersionCode=整数 -PappVersionName=字符串；本地不带参数时回退默认值
+        val appVersionCode = (project.findProperty("appVersionCode") as? String)?.toIntOrNull() ?: 1
+        val appVersionName = (project.findProperty("appVersionName") as? String)
+            ?.takeIf { it.isNotBlank() } ?: "1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
     }
 
     buildTypes {

@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则使用 commit 短编号）"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -13,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要完整提交历史以计算 versionCode（git rev-list --count HEAD）
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -29,8 +36,18 @@ jobs:
       - name: Grant execute permission for Gradle wrapper
         run: chmod +x gradlew
 
+      - name: Determine app version
+        id: ver
+        run: |
+          # 手动触发且填写了版本号则用输入值；否则（push 或手动留空）取 commit 短编号
+          VER="${{ github.event.inputs.version }}"
+          [ -z "$VER" ] && VER="${GITHUB_SHA:0:7}"
+          echo "app_version=$VER" >> "$GITHUB_OUTPUT"
+          # versionCode 取总提交数，保证每次构建单调递增（覆盖安装不冲突）
+          echo "app_version_code=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon
+        run: ./gradlew assembleDebug --no-daemon -PappVersionName="${{ steps.ver.outputs.app_version }}" -PappVersionCode="${{ steps.ver.outputs.app_version_code }}"
 
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
@@ -44,9 +61,9 @@ jobs:
         run: |
           DATE=$(date +%Y%m%d-%H%M)
           TAG="build-${DATE}-${{ github.run_number }}"
-          APK="DouDiZhu-${DATE}.apk"
+          APK="DouDiZhu-${DATE}-${{ steps.ver.outputs.app_version }}.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "${APK}"
           gh release create "${TAG}" "${APK}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "DouDiZhu 构建 ${DATE}" \
-            --notes "commit: ${GITHUB_SHA:0:7}"
+            --notes "commit: ${GITHUB_SHA:0:7} | 版本: ${{ steps.ver.outputs.app_version }}"
