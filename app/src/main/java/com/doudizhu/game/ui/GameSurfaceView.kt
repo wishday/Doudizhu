@@ -891,13 +891,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.color = Color.parseColor("#D9D9D9")
         canvas.drawText(player.name, centerX, topY + 160f, textPaint)
 
-        // 牌背扇形（放大2倍）
-        val count = minOf(player.cardCount, 12)
-        val backSpacing = aiBackW * 0.55f
-        val totalBackW = backSpacing * (count - 1) + aiBackW
-        val backStartX = centerX - totalBackW / 2
-        for (i in 0 until count) {
-            drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
+        // 牌背扇形（放大2倍）：结算/结束时由正面剩余牌占据该位置，不再画牌背
+        if (gameEngine.stateMachine.phase != GamePhase.SETTLING &&
+            gameEngine.stateMachine.phase != GamePhase.GAME_OVER) {
+            val count = minOf(player.cardCount, 12)
+            val backSpacing = aiBackW * 0.55f
+            val totalBackW = backSpacing * (count - 1) + aiBackW
+            val backStartX = centerX - totalBackW / 2
+            for (i in 0 until count) {
+                drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
+            }
         }
     }
 
@@ -1147,35 +1150,37 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     // ==================== 结算时显示所有玩家剩余牌（正面） ====================
 
     private fun drawAllRemainingCards(canvas: Canvas) {
-        // 在桌面下方显示所有玩家剩余牌
-        val showY = screenHeight * 0.58f
+        // 结算/结束时，把两个电脑的剩余牌显示到它们原本显示手牌的位置（左/右上角）
+        val backY = 100f + 180f + 16f   // 与 drawAIPlayer 中牌背位置一致：topY + panelH + 16f
         val miniW = 90f
         val miniH = 126f
         val miniGap = 12f
 
-        // 左侧AI剩余牌
+        // 左侧AI（电脑B）剩余牌，显示在原手牌位置
         val leftCards = gameEngine.players[2].handCards
         if (leftCards.isNotEmpty()) {
+            val centerX = 260f
             textPaint.textSize = 28f
             textPaint.color = Color.parseColor("#A5D6A7")
-            canvas.drawText("电脑B剩余", screenWidth * 0.18f, showY - 10f, textPaint)
+            canvas.drawText("电脑B剩余", centerX, backY - 10f, textPaint)
             val totalW = (miniW + miniGap) * leftCards.size - miniGap
-            val startX = screenWidth * 0.18f - totalW / 2
+            val startX = centerX - totalW / 2
             for ((i, card) in leftCards.withIndex()) {
-                drawMiniCard(canvas, startX + i * (miniW + miniGap), showY, miniW, miniH, card, faceUp = true)
+                drawMiniCard(canvas, startX + i * (miniW + miniGap), backY, miniW, miniH, card, faceUp = true)
             }
         }
 
-        // 右侧AI剩余牌
+        // 右侧AI（电脑A）剩余牌，显示在原手牌位置
         val rightCards = gameEngine.players[1].handCards
         if (rightCards.isNotEmpty()) {
+            val centerX = screenWidth - 260f
             textPaint.textSize = 28f
             textPaint.color = Color.parseColor("#A5D6A7")
-            canvas.drawText("电脑A剩余", screenWidth * 0.82f, showY - 10f, textPaint)
+            canvas.drawText("电脑A剩余", centerX, backY - 10f, textPaint)
             val totalW = (miniW + miniGap) * rightCards.size - miniGap
-            val startX = screenWidth * 0.82f - totalW / 2
+            val startX = centerX - totalW / 2
             for ((i, card) in rightCards.withIndex()) {
-                drawMiniCard(canvas, startX + i * (miniW + miniGap), showY, miniW, miniH, card, faceUp = true)
+                drawMiniCard(canvas, startX + i * (miniW + miniGap), backY, miniW, miniH, card, faceUp = true)
             }
         }
     }
@@ -1450,7 +1455,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
 
-        val panelW = minOf(screenWidth * 0.40f, 470f)
+        val panelW = minOf(screenWidth * 0.40f, 520f)
         val panelH = 700f
         val gap = 60f
         val totalW = panelW * 2f + gap
@@ -1529,24 +1534,28 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         drawStrategyToggle(canvas, target, bx, py + 340f, bw, bh, optGap,
             "普通", "大师", masterHintStrategy, "master_hint_normal", "master_hint_master")
 
-        // 第三行：ai最大思考时间(秒)，步进器 −/+（2~60，默认3，关闭时落盘）
+        // 第三行：ai最大思考时间(秒)，步进器 − [数值] +（2~60，默认3，关闭时落盘）
+        // 数值显示在中间单元格，确保“X 秒”位于 − 与 + 之间
         buttonTextPaint.textSize = 26f
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
         canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 470f, buttonTextPaint)
+
+        val stepGap = 120f                       // 中间数值单元格宽度，容纳“X 秒”文本
+        val sbw = (pw - 80f - stepGap) / 2f      // 两端 −/+ 按钮宽度（与面板内边距一致）
+        val sbx = px + 40f
+        val sby = py + 520f
+        addButton(canvas, target, "−", sbx, sby, sbw, 80f,
+            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_dec")
+        addButton(canvas, target, "+", sbx + sbw + stepGap, sby, sbw, 80f,
+            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_inc")
         buttonTextPaint.textSize = 36f
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, py + 502f, buttonTextPaint)
-        val sbw = (pw - 80f - 24f) / 2f
-        val sbx = px + 40f
-        addButton(canvas, target, "−", sbx, py + 520f, sbw, 80f,
-            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_dec")
-        addButton(canvas, target, "+", sbx + sbw + 24f, py + 520f, sbw, 80f,
-            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_inc")
+        canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, sby + 80f / 2f + 18f, buttonTextPaint)
 
         // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
         buttonTextPaint.textSize = 24f
         buttonTextPaint.color = Color.parseColor("#9E9E9E")
-        canvas.drawText("（仅大师模式生效，农民队友ai设为普通，", px + pw / 2f, py + ph - 90f, buttonTextPaint)
+        canvas.drawText("（农民队友ai设为普通，", px + pw / 2f, py + ph - 90f, buttonTextPaint)
         canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 50f, buttonTextPaint)
     }
 

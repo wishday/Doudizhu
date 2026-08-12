@@ -327,10 +327,11 @@ object AIDecision {
         if (discrete.isNotEmpty()) {
             return discrete.getOrNull(1) ?: discrete.first()
         }
-        // 无离散可压，被迫拆结构：优先拆"最便宜"的结构(对子/三张 tier1 优于 顺子/连对/飞机 tier2)，
-        // 同档内再按拆牌代价、点数从小到大取，避免浪费高牌、拆贵结构。
-        return sameType.minWithOrNull(
-            compareBy({ groupDisruption(it, hand) }, { breakCost(it, hand) }, { it.mainRank })
+        // 无离散可压、被迫拆结构（手牌全为顺子/连对/飞机等结构牌，任何单/对都拆结构）：
+        // 对手即将获胜，改"拆最大、出最大能压的单/对"——用大牌压制而非保留，避免被对手捡漏获胜。
+        // 仍先按破坏等级/拆牌代价取最小破坏，同档内取最大点数（拆最贵结构、出最大牌）。
+        return sameType.maxWithOrNull(
+            compareBy({ -it.mainRank }, { groupDisruption(it, hand) }, { breakCost(it, hand) })
         )
     }
 
@@ -633,6 +634,14 @@ object AIDecision {
             // 它已考虑「吸收小牌、保留大单张」，该结构必然非单张/非对子、不拆弹，对手(≤2张)永远接不住。
             val bestStructure = chooseStructureLead(hand)
             if (bestStructure != null) return bestStructure
+            // 残局留王：对手剩2张且手上有非控单张时，先领最小非控单张探路，
+            // 把大王/2 留作回手压制（与下方 safe 为空时的兜底一致），避免一上来把王当普通牌白扔。
+            if (ctxMinOpponentCards == 2) {
+                val smallestNonControl = validPlays
+                    .filter { it.type == CardType.SINGLE && !breaksBomb(it, hand) && !isControlRank(it.mainRank) }
+                    .minByOrNull { it.mainRank }
+                if (smallestNonControl != null) return smallestNonControl
+            }
             // 退化情况（手中无任何结构牌，仅剩对子/炸弹等）：在 safe 中按
             // 「保留炸弹 + 剩余手数最少 + 散单最少 + 消耗小牌」择优
             return safe.minWithOrNull(
@@ -721,7 +730,7 @@ object AIDecision {
         val pairRanks = counts.filterValues { it >= 2 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
         addRunVariants(hand, pairRanks, 2, 3, CardType.STRAIGHT_PAIR, candidates)
         // 飞机（>=2连）：纯飞机 + 带单翼/双翼，翼用最小非控散牌吸收零散小牌
-        val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..15 && it !in bombRanks }.sorted()
+        val tripleRanks = counts.filterValues { it >= 3 }.keys.filter { it in 3..14 && it !in bombRanks }.sorted()
         val planes = mutableListOf<CardGroup>()
         addRunVariants(hand, tripleRanks, 3, 2, CardType.PLANE, planes)
         for (plane in planes) {
