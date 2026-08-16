@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: "发布版本名称（留空则自动用构建时间 YYYYMMDDHHMM）"
+        required: false
+        default: ""
+      commit:
+        description: "构建所用的 commit hash（留空则使用触发时的 HEAD）"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -12,9 +21,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1   # 仅拉取最新代码
+          ref: ${{ github.event.inputs.commit != '' && github.event.inputs.commit || github.ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -36,8 +47,11 @@ jobs:
         env:
           TZ: Asia/Shanghai   # 使用北京时间（UTC+8）
         run: |
-          # 默认使用构建时间：versionName=YYYYMMDDHHMM，versionCode=Unix 秒时间戳（单调、可编译、覆盖安装不冲突）
-          echo "app_version=$(date +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+          # 手动触发且填写了版本名称则用输入值；否则（push 或手动留空）取构建时间 YYYYMMDDHHMM
+          VER="${{ github.event.inputs.version_name }}"
+          [ -z "$VER" ] && VER=$(date +%Y%m%d%H%M)
+          echo "app_version=$VER" >> "$GITHUB_OUTPUT"
+          # versionCode 取 Unix 秒时间戳（单调、可编译、覆盖安装不冲突）
           echo "app_version_code=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Build Debug APK
@@ -54,11 +68,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TZ: Asia/Shanghai   # 使用北京时间（UTC+8），与版本号保持一致
         run: |
-          DATE=$(date +%Y%m%d-%H%M)
-          TAG="build-${DATE}-${{ github.run_number }}"
-          APK="DouDiZhu-${DATE}-${{ steps.ver.outputs.app_version }}.apk"
+          # 发布标识统一使用版本名称（去掉此前多余的 DATE 时间戳），run_number 保证唯一
+          TAG="build-${{ steps.ver.outputs.app_version }}-${{ github.run_number }}"
+          APK="DouDiZhu-${{ steps.ver.outputs.app_version }}.apk"
           cp app/build/outputs/apk/debug/app-debug.apk "${APK}"
           gh release create "${TAG}" "${APK}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "DouDiZhu 构建 ${DATE}" \
-            --notes "commit: ${GITHUB_SHA:0:7} | 版本: ${{ steps.ver.outputs.app_version }}"
+            --title "DouDiZhu ${{ steps.ver.outputs.app_version }}" \
+            --notes "commit: $(git rev-parse HEAD | cut -c1-7) | 版本: ${{ steps.ver.outputs.app_version }}"

@@ -1177,18 +1177,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val miniH = 126f
         val miniGap = 12f
         val margin = 24f
+        val centerGap = 100f   // 中线处两条牌带之间留一个“底牌大小”的缝隙
         val bandW = screenWidth / 2f    // 左右各占半屏，避免两侧重叠
 
-        // 左侧AI（电脑B）剩余牌：从左边缘 margin 起排，超宽则重叠
+        // 左侧AI（电脑B）剩余牌：贴左边缘起排，向右延伸到中线缝隙左缘为止
         drawRemainingRow(
             canvas, gameEngine.players[2].handCards,
-            bandLeft = margin, bandRight = bandW - margin,
+            bandLeft = margin, bandRight = bandW - centerGap / 2f,
             backY, miniW, miniH, miniGap, "电脑B剩余", leftAlign = true
         )
-        // 右侧AI（电脑A）剩余牌：靠右边缘排布，超宽则重叠
+        // 右侧AI（电脑A）剩余牌：贴右边缘排布，向左延伸到中线缝隙右缘为止
         drawRemainingRow(
             canvas, gameEngine.players[1].handCards,
-            bandLeft = bandW + margin, bandRight = screenWidth - margin,
+            bandLeft = bandW + centerGap / 2f, bandRight = screenWidth - margin,
             backY, miniW, miniH, miniGap, "电脑A剩余", leftAlign = false
         )
     }
