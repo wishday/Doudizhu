@@ -1220,7 +1220,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } else {
             ((availableW - miniW) / (n - 1)).coerceAtLeast(miniW * 0.3f)
         }
-        val rowW = (miniW + pitch) * (n - 1) + miniW
+        // 行宽 = (n-1) 个步距 + 最后一张牌宽；左对齐从 bandLeft 起，右对齐顶到 bandRight
+        val rowW = (n - 1) * pitch + miniW
         val startX = if (leftAlign) bandLeft else bandRight - rowW
 
         textPaint.textSize = 28f
