@@ -201,6 +201,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     var onMasterStrategyChange: ((Difficulty, Difficulty) -> Unit)? = null
     /** 大师模式 AI 思考时间变更回调（关闭设置时由 MainActivity 注入，负责落盘并写入引擎） */
     var onMasterThinkTimeChange: ((Int) -> Unit)? = null
+    /** 备份与还原：导出/导入回调（由 MainActivity 注入，负责启动 SAF 系统选择器） */
+    var onExportRequested: (() -> Unit)? = null
+    var onImportRequested: (() -> Unit)? = null
+    /** 导入二次确认：解析成功后置位，弹窗等待用户确认；确认后由 onImportConfirmed 应用 */
+    var importConfirmPending = false
+    var onImportConfirmed: (() -> Unit)? = null
+    fun requestImportConfirm() { importConfirmPending = true; refresh() }
 
     /** 当前回合高亮动画帧 */
     private var highlightFrame = 0
@@ -705,6 +712,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 confirmResetMode = null
                 refresh()
             }
+            action == "export_backup" -> {
+                onExportRequested?.invoke()
+            }
+            action == "import_backup" -> {
+                onImportRequested?.invoke()
+            }
+            action == "confirm_import" -> {
+                importConfirmPending = false
+                onImportConfirmed?.invoke()
+            }
+            action == "cancel_import" -> {
+                importConfirmPending = false
+                refresh()
+            }
             action == "master_farmer_normal" -> {
                 masterFarmerStrategy = Difficulty.NORMAL
                 onMasterStrategyChange?.invoke(masterFarmerStrategy, masterHintStrategy)
@@ -1155,33 +1176,60 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val miniW = 90f
         val miniH = 126f
         val miniGap = 12f
+        val margin = 24f
+        val bandW = screenWidth / 2f    // 左右各占半屏，避免两侧重叠
 
-        // 左侧AI（电脑B）剩余牌，显示在原手牌位置
-        val leftCards = gameEngine.players[2].handCards
-        if (leftCards.isNotEmpty()) {
-            val centerX = 260f
-            textPaint.textSize = 28f
-            textPaint.color = Color.parseColor("#A5D6A7")
-            canvas.drawText("电脑B剩余", centerX, backY - 10f, textPaint)
-            val totalW = (miniW + miniGap) * leftCards.size - miniGap
-            val startX = centerX - totalW / 2
-            for ((i, card) in leftCards.withIndex()) {
-                drawMiniCard(canvas, startX + i * (miniW + miniGap), backY, miniW, miniH, card, faceUp = true)
-            }
+        // 左侧AI（电脑B）剩余牌：从左边缘 margin 起排，超宽则重叠
+        drawRemainingRow(
+            canvas, gameEngine.players[2].handCards,
+            bandLeft = margin, bandRight = bandW - margin,
+            backY, miniW, miniH, miniGap, "电脑B剩余", leftAlign = true
+        )
+        // 右侧AI（电脑A）剩余牌：靠右边缘排布，超宽则重叠
+        drawRemainingRow(
+            canvas, gameEngine.players[1].handCards,
+            bandLeft = bandW + margin, bandRight = screenWidth - margin,
+            backY, miniW, miniH, miniGap, "电脑A剩余", leftAlign = false
+        )
+    }
+
+    /**
+     * 在 [bandLeft, bandRight] 区间内绘制一行剩余牌。
+     * 牌数较少时按正常间距排布；排不下时压缩步距（重叠）保证整行都在区间内，不会被屏幕裁切。
+     */
+    private fun drawRemainingRow(
+        canvas: Canvas,
+        cards: List<Card>,
+        bandLeft: Float,
+        bandRight: Float,
+        backY: Float,
+        miniW: Float,
+        miniH: Float,
+        miniGap: Float,
+        label: String,
+        leftAlign: Boolean
+    ) {
+        if (cards.isEmpty()) return
+        val n = cards.size
+        val availableW = bandRight - bandLeft
+        val naturalW = (miniW + miniGap) * (n - 1) + miniW
+        // 放得下就用正常间距；放不下就按比例压缩步距（最小保留 0.3*miniW，避免完全叠死）
+        val pitch = if (naturalW <= availableW) {
+            miniW + miniGap
+        } else {
+            ((availableW - miniW) / (n - 1)).coerceAtLeast(miniW * 0.3f)
         }
+        val rowW = (miniW + pitch) * (n - 1) + miniW
+        val startX = if (leftAlign) bandLeft else bandRight - rowW
 
-        // 右侧AI（电脑A）剩余牌，显示在原手牌位置
-        val rightCards = gameEngine.players[1].handCards
-        if (rightCards.isNotEmpty()) {
-            val centerX = screenWidth - 260f
-            textPaint.textSize = 28f
-            textPaint.color = Color.parseColor("#A5D6A7")
-            canvas.drawText("电脑A剩余", centerX, backY - 10f, textPaint)
-            val totalW = (miniW + miniGap) * rightCards.size - miniGap
-            val startX = centerX - totalW / 2
-            for ((i, card) in rightCards.withIndex()) {
-                drawMiniCard(canvas, startX + i * (miniW + miniGap), backY, miniW, miniH, card, faceUp = true)
-            }
+        textPaint.textSize = 28f
+        textPaint.color = Color.parseColor("#A5D6A7")
+        textPaint.textAlign = if (leftAlign) Paint.Align.LEFT else Paint.Align.RIGHT
+        canvas.drawText(label, if (leftAlign) bandLeft else bandRight, backY - 10f, textPaint)
+        textPaint.textAlign = Paint.Align.CENTER   // 还原默认对齐，避免影响其它绘制
+
+        for ((i, card) in cards.withIndex()) {
+            drawMiniCard(canvas, startX + i * pitch, backY, miniW, miniH, card, faceUp = true)
         }
     }
 
@@ -1246,11 +1294,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         when {
             // 主界面：难度选择（按钮大小为出牌按钮2倍，居中排列，点击直接进入对应难度）
             phase == GamePhase.MENU -> {
-                if (confirmResetMode != null) {
-                    // 二次确认弹窗（叠加在设置窗口之上；设置窗口仅画面板不注册按钮，避免重叠误触）
-                    drawSettingsWindow(canvas, target, showButtons = false)
-                    drawConfirmDialog(canvas, target, confirmResetMode!!)
-                } else if (settingsOpen) {
+            if (confirmResetMode != null) {
+                // 二次确认弹窗（叠加在设置窗口之上；设置窗口仅画面板不注册按钮，避免重叠误触）
+                drawSettingsWindow(canvas, target, showButtons = false)
+                drawConfirmDialog(canvas, target, confirmResetMode!!)
+            } else if (importConfirmPending) {
+                // 导入二次确认弹窗（叠加在设置窗口之上；设置窗口仅画面板不注册按钮）
+                drawSettingsWindow(canvas, target, showButtons = false)
+                drawImportConfirmDialog(canvas, target)
+            } else if (settingsOpen) {
                     drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
                     // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
@@ -1451,23 +1503,27 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.restore()
     }
 
-    /** 设置窗口（大师模式设置 + 数据设置，左右并排；关闭按钮独立置于两框下方居中）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
+    /** 设置窗口（三个面板：大师模式设置 / 重置胜率数据 / 备份与还原，并排且居中对称；
+     * 关闭按钮独立置于三框下方居中）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
     private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
 
-        val panelW = minOf(screenWidth * 0.40f, 520f)
         val panelH = 700f
-        val gap = 60f
-        val totalW = panelW * 2f + gap
+        val gap = 40f
+        // 三面板：宽度按屏宽均分（含两侧边距），并限制上限 520，保证整体居中且对称
+        val panelW = minOf((screenWidth - gap * 2f - 40f * 2f) / 3f, 520f)
+        val totalW = panelW * 3f + gap * 2f
         val startX = (screenWidth - totalW) / 2f
         val py = (screenHeight - panelH) / 2f
 
-        // 左面板：大师模式设置（原右面板，位置互换）
+        // 左面板：大师模式设置
         drawMasterStrategyPanel(canvas, target, showButtons, startX, py, panelW, panelH)
-        // 右面板：数据设置（原左面板，位置互换）
-        drawDataPanel(canvas, target, showButtons, startX + panelW + gap, py, panelW, panelH)
+        // 中面板：数据设置（重置胜率数据）
+        drawDataPanel(canvas, target, showButtons, startX + (panelW + gap), py, panelW, panelH)
+        // 右面板：备份与还原（导出/导入）
+        drawBackupPanel(canvas, target, showButtons, startX + 2f * (panelW + gap), py, panelW, panelH)
 
-        // 关闭按钮独立出来，置于两个框下方居中
+        // 关闭按钮独立出来，置于三个框下方居中
         if (showButtons) {
             val cw = 320f
             val ch = 96f
@@ -1500,6 +1556,30 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         by += bh + 40f
         addButton(canvas, target, "大师模式", bx, by, bw, bh,
             Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "reset_master")
+    }
+
+    /** 右面板：备份与还原（导出/导入备份，使用 SAF 系统选择器，无需存储权限） */
+    private fun drawBackupPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
+                                px: Float, py: Float, pw: Float, ph: Float) {
+        val panel = RectF(px, py, px + pw, py + ph)
+        canvas.drawRoundRect(panel, 28f, 28f, panelPaint)
+        canvas.drawRoundRect(panel, 28f, 28f, panelBorderPaint)
+
+        buttonTextPaint.textSize = 48f
+        buttonTextPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("备份与还原", px + pw / 2f, py + 64f, buttonTextPaint)
+
+        if (!showButtons) return
+
+        val bw = pw - 80f
+        val bh = 110f
+        val bx = px + 40f
+        var by = py + 150f
+        addButton(canvas, target, "导出备份", bx, by, bw, bh,
+            Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "export_backup")
+        by += bh + 40f
+        addButton(canvas, target, "导入备份", bx, by, bw, bh,
+            Color.parseColor("#1976D2"), Color.parseColor("#0D47A1"), "import_backup")
     }
 
     /** 左面板：大师模式设置（两个策略开关，普通/大师二选一；去掉“策略”二字，底部仅保留一行说明） */
@@ -1536,9 +1616,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 第三行：ai最大思考时间(秒)，步进器 − [数值] +（2~60，默认3，关闭时落盘）
         // 数值显示在中间单元格，确保“X 秒”位于 − 与 + 之间
-        buttonTextPaint.textSize = 26f
+        buttonTextPaint.textSize = 34f
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 470f, buttonTextPaint)
+        canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 500f, buttonTextPaint)
 
         val stepGap = 120f                       // 中间数值单元格宽度，容纳“X 秒”文本
         val sbw = (pw - 80f - stepGap) / 2f      // 两端 −/+ 按钮宽度（与面板内边距一致）
@@ -1553,10 +1633,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, sby + 80f / 2f + 18f, buttonTextPaint)
 
         // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
-        buttonTextPaint.textSize = 24f
+        // 下移并放大字号：避免第一行字顶侵入上方步进按钮（步进按钮底在 py+600）
+        buttonTextPaint.textSize = 28f
         buttonTextPaint.color = Color.parseColor("#9E9E9E")
-        canvas.drawText("（农民队友ai设为普通，", px + pw / 2f, py + ph - 90f, buttonTextPaint)
-        canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 50f, buttonTextPaint)
+        canvas.drawText("（农民队友ai设为普通，", px + pw / 2f, py + ph - 60f, buttonTextPaint)
+        canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 22f, buttonTextPaint)
     }
 
     /** 策略二选一开关：选中项高亮（绿），未选中灰 */
@@ -1600,6 +1681,33 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "confirm_reset")
         addButton(canvas, target, "取消", cancelX, by, bw, bh,
             Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_reset")
+    }
+
+    /** 二次确认弹窗：确认/取消导入备份（覆盖当前设置与统计） */
+    private fun drawImportConfirmDialog(canvas: Canvas, target: MutableList<ButtonRect>) {
+        canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
+        val cw = minOf(screenWidth * 0.62f, 600f)
+        val ch = 300f
+        val cx0 = (screenWidth - cw) / 2f
+        val cy0 = (screenHeight - ch) / 2f
+        val panel = RectF(cx0, cy0, cx0 + cw, cy0 + ch)
+        canvas.drawRoundRect(panel, 24f, 24f, panelPaint)
+        canvas.drawRoundRect(panel, 24f, 24f, panelBorderPaint)
+
+        buttonTextPaint.textSize = 40f
+        buttonTextPaint.color = Color.parseColor("#FFFFFF")
+        canvas.drawText("确认导入备份？", cx0 + cw / 2f, cy0 + 70f, buttonTextPaint)
+        canvas.drawText("将覆盖当前设置与统计", cx0 + cw / 2f, cy0 + 120f, buttonTextPaint)
+
+        val bw = (cw - 120f - 40f) / 2f
+        val bh = 84f
+        val by = cy0 + ch - bh - 36f
+        val confirmX = cx0 + 60f
+        val cancelX = confirmX + bw + 40f
+        addButton(canvas, target, "确认", confirmX, by, bw, bh,
+            Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "confirm_import")
+        addButton(canvas, target, "取消", cancelX, by, bw, bh,
+            Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_import")
     }
 
     /** 消息提示 */

@@ -8,6 +8,11 @@ android {
     namespace = "com.doudizhu.game"
     compileSdk = 34
 
+    // AGP 8 起 BuildConfig 默认关闭，显式开启以便备份文件写入 appVersion
+    buildFeatures {
+        buildConfig = true
+    }
+
     defaultConfig {
         applicationId = "com.doudizhu.game"
         minSdk = 24          // 兼容 Android 7.0
