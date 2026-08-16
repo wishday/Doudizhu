@@ -18,6 +18,7 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.concurrent.thread
 
 /**
  * 斗地主游戏主Activity
@@ -96,9 +97,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri -> uri ?: return@registerForActivityResult; exportBackup(uri) }
 
-    /** 导入：启动系统「打开文档」选择器，由用户选择备份文件 */
+    /** 导入：启动系统「打开文档」选择器，由用户选择备份文件（MIME 过滤在 launch 时传入） */
     private val importLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument(arrayOf("application/json", "*/*"))
+        ActivityResultContracts.OpenDocument()
     ) { uri -> uri ?: return@registerForActivityResult; importBackup(uri) }
 
     private fun launchExportBackup() {
