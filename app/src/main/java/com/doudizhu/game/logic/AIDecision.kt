@@ -1062,13 +1062,20 @@ object AIDecision {
         // 避免两家互顶、地主捡漏）。地主将赢的接管(B/B')已先行处理，不受此闸影响。
         if (teammateIsNext) return null
 
-        // C. 队友出单张/对子：坚决不拆任何牌组，只用真散牌顶；没有散牌就放过，绝不拆牌组
+        // C. 队友领出时的跟牌策略：
+        //  - 队友这手地主已压不动(isUnbeatable) → 坚决不压，放队友控场，
+        //    即"队友领出、地主不要"时不抢队友节奏（地主已无威胁）。
+        //  - 否则(地主仍可能压队友) → 保留"顶着小牌消耗地主"协作：
+        //    用不拆牌组的散牌压上，阻止地主白拿领出权。
+        if (isUnbeatable(lastPlay)) return null
+
+        // C1. 队友出单张/对子：坚决不拆任何牌组，只用真散牌顶；没有散牌就放过，绝不拆牌组
         if (lastPlay.type == CardType.SINGLE || lastPlay.type == CardType.PAIR) {
             val loose = pool.filter { groupDisruption(it, hand) == 0 }
             if (loose.isNotEmpty()) return loose.minByOrNull { it.mainRank }
             return null
         }
-        // 队友出其他牌型：优先不拆组的离散牌，避免为压队友拆自家牌组
+        // C2. 队友出其他牌型：优先不拆组的离散牌，避免为压队友拆自家牌组
         val preserving = pool.filter { preservesGroups(it.cards, hand) }
         if (preserving.isNotEmpty()) return preserving.minByOrNull { it.mainRank }
         return pool.minByOrNull { it.mainRank }
@@ -1399,18 +1406,66 @@ object AIDecision {
     }
 
     /** 绝对不可被压：依据 unseen 推导当前通吃（农民视角折减队友大牌威胁） */
+    /**
+     * 绝对不可被压：依据 unseen 推导当前通吃（农民视角折减队友大牌威胁）。
+     * 仅判断「同型更高牌」能否压过，不含炸弹/火箭（炸弹决策走别处）。
+     * 已计入两点硬约束：
+     *   1) 地主剩余牌数 < 本手牌数 → 连同型都组不出，必压不动；
+     *   2) 三带一/三带二：除更高三张外，还需在「其它点」凑出附件（散牌/对子），
+     *      否则虽有三张却带不出附件，仍压不动。
+     */
     private fun isUnbeatable(group: CardGroup): Boolean {
+        val landlordCards = landlordRemainingCards()
+        // 牌数硬约束：地主剩余牌数不足以组出同型（含附件），必压不动
+        if (landlordCards < group.cards.size) return true
         return when (group.type) {
-            CardType.SINGLE -> (group.mainRank + 1..17).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) > 0 }
-            CardType.PAIR -> (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) >= 2 }
+            CardType.SINGLE ->
+                (group.mainRank + 1..17).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) > 0 }
+            CardType.PAIR ->
+                (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) >= 2 }
             CardType.STRAIGHT -> maxUnseenRun(group.mainRank, 1) < group.length
             CardType.STRAIGHT_PAIR -> maxUnseenRun(group.mainRank, 2) < group.length
             CardType.PLANE, CardType.PLANE_SINGLE, CardType.PLANE_PAIR ->
                 maxUnseenRun(group.mainRank, 3) < group.length
-            CardType.TRIPLE, CardType.TRIPLE_ONE, CardType.TRIPLE_TWO ->
+            CardType.TRIPLE ->
                 (group.mainRank + 1..15).none { r -> r < ctxUnseenCounts.size && unseenThreat(r) >= 3 }
+            CardType.TRIPLE_ONE ->
+                !canBeatTripleWithAttach(group.mainRank, attachPerRank = 1, attachCount = 1)
+            CardType.TRIPLE_TWO ->
+                !canBeatTripleWithAttach(group.mainRank, attachPerRank = 2, attachCount = 1)
             else -> false
         }
+    }
+
+    /** 当前视角下「对手剩余牌数」上界：农民视角即地主剩余牌数 */
+    private fun landlordRemainingCards(): Int {
+        var m = 0
+        for (t in ctxEnemyTotals) if (t > m) m = t
+        return m
+    }
+
+    /**
+     * 地主能否用「更高三张 + 附件」压过三带牌：
+     * 需在 minMainRank 之上存在一点 r 满足 unseenThreat(r) >= 3（更高三张），
+     * 且地主能在「除 r 外」的点数里凑出 attachCount 组、每组 attachPerRank 张的附件
+     * （三带一: 1 组 1 张散牌；三带二: 1 组 1 个对子）。
+     * 附件须由不同点各自提供（对子不能跨点拼），故逐点计数；三张占 3 张后还需总牌数够带附件。
+     */
+    private fun canBeatTripleWithAttach(minMainRank: Int, attachPerRank: Int, attachCount: Int): Boolean {
+        val landlordCards = landlordRemainingCards()
+        for (r in (minMainRank + 1)..15) {
+            if (unseenThreat(r) < 3) continue
+            // 三张占 3 张后，剩余可调度牌须足够凑齐附件
+            if (landlordCards - 3 < attachCount * attachPerRank) continue
+            // 附件由「除 r 外」的点提供：需 attachCount 个各含 >= attachPerRank 张的不同点
+            var groups = 0
+            for (s in 3..17) {
+                if (s == r) continue
+                if (unseenThreat(s) >= attachPerRank) groups++
+                if (groups >= attachCount) return true
+            }
+        }
+        return false
     }
 
     /**
