@@ -25,7 +25,21 @@ android {
         versionName = appVersionName
     }
 
+    // 固定 debug 签名：使用入库的 debug.keystore，使本地与 CI 产出同签名 APK，
+    // 解决"CI 包覆盖安装时与已安装包签名冲突"的问题。debug 密钥不含发布敏感性，可安全入库。
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
