@@ -921,7 +921,7 @@ object AIDecision {
 
         // 1. 队友出的牌：大牌不压 | 快赢接管 | 否则小牌顶着消耗
         if (role == PlayerRole.FARMER && isTeammate(lastPlayerIndex, myIndex, role, landlordIndex)) {
-            return shouldInterceptTeammate(hand, validPlays, lastPlay, teammateIsNext)
+            return shouldInterceptTeammate(hand, validPlays, lastPlay, teammateIsNext, myIndex)
         }
 
         // 1.5 仅当手牌"真的全是炸弹/火箭"（无任何普通牌可出）时才接管出炸。
@@ -1016,7 +1016,8 @@ object AIDecision {
         hand: List<Card>,
         validPlays: List<CardGroup>,
         lastPlay: CardGroup,
-        teammateIsNext: Boolean
+        teammateIsNext: Boolean,
+        myIndex: Int
     ): CardGroup? {
         // A. 队友出大牌：坚决不压
         if (lastPlay.mainRank >= 13) return null
@@ -1054,9 +1055,17 @@ object AIDecision {
             }
         }
 
-        // B'. 地主仅剩1张且即将出牌（在我下家）：绝不出可被接走的小牌送他获胜，
-        // 直接过牌让队友的牌留在台面；能否速胜已在上面 B 处理。
-        if (ctxMinOpponentCards <= 1) return null
+        // B'. 生死局封堵：地主仅剩1张且「即将出牌（在我下家）」时，
+        //     若我能压过当前顶牌，出「最大能压的牌」尽量让地主最后1张压不过，
+        //     避免过牌把出牌权直接送地主致其获胜；只有完全压不过才过牌。
+        //     （地主仅1张时只能打出单张，故仅当顶牌为单张才需封堵；对子/三张等需≥2张，地主压不动。）
+        if (ctxMinOpponentCards <= 1) {
+            if (myIndex >= 0 && !teammateIsNext && lastPlay.type == CardType.SINGLE) {
+                val deny = pool.maxByOrNull { it.mainRank }
+                if (deny != null) return deny
+            }
+            return null
+        }
 
         // 配合闸：我下家就是队友时，不压队友（把出牌权留在台面让队友掌控，
         // 避免两家互顶、地主捡漏）。地主将赢的接管(B/B')已先行处理，不受此闸影响。
