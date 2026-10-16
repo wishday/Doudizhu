@@ -44,6 +44,14 @@ internal object MasterSearch {
     private const val FLAG_LOWER = 1
     private const val FLAG_UPPER = 2
 
+    /**
+     * 「一手走完」的走法排序分。必须严格大于普通走法的最大可能分，且小于它减去
+     * 最小拆牌惩罚（30）之后的值 —— 这样「整手走完」永远优先于任何部分走法，
+     * 而「伪一手走完」（size==handSize 但 packed 实际张数不符，见 [Move.isExactFinish]）
+     * 会因 breakPenalty ≥ 30 被挤出最高档，不会错误地抢先出牌。
+     */
+    private const val FINISH_ORDER = 100_000
+
     /** PASS 在走法排序里的固定权重：低于普通走法、高于炸弹 */
     private const val PASS_ORDER = 400
 
@@ -65,6 +73,16 @@ internal object MasterSearch {
         val size: Int
     ) {
         val isBomb: Boolean = type == CardType.BOMB || type == CardType.ROCKET
+
+        /**
+         * packed 各 3bit 段的真实张数总和。生成器内部构造时与 [size] 恒等；
+         * 但外部经 [buildMove]（引擎的 CardGroup → Move）折算时，若上游元数据与实际
+         * 牌张计数不一致，[size] 会失真 —— 搜索/评估必须用本字段兜底，否则会算错剩余手牌张数。
+         */
+        val realSize: Int = sizeOf(packed)
+
+        /** 是否为「恰好把整手牌一次走完」的制胜走法（以 packed 真实张数为准，防元数据失真误判） */
+        fun isExactFinish(handSize: Int): Boolean = realSize > 0 && realSize == handSize
 
         /** 置换表用的牌型指纹（同一局面下「上一手是什么」会影响可走法） */
         val key: Int = (type.ordinal shl 10) or (mainRank shl 5) or length
@@ -442,7 +460,8 @@ internal object MasterSearch {
         private val hands = initialHands.copyOf()
         private val sizes = IntArray(3) { sizeOf(hands[it]) }
         private val tt = HashMap<Long, TTEntry>()
-        private val scratch = IntArray(18)
+        // 长度 54：turnsOrdered 内部会成对递归调用，需要各自的计数工作区，避免相互踩踏
+        private val scratch = IntArray(54)
 
         private var nodes = 0
         private var aborted = false
@@ -478,6 +497,15 @@ internal object MasterSearch {
             var reached = 0
             val next = (turn + 1) % 3
 
+            // 残局快速通道：若存在「一手走完」的走法（当前玩家一次出光整手牌），
+            // 这是规则上无可争议的立即胜利 —— 任何对手都无法再行动。直接采纳，
+            // 既省去无谓搜索，也保证不会被静态评估 / PASS 惩罚 / TT 污染等噪声干扰。
+            for (a in actions) {
+                if (a != null && a.isExactFinish(handSize)) {
+                    return Result(a, WIN - 1, 1, true)
+                }
+            }
+
             // 迭代加深：每层完整跑完才采纳结果；超时/超节点则沿用上一层的结论。
             // 残局分支因数小，几毫秒就能搜到底拿到精确胜负；中局搜不到底则由静态评估收口。
             var depth = 1
@@ -491,6 +519,10 @@ internal object MasterSearch {
                 for (a in actions) {
                     val v: Int
                     if (a == null) {
+                        // PASS 惩罚与主搜索内部口径一致：敌方节点取 min、我方节点取 max，
+                        // 统一在递归值上施加（见 search() 中对跟牌过牌的处理）。
+                        // 修复点①：旧版只在根节点减一次惩罚、子节点不减，导致同一「过牌」
+                        // 在不同深度被重复计价不一致，AI 为规避惩罚而错误优先甩大牌。
                         v = search(next, effLast, effLastPlayer, depth - 1, alpha, INF, 1) - passPenalty
                     } else {
                         apply(turn, a)
@@ -593,7 +625,12 @@ internal object MasterSearch {
             val moves = generate(hand, last)
             val actions = ArrayList<Move?>(moves.size + 1)
             actions.addAll(moves)
-            if (!freeLead) actions.add(null)
+            // 修复点⑥：跟牌时若存在「一手走完」的走法，绝不把过牌列为候选。
+            // 旧版过牌参与 max 比较且被 -passPenalty 计价，在浅层静态评估下 PASS 可能
+            // 比立即走完得分更高（终局 WIN 要到 depth=0 才显现），导致 AI 白白放弃
+            // 眼前必胜的走完机会 —— 表现为「开局/中盘白送大牌、该收不收」。
+            val hasFinish = moves.any { it.isExactFinish(handSize) }
+            if (!freeLead && !hasFinish) actions.add(null)
             if (actions.isEmpty()) return evaluate(turnIn, last, lastPlayer)
             for (a in actions) if (a != null) a.ord = orderScore(a, hand, handSize)
             if (actions.size > 1) actions.sortByDescending { it?.ord ?: PASS_ORDER }
@@ -605,7 +642,11 @@ internal object MasterSearch {
             for (a in actions) {
                 val v: Int
                 if (a == null) {
-                    v = search(next, last, lastPlayer, depth - 1, alpha, beta, ply + 1)
+                    // 修复点①：过牌惩罚必须在所有「跟牌过牌」节点统一施加（与根节点同口径）。
+                    // 旧版只在根节点减一次、子节点不减，同一「过牌」在不同深度计价不一致，
+                    // 且我方 max 节点会主动避开被惩罚的 PASS 而提前甩大牌 —— 这正是
+                    // 「大师 AI 开局白送大牌」的核心成因之一。
+                    v = search(next, last, lastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
                 } else {
                     apply(turnIn, a)
                     v = search(next, a, turnIn, depth - 1, alpha, beta, ply + 1)
@@ -656,13 +697,32 @@ internal object MasterSearch {
             val moves = generate(hands[turnIn], effLast)
             val next = (turnIn + 1) % 3
             if (moves.isEmpty()) {
-                return search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1)
+                // 跟牌压不上只能过：与主搜索同口径施加过牌惩罚（修复点①）
+                return search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
             }
             if (pModel <= 0) {
-                // 纯最优 min 节点（与正常农民节点行为一致），最稳健
+                // 纯最优 min 节点（与正常农民节点行为一致），最稳健。
+                // 修复点⑤：人类策略分支是确定性单一走法，必须【先于】全量 min 枚举计算，
+                // 否则当 min 枚举触发 fail-low 剪枝提前 break 时，optBest 只是「≤真实min」的上界，
+                // 再与确定性的 hv 做期望混合会系统性低估局面、污染地主决策（典型症状：无谓抢权甩大牌）。
+                val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+                val hv = if (hm == null) {
+                    search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+                } else {
+                    apply(turnIn, hm)
+                    val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                    undo(turnIn, hm)
+                    v
+                }
                 var best = INF
                 var b = beta
                 for (a in moves) {
+                    if (a === hm) {
+                        // 确定性复用，避免重复展开整棵子树
+                        if (hv < best) best = hv
+                        if (best < b) b = best
+                        continue
+                    }
                     apply(turnIn, a)
                     val v = search(next, a, turnIn, depth - 1, alpha, b, ply + 1)
                     undo(turnIn, a)
@@ -673,11 +733,28 @@ internal object MasterSearch {
                 }
                 return best
             }
-            // 最优分支：人类农民尽力压低地主胜率（min）
+            // —— pModel > 0：expectimax 混合。确定性人类分支必须先精确算出，min 分支允许剪枝 ——
+            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+            val hv = if (hm == null) {
+                search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+            } else {
+                apply(turnIn, hm)
+                val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                undo(turnIn, hm)
+                v
+            }
+            if (aborted) return 0
+            // 最优分支：人类农民尽力压低地主胜率（min）。对确定性走法直接复用 hv，不再重复展开。
             var optBest = INF
             val a0 = alpha
             var b0 = beta
             for (a in moves) {
+                if (a === hm) {
+                    if (hv < optBest) optBest = hv
+                    if (optBest < b0) b0 = optBest
+                    if (a0 >= b0) break
+                    continue
+                }
                 apply(turnIn, a)
                 val v = search(next, a, turnIn, depth - 1, a0, b0, ply + 1)
                 undo(turnIn, a)
@@ -686,28 +763,19 @@ internal object MasterSearch {
                 if (optBest < b0) b0 = optBest
                 if (a0 >= b0) break
             }
-            // 人类策略分支：人类农民按建模策略走子
-            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
-            val hv = if (hm == null) {
-                search(next, effLast, effLastPlayer, depth - 1, a0, b0, ply + 1)
-            } else {
-                apply(turnIn, hm)
-                val v = search(next, hm, turnIn, depth - 1, a0, b0, ply + 1)
-                undo(turnIn, hm)
-                v
-            }
             // 期望混合（整数权重，避免浮点）
             return (hv * pModel + optBest * (1000 - pModel)) / 1000
         }
 
         private fun apply(p: Int, m: Move) {
             hands[p] -= m.packed
-            sizes[p] -= m.size
+            // 用 packed 的真实张数（realSize）而非可能失真的元数据 size，防止 sizes 与实际手牌脱节
+            sizes[p] -= m.realSize
         }
 
         private fun undo(p: Int, m: Move) {
             hands[p] += m.packed
-            sizes[p] += m.size
+            sizes[p] += m.realSize
         }
 
         private fun isRootSide(p: Int): Boolean = (p == landlord) == rootIsLandlord
@@ -719,8 +787,10 @@ internal object MasterSearch {
 
         private fun orderScore(m: Move?, hand: Long, handSize: Int): Int {
             if (m == null) return PASS_ORDER
-            if (m.size == handSize) return 100_000        // 一手走完，必然最先试
-            var s = 1000 + m.size * 20 - m.mainRank * 3   // 一次多走牌、优先出小牌
+            // 残局一手走完（以 packed 真实张数校验，防外部折算的元数据失真）：必然最先试。
+            // FINISH_ORDER 与普通走法最大分之间留有 ≥30 的余量，任何拆牌惩罚都会将其挤出最高档。
+            if (m.isExactFinish(handSize)) return FINISH_ORDER
+            var s = 1000 + m.realSize * 20 - m.mainRank * 3   // 一次多走牌、优先出小牌
             if (m.isBomb) s -= 1200                       // 炸弹是控牌资源，最后考虑
             // 不要把 2 / 王 当单张直接打出（保留控牌），后置让其最后被试
             if (m.type == CardType.SINGLE && m.mainRank >= 15) s -= 200
@@ -801,37 +871,40 @@ internal object MasterSearch {
          * 避免顺子抢走三张的牌导致手数被高估。
          */
         private fun minTurns(hand: Long): Int {
-            val a = turnsOrdered(hand, true)
-            val b = turnsOrdered(hand, false)
+            // 两次 turnsOrdered 必须使用相互独立的计数工作区：它们会成对递归调用，
+            // 若共享同一个 scratch 数组，第二次调用会把第一次的中间结果改烂，
+            // 导致评估分数失真 —— AI 据此误判局势（典型症状：开局乱甩大牌 / 白白送牌）。
+            val a = turnsOrdered(hand, true, 0)
+            val b = turnsOrdered(hand, false, 18)
             return if (a < b) a else b
         }
 
-        private fun turnsOrdered(hand: Long, triplesFirst: Boolean): Int {
+        private fun turnsOrdered(hand: Long, triplesFirst: Boolean, off: Int): Int {
             val c = scratch
-            for (r in 3..17) c[r] = cnt(hand, r)
+            for (r in 3..17) c[off + r] = cnt(hand, r)
             var t = 0
-            if (c[16] > 0 && c[17] > 0) {
+            if (c[off + 16] > 0 && c[off + 17] > 0) {
                 t++
-                c[16] = 0
-                c[17] = 0
+                c[off + 16] = 0
+                c[off + 17] = 0
             }
-            for (r in 3..15) if (c[r] == 4) {
+            for (r in 3..15) if (c[off + r] == 4) {
                 t++
-                c[r] = 0
+                c[off + r] = 0
             }
             if (triplesFirst) {
-                t += consumeTriples(c)
-                t += consumeRuns(c, 3, 2)
-                t += consumeRuns(c, 2, 3)
-                t += consumeRuns(c, 1, 5)
+                t += consumeTriples(c, off)
+                t += consumeRuns(c, off, 3, 2)
+                t += consumeRuns(c, off, 2, 3)
+                t += consumeRuns(c, off, 1, 5)
             } else {
-                t += consumeRuns(c, 3, 2)
-                t += consumeRuns(c, 2, 3)
-                t += consumeRuns(c, 1, 5)
-                t += consumeTriples(c)
+                t += consumeRuns(c, off, 3, 2)
+                t += consumeRuns(c, off, 2, 3)
+                t += consumeRuns(c, off, 1, 5)
+                t += consumeTriples(c, off)
             }
             for (r in 3..17) {
-                val n = c[r]
+                val n = c[off + r]
                 if (n <= 0) continue
                 t += n / 2
                 if (n % 2 == 1) t++
@@ -839,19 +912,19 @@ internal object MasterSearch {
             return t
         }
 
-        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长 */
-        private fun consumeRuns(c: IntArray, m: Int, minLen: Int): Int {
+        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长；[off]=scratch 基址 */
+        private fun consumeRuns(c: IntArray, off: Int, m: Int, minLen: Int): Int {
             var plays = 0
             var r = 3
             while (r <= 14) {
-                if (c[r] < m) {
+                if (c[off + r] < m) {
                     r++
                     continue
                 }
                 var e = r
-                while (e <= 14 && c[e] >= m) e++
+                while (e <= 14 && c[off + e] >= m) e++
                 if (e - r >= minLen) {
-                    for (k in r until e) c[k] -= m
+                    for (k in r until e) c[off + k] -= m
                     plays++
                 }
                 r = e
@@ -859,24 +932,24 @@ internal object MasterSearch {
             return plays
         }
 
-        /** 吃掉三张：每个三张带一对或一张吸收散牌 */
-        private fun consumeTriples(c: IntArray): Int {
+        /** 吃掉三张：每个三张带一对或一张吸收散牌；[off]=scratch 基址 */
+        private fun consumeTriples(c: IntArray, off: Int): Int {
             var t = 0
             for (r in 3..15) {
-                if (c[r] != 3) continue
-                c[r] = 0
+                if (c[off + r] != 3) continue
+                c[off + r] = 0
                 var absorbed = false
                 for (k in 3..15) {
-                    if (k != r && c[k] >= 2) {
-                        c[k] -= 2
+                    if (k != r && c[off + k] >= 2) {
+                        c[off + k] -= 2
                         absorbed = true
                         break
                     }
                 }
                 if (!absorbed) {
                     for (k in 3..17) {
-                        if (k != r && c[k] >= 1) {
-                            c[k] -= 1
+                        if (k != r && c[off + k] >= 1) {
+                            c[off + k] -= 1
                             break
                         }
                     }
