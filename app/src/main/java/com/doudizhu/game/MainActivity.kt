@@ -373,6 +373,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         runOnUiThread {
             val name = gameEngine.players[playerIndex].name
             gameSurfaceView.showMessage("$name 不出", 1500)
+            // 在该玩家头像区展示「不出」气泡动画（与消息提示同步，一轮过牌后自动隐藏）
+            gameSurfaceView.registerPassBubble(playerIndex)
             gameSurfaceView.refresh()
         }
     }
@@ -417,6 +419,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$humanGain 分$springTag", 5000)
                 gameSurfaceView.playLoseSound()
             }
+            // 结算横幅：记录胜负并触发滑入动画
+            gameSurfaceView.showSettlement(isHumanWin)
 
             // 统计该模式的游戏局数与胜场
             st.games++
