@@ -33,8 +33,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # GitHub ubuntu-latest 镜像已预装 Android SDK，直接使用，
+      # 避免 setup-android 的 sdkmanager 偶发失败（exit code 1）。
+      - name: Use preinstalled Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          ls "$ANDROID_HOME/cmdline-tools" || true   # 打印可用工具版本便于排查
 
       - name: Remove local.properties (CI uses ANDROID_HOME)
         run: rm -f local.properties
