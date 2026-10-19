@@ -5,4 +5,13 @@
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+
+    <!-- 沉浸式主题基础版（API 24-26 生效；API 27+ 由 values-v27 覆盖并追加挖孔模式）。
+         ALWAYS 挖孔模式只能代码设置，见 MainActivity.applyImmersiveFullscreen() -->
+    <style name="Theme.DouDiZhu.Immersive" parent="Theme.DouDiZhu">
+        <!-- 绘制到安全区之外（状态栏、导航栏后面） -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

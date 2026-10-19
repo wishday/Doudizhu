@@ -11,11 +11,13 @@
         android:label="@string/app_name"
         android:theme="@style/Theme.DouDiZhu">
 
+        <!-- 沉浸式全屏：隐藏系统栏，并允许内容延伸到刘海/挖孔区域 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="landscape"
-            android:configChanges="orientation|screenSize">
+            android:configChanges="orientation|screenSize"
+            android:theme="@style/Theme.DouDiZhu.Immersive">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

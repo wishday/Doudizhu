@@ -1,11 +1,16 @@
 package com.doudizhu.game
 
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.view.Window
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
 import com.doudizhu.game.logic.GameEngine
 import com.doudizhu.game.logic.GameEngineCallback
 import com.doudizhu.game.model.Card
@@ -235,6 +240,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
+        // 沉浸式 + 挖孔屏适配：让内容延伸到刘海/挖孔区域，横屏无黑边
+        applyImmersiveFullscreen()
 
         // 创建游戏视图
         gameSurfaceView = GameSurfaceView(this)
@@ -287,6 +294,67 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameSurfaceView.onImportConfirmed = { applyImportedBackup() }
 
         setContentView(gameSurfaceView)
+    }
+
+    /**
+     * 沉浸式全屏 + 挖孔/刘海屏适配：
+     * 1. 隐藏状态栏与导航栏（滑动短暂出现后自动隐藏）；
+     * 2. 允许窗口内容延伸到挖孔区域（横屏短边），消除两侧黑边；
+     * 3. API 30+ 用 WindowInsetsController 隐藏导航栏并关闭手势条对比度遮罩，
+     *    消除全面屏手势白条的白底（旧版 systemUiVisibility 无法控制 gesture handle）。
+     */
+    private fun applyImmersiveFullscreen() {
+        // 关键：允许内容绘制到刘海/挖孔区域。
+        // R(API 30)+ 用 ALWAYS（横竖屏任意侧挖孔都填充）；
+        // P(API 28-29) 与 O_MR1(API 27) 只有 shortEdges（横屏左右短边挖孔）；
+        // 更早版本无挖孔屏，忽略。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30+（Android 11）：新版 WindowInsetsController。
+            // 旧版 systemUiVisibility 无法控制手势导航条（gesture handle），
+            // 必须用此 API 隐藏导航栏；配合关闭系统白底渐变遮罩，
+            // 全面屏手势白条即变为透明（画面直接透出）。
+            val controller = window.insetsController
+            controller?.hide(WindowInsets.Type.navigationBars())
+            controller?.systemBarsBehavior =
+                WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            // 内容铺满整屏（含状态栏/导航栏区域）
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            // 方案 b：关闭导航栏对比度遮罩 + 透明导航栏背景。
+            // 原 Manifest 属性 android:enforceNavigationBarContrast="false"
+            // 在 minSdk=24 下会导致 AAPT 编译失败（资源定义于 API 29），
+            // 故改用代码等效设置；二者均为 API 29+ 方法，本分支（API 30+）安全。
+            @Suppress("DEPRECATION")
+            window.setNavigationBarColor(android.graphics.Color.TRANSPARENT)
+            window.isNavigationBarContrastEnforced = false
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                )
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 从通知栏下拉、设置页返回等导致焦点恢复时，重新进入沉浸模式
+        if (hasFocus) applyImmersiveFullscreen()
     }
 
     override fun onResume() {
