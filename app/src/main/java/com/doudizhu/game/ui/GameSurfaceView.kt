@@ -243,8 +243,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val passSlotEpoch = IntArray(3) { -1 }
     /** 过牌代号计数器：每次任意玩家过牌自增，用于区分"连续两次不出"与新的一手 */
     private var passEpochCounter = 0
-    /** 「不出」气泡显示时长（ms）：与引擎一轮过牌清桌节奏一致 */
-    private val PASS_BUBBLE_MS = 2600L
+    /** 「不出」气泡淡入动画时长（ms）：仅用于驱动淡入期间的持续重绘；气泡本身不自动消退 */
+    private val PASS_BUBBLE_FADEIN_MS = 450L
 
     /** 注册一次「不出」气泡动画（由 MainActivity 在玩家过牌时调用）。
      *  过牌即"行动完毕"：同时清除该玩家槽位的桌面出牌展示，避免旧牌与其「不出」同屏矛盾；
@@ -325,10 +325,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var lastRoundHumanWin = false
     @Volatile
     private var gameOverAnimStart = 0L
+    /** 结算积分信息（合并进结算横幅展示，替代原独立消息提示框）：本局得分变化与倍数说明 */
+    @Volatile
+    private var lastRoundScoreDelta = 0
+    @Volatile
+    private var lastRoundMultiplierText = ""
 
-    /** 记录结算结果并触发横幅滑入动画 */
-    fun showSettlement(humanWin: Boolean) {
+    /** 记录结算结果并触发横幅滑入动画；scoreDelta/springTag 为结算积分提示文案（并入横幅显示） */
+    fun showSettlement(humanWin: Boolean, scoreDelta: Int = 0, multiplierText: String = "") {
         lastRoundHumanWin = humanWin
+        lastRoundScoreDelta = scoreDelta
+        lastRoundMultiplierText = multiplierText
         gameOverAnimStart = System.currentTimeMillis()
         // 新一局结算：清除上一手残留的桌面出牌与「不出」气泡，避免与剩余牌展示混叠
         clearAllPlayedCards()
@@ -527,12 +534,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 出牌阶段：呼吸光晕/思考省略号等连续动画需逐帧刷新
         if (phase == GamePhase.PLAYING) return true
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
-        // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧
+        // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
+        // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
         for (i in passSlotEpoch.indices) {
-            if (passSlotEpoch[i] >= 0 && System.currentTimeMillis() - passAnimStart[i] < PASS_BUBBLE_MS + 300L) return true
+            if (passSlotEpoch[i] >= 0 && System.currentTimeMillis() - passAnimStart[i] < PASS_BUBBLE_FADEIN_MS) return true
         }
-        // 结算横幅滑入动画期间持续重绘；结束后停止（省电）
-        if ((phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING) && bannerAnimating()) return true
+        // 结算横幅：滑入 + 停留 3 秒 + 淡出期间持续重绘；淡出结束后停止（省电）
+        if ((phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING) && bannerActive()) return true
         // 提示条展示期内需持续重绘以在到期后自动消失（否则静止画面会永久残留旧提示）
         return hintActive(messageText, messageTimer) || hintActive(errorText, errorTimer)
     }
@@ -546,11 +554,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private inline fun hintActive(text: String, timer: Long): Boolean =
         text.isNotEmpty() && System.currentTimeMillis() <= timer
 
-    /** 结算横幅滑入动画是否仍在进行（约 450ms 入场；结束后停止重绘省电）。
+    /** 结算横幅是否仍处于活动期（滑入约 750ms + 停留 3 秒 + 淡出约 400ms；结束后停止重绘省电）。
      *  必须用 currentTimeMillis：横幅静止后不再有 refresh，animTime 会冻结在最后一帧的旧值，
      *  若用 animTime 判断则 elapsed 永远偏小 → shouldDraw 恒真 → 停帧逻辑失效、持续耗电。 */
-    private fun bannerAnimating(): Boolean =
-        gameOverAnimStart > 0L && System.currentTimeMillis() - gameOverAnimStart < 600L
+    private fun bannerActive(): Boolean =
+        gameOverAnimStart > 0L && System.currentTimeMillis() - gameOverAnimStart < BANNER_TOTAL_MS
+
+    /** 结算横幅时间轴：滑入 450ms + 停留 3000ms + 淡出 400ms */
+    private val BANNER_SLIDE_MS = 450L
+    private val BANNER_HOLD_MS = 3000L
+    private val BANNER_FADE_MS = 400L
+    private val BANNER_TOTAL_MS = BANNER_SLIDE_MS + BANNER_HOLD_MS + BANNER_FADE_MS
 
     /** 启动开局手牌展示动画（逐张滑入，约 3 秒），结束后回调 onComplete */
     fun startHandReveal(onComplete: () -> Unit) {
@@ -606,9 +620,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         masterThinkSeconds = seconds.coerceIn(2, 60)
     }
 
-    /** 设置任意玩家的桌面出牌展示（新牌入手时记录动画起始时间，用于入场动效） */
+    /** 设置任意玩家的桌面出牌展示（新牌入手时记录动画起始时间，用于入场动效）；
+     *  有人出牌即"新的一手开始"：清除其它玩家残留的「不出」气泡（气泡不自动消退，由此处显式清理） */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
-        if (cards != null && cards.isNotEmpty()) playAnimStart[playerIndex] = System.currentTimeMillis()
+        if (cards != null && cards.isNotEmpty()) {
+            playAnimStart[playerIndex] = System.currentTimeMillis()
+            for (i in passSlotEpoch.indices) {
+                if (i != playerIndex) passSlotEpoch[i] = -1
+            }
+        }
         tablePlayedCards[playerIndex] = cards
     }
 
@@ -972,6 +992,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             drawAllRemainingCards(canvas)
         }
 
+        // 结算横幅：最后绘制置于最顶层（滑入 → 停留3秒 → 自动淡出），
+        // 位于屏幕上方区域，不遮挡底部剩余手牌与操作按钮
+        if (gameEngine.stateMachine.phase == GamePhase.GAME_OVER ||
+            gameEngine.stateMachine.phase == GamePhase.SETTLING) {
+            drawResultBanner(canvas)
+        }
+
         // 全部绘制完成后原子发布按钮列表，触摸线程永远不会读到半成品
         currentButtons = pendingButtons
     }
@@ -1161,8 +1188,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, aiInfoPaint)
         aiInfoPaint.shader = null
         // 面板描边：该玩家本轮已「不出」时用中性灰（提示已行动），否则金色细边
-        val showPassBubble = passSlotEpoch[playerIndex] >= 0 &&
-            System.currentTimeMillis() - passAnimStart[playerIndex] < PASS_BUBBLE_MS
+        // 「不出」气泡不自动消退：只要槽位有气泡代号就持续显示，直到他人出牌/过牌或清桌时移除
+        val showPassBubble = passSlotEpoch[playerIndex] >= 0
         cardBorderPaint.color = if (showPassBubble) Color.argb(60, 176, 190, 197)
             else Color.argb(70, 255, 236, 179)
         cardBorderPaint.strokeWidth = 2f
@@ -1208,10 +1235,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
 
         // 「不出」气泡：牌背下方居中，圆角胶囊 + 尾尖指向头像区，淡入动画；
-        // 显示时长与引擎"一轮过牌清空桌面"的节奏一致（PASS_BUBBLE_MS），超时自动隐藏
+        // 不自动消退：一直显示到其它玩家出牌/过牌（registerPassBubble 清除）或新一手清桌（clearAllPlayedCards）
         if (showPassBubble) {
             val elapsed = System.currentTimeMillis() - passAnimStart[playerIndex]
-            val appear = (elapsed.toFloat() / 220f).coerceIn(0f, 1f)
+            val appear = (elapsed.toFloat() / PASS_BUBBLE_FADEIN_MS).coerceIn(0f, 1f)
             val e = easeOutCubic(appear)
             val label = "不出"
             textPaint.textSize = 40f
@@ -1313,7 +1340,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val elapsed = if (slot >= 0) animTime - playAnimStart[slot] else Long.MAX_VALUE
 
         for ((i, card) in cards.withIndex()) {
-            val p = ((elapsed - i * 45L).toFloat() / 240f).coerceIn(0f, 1f)
+            // 入场节奏放慢至 0.6 倍：单张时长 240→400ms，逐张错峰 45→75ms
+            val p = ((elapsed - i * 75L).toFloat() / 400f).coerceIn(0f, 1f)
             if (p <= 0f) continue
             val e = easeOutCubic(p)
             val dropY = startY - (1f - e) * 60f
@@ -1351,11 +1379,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val arcOffset = (-cos(distFromCenter * 0.04) * 6.0 + 6.0).toFloat()
             val rotation = (distFromCenter * 0.8).toFloat()
 
-            // 选中上移使用平滑缓动（每帧向目标值靠拢，形成连续上浮/回落动画）
+            // 选中上移使用平滑缓动（每帧向目标值靠拢，形成连续上浮/回落动画；
+            // 缓动系数 0.7 = 原 0.35 的 2 倍速，选中/取消动画加快一倍）
             val liftTarget = if (isSelected) 60f else 0f
             if (i < liftValues.size) {
                 val cur = liftValues[i]
-                var next = cur + (liftTarget - cur) * 0.35f
+                var next = cur + (liftTarget - cur) * 0.7f
                 if (abs(next - liftTarget) < 0.5f) next = liftTarget
                 liftValues[i] = next
             }
@@ -1469,13 +1498,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText(card.displayText, x + 14f, y + cardH * 0.36f, smallTextPaint)
         if (fade) smallTextPaint.alpha = 255
 
-        // 中央大花色符号（主视觉，替代原来的重复大字点数）
-        suitSymbolPaint.textSize = cardW * 0.52f
-        suitSymbolPaint.color = textColor
-        suitSymbolPaint.textAlign = Paint.Align.CENTER
-        if (fade) suitSymbolPaint.alpha = a
-        canvas.drawText(card.suitSymbol, x + cardW / 2, y + cardH * 0.68f, suitSymbolPaint)
-        if (fade) suitSymbolPaint.alpha = 255
+        // 中央大牌值字点数（主视觉：以大字点数取代原来的大花色符号；「小王/大王」显示「小/大」）
+        smallTextPaint.textSize = cardW * 0.52f
+        smallTextPaint.color = textColor
+        smallTextPaint.textAlign = Paint.Align.CENTER
+        if (fade) smallTextPaint.alpha = a
+        canvas.drawText(card.displayText, x + cardW / 2, y + cardH * 0.68f, smallTextPaint)
+        if (fade) smallTextPaint.alpha = 255
 
         // 右下角点数（旋转 180° 绘制，模拟真实纸牌的对角镜像索引）
         canvas.save()
@@ -1536,12 +1565,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (fade) smallTextPaint.alpha = a
         canvas.drawText(card.displayText, x + 6f, y + h * 0.50f, smallTextPaint)
 
-        // 中央大花色符号（主视觉，与手牌样式统一；此前误为重复的点数大字）
-        suitSymbolPaint.textSize = w * 0.58f
-        suitSymbolPaint.color = textColor
-        suitSymbolPaint.textAlign = Paint.Align.CENTER
-        canvas.drawText(card.suitSymbol, x + w / 2, y + h * 0.86f, suitSymbolPaint)
-        if (fade) { suitSymbolPaint.alpha = 255; smallTextPaint.alpha = 255 }
+        // 中央大牌值字点数（主视觉，与手牌样式统一：以大字点数取代原来的大花色符号）
+        smallTextPaint.textSize = w * 0.58f
+        smallTextPaint.color = textColor
+        smallTextPaint.textAlign = Paint.Align.CENTER
+        if (fade) smallTextPaint.alpha = a
+        canvas.drawText(card.displayText, x + w / 2, y + h * 0.86f, smallTextPaint)
+        if (fade) { smallTextPaint.alpha = 255 }
     }
 
     /** 绘制牌背：白切边 + 蓝色渐变主体 + 内描线 + 中心菱形徽记 */
@@ -1801,9 +1831,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         Color.parseColor("#1B5E20"), "play")
                 }
             }
-            // 游戏结束：结算横幅（胜/负配色 + 滑入动画）+ 操作按钮
+            // 游戏结束：操作按钮（结算横幅移至 drawGame 最后绘制，保证置于最顶层）
             phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING -> {
-                drawResultBanner(canvas)
                 val bigW = 400f
                 val bigH = 120f
                 addButton(canvas, target, "再来一局", (screenWidth - bigW) / 2, screenHeight / 2 + 90f,
@@ -1816,17 +1845,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 结算横幅纵向渐变缓存：入场动画期间 by 每帧变化，用画布平移对准位置复用，避免逐帧 new */
     private val bannerGradWin = LinearGradient(
-        0f, 0f, 0f, 150f,
+        0f, 0f, 0f, 210f,
         Color.parseColor("#FFD54F"), Color.parseColor("#F57F17"), Shader.TileMode.CLAMP
     )
     private val bannerGradLose = LinearGradient(
-        0f, 0f, 0f, 150f,
+        0f, 0f, 0f, 210f,
         Color.parseColor("#90A4AE"), Color.parseColor("#455A64"), Shader.TileMode.CLAMP
     )
 
     /**
-     * 结算横幅：人类玩家胜负判定 + 金色/灰色圆角底 + 大字标题，带向下滑入与淡入动画。
-     * （由原未使用的 bannerPaint/bannerStrokePaint 落地实现）
+     * 结算横幅：胜负标题 + 本局积分结算信息（原独立消息提示框内容并入此处）+ 金色/灰色圆角底。
+     * 时间轴：滑入淡入 → 停留 3 秒 → 自动淡出；由 drawGame 最后绘制，置于最顶层不遮挡按钮之外的内容。
      */
     private fun drawResultBanner(canvas: Canvas) {
         val sm = gameEngine.stateMachine
@@ -1834,17 +1863,29 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val humanIsLandlord = sm.landlordIndex == 0
         val won = lastRoundHumanWin
         val title = if (won) "胜利！" else "惜败…"
+        // 副题：获胜方角色说明（整合原提示框文案的角色部分）
         val sub = when {
             won && humanIsLandlord -> "地主获胜，积分入账"
             won -> "农民获胜，配合漂亮"
             humanIsLandlord -> "地主落败，再接再厉"
             else -> "农民失利，下把翻盘"
         }
+        // 第三行：本局得分变化 + 倍数说明（合并自原 showMessage 的结算积分提示）
+        val sign = if (lastRoundScoreDelta >= 0) "+" else "-"
+        val scoreLine = "本局 $sign${abs(lastRoundScoreDelta)} 分" +
+            if (lastRoundMultiplierText.isNotEmpty()) "（${lastRoundMultiplierText}）" else ""
+
         val elapsed = System.currentTimeMillis() - gameOverAnimStart
-        val p = (elapsed.toFloat() / 450f).coerceIn(0f, 1f)
+        // 时间轴分段：滑入(0~450ms) → 停留(至 3450ms) → 淡出(至 4050ms)
+        val p = (elapsed.toFloat() / BANNER_SLIDE_MS).coerceIn(0f, 1f)
         val e = easeOutCubic(p)
-        val bw = min(screenWidth * 0.5f, 640f)
-        val bh = 150f
+        val fade = if (elapsed <= BANNER_SLIDE_MS + BANNER_HOLD_MS) 1f
+            else 1f - ((elapsed - BANNER_SLIDE_MS - BANNER_HOLD_MS).toFloat() / BANNER_FADE_MS).coerceIn(0f, 1f)
+        if (fade <= 0f) return
+        val appear = e * fade
+
+        val bw = min(screenWidth * 0.62f, 820f)
+        val bh = 210f
         val bx = (screenWidth - bw) / 2f
         val by = screenHeight * 0.16f - (1f - e) * 60f
 
@@ -1852,22 +1893,26 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.save()
         canvas.translate(bx, by)
         bannerPaint.shader = if (won) bannerGradWin else bannerGradLose
-        bannerPaint.alpha = (230 * e).toInt().coerceIn(0, 255)
+        bannerPaint.alpha = (235 * appear).toInt().coerceIn(0, 255)
         canvas.drawRoundRect(RectF(0f, 0f, bw, bh), 26f, 26f, bannerPaint)
         bannerPaint.shader = null
-        bannerStrokePaint.alpha = (160 * e).toInt().coerceIn(0, 255)
+        bannerStrokePaint.alpha = (160 * appear).toInt().coerceIn(0, 255)
         canvas.drawRoundRect(RectF(0f, 0f, bw, bh), 26f, 26f, bannerStrokePaint)
         bannerPaint.alpha = 255
         canvas.restore()
 
-        textPaint.textSize = 64f
+        textPaint.textSize = 62f
         textPaint.color = if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1")
         textPaint.textAlign = Paint.Align.CENTER
-        drawTextWithShadow(canvas, title, screenWidth / 2f, by + 74f, textPaint,
+        drawTextWithShadow(canvas, title, screenWidth / 2f, by + 76f, textPaint,
             if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"))
-        textPaint.textSize = 30f
-        textPaint.color = if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#CFD8DC")
-        canvas.drawText(sub, screenWidth / 2f, by + 122f, textPaint)
+        textPaint.textSize = 40f
+        textPaint.color = if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1")
+        canvas.drawText(scoreLine, screenWidth / 2f, by + 132f, textPaint)
+        textPaint.textSize = 28f
+        textPaint.color = if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC")
+        canvas.drawText(sub, screenWidth / 2f, by + 178f, textPaint)
+        textPaint.textAlign = Paint.Align.LEFT
     }
 
     private fun addButton(canvas: Canvas, target: MutableList<ButtonRect>, text: String, x: Float, y: Float,

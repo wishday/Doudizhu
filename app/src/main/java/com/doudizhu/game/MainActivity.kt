@@ -371,9 +371,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onPlayerPass(playerIndex: Int) {
         runOnUiThread {
-            val name = gameEngine.players[playerIndex].name
-            gameSurfaceView.showMessage("$name 不出", 1500)
-            // 在该玩家头像区展示「不出」气泡动画（与消息提示同步，一轮过牌后自动隐藏）
+            // 在该玩家头像区展示「不出」气泡动画（不自动消退，由他人出牌/清桌时移除），
+            // 原独立消息提示框不再重复显示
             gameSurfaceView.registerPassBubble(playerIndex)
             gameSurfaceView.refresh()
         }
@@ -381,9 +380,6 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onGameOver(winnerIndex: Int, isLandlordWin: Boolean) {
         runOnUiThread {
-            val winner = gameEngine.players[winnerIndex]
-            val roleText = if (isLandlordWin) "地主" else "农民"
-            // 玩家是地主时地主胜即赢；玩家是农民时地主败（农民胜）即赢，队友获胜同样算我方赢
             val isHumanLandlord = gameEngine.stateMachine.landlordIndex == 0
             val isHumanWin = isHumanLandlord == isLandlordWin
 
@@ -412,15 +408,16 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
             if (isHumanWin) {
                 st.score += humanGain.toInt()
-                gameSurfaceView.showMessage("恭喜获胜！本局 +$humanGain 分$springTag", 5000)
                 gameSurfaceView.playWinSound()
             } else {
                 st.score -= humanGain.toInt()
-                gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$humanGain 分$springTag", 5000)
                 gameSurfaceView.playLoseSound()
             }
-            // 结算横幅：记录胜负并触发滑入动画
-            gameSurfaceView.showSettlement(isHumanWin)
+            // 结算横幅：记录胜负与本局积分信息（原独立消息提示框内容并入横幅展示），触发滑入动画
+            val multiplierText = "×$multiplier$springTag"
+            gameSurfaceView.showSettlement(isHumanWin,
+                scoreDelta = if (isHumanWin) humanGain.toInt() else -humanGain.toInt(),
+                multiplierText = multiplierText)
 
             // 统计该模式的游戏局数与胜场
             st.games++
