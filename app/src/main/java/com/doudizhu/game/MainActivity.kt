@@ -350,7 +350,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             val name = gameEngine.players[playerIndex].name
             val cardText = cards.joinToString(" ") { it.toString() }
             gameSurfaceView.showMessage("$name: $cardText", 2000)
-            gameSurfaceView.playCardSound()
+            // 炸弹/火箭用爆炸轰鸣音效，普通牌型用甩牌声
+            gameSurfaceView.playCardSound(
+                isBomb = group.type == CardType.BOMB || group.type == CardType.ROCKET)
 
             val isLastCard = gameEngine.players[playerIndex].handCards.size == 1
             val isBig = group.type == CardType.BOMB || group.type == CardType.ROCKET || cards.size >= 8
@@ -413,6 +415,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             } else {
                 st.score -= humanGain.toInt()
                 gameSurfaceView.showMessage("本局失利，${winner.name}（$roleText）获胜，-$humanGain 分$springTag", 5000)
+                gameSurfaceView.playLoseSound()
             }
 
             // 统计该模式的游戏局数与胜场

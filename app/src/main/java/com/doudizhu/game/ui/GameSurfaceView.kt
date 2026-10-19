@@ -16,8 +16,13 @@ import com.doudizhu.game.model.Card
 import com.doudizhu.game.model.CardType
 import com.doudizhu.game.model.Difficulty
 import com.doudizhu.game.state.GamePhase
+import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.math.abs
+import kotlin.math.min
+import kotlin.math.max
 
 /**
  * 游戏主绘制视图（横屏模式）
@@ -143,6 +148,45 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
     private val gearPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#B0BEC5") }
     private val gearHolePaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#0D3B0D") }
+    /** ====== 细腻化绘制新增画笔 ====== */
+    /** 牌面微渐变（象牙白 → 冷白） */
+    private val cardFaceShader = LinearGradient(
+        0f, 0f, 0f, 1f,
+        Color.parseColor("#FFFDF8"), Color.parseColor("#F1F4F9"),
+        Shader.TileMode.CLAMP
+    )
+    /** 牌背主体渐变（深蓝 → 靛蓝） */
+    private val cardBackShader = LinearGradient(
+        0f, 0f, 1f, 1f,
+        Color.parseColor("#1E67C8"), Color.parseColor("#0C3E86"),
+        Shader.TileMode.CLAMP
+    )
+    /** 按钮顶部光泽渐变 */
+    private val buttonGlossPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
+    /** 按钮描边 */
+    private val buttonStrokePaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.STROKE; strokeWidth = 2f
+        color = Color.argb(70, 255, 255, 255)
+    }
+    /** 文字投影画笔（柔和阴影，提升可读性与层次） */
+    private val textShadowPaint = Paint().apply {
+        isAntiAlias = true; color = Color.argb(90, 0, 0, 0)
+    }
+    /** 桌面柔光（中央椭圆径向渐变） */
+    private var tableGlow: RadialGradient? = null
+    private var tableGlowKey = ""
+    /** 选中牌的金色光晕 */
+    private val selectGlowPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
+    /** 回合呼吸光晕（径向渐变缓存） */
+    private val breathGlowPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
+    /** 结算横幅底漆 */
+    private val bannerPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
+    private val bannerStrokePaint = Paint().apply {
+        isAntiAlias = true; style = Paint.Style.STROKE; strokeWidth = 3f
+        color = Color.argb(120, 255, 214, 90)
+    }
+    /** 面板头部条带 */
+    private val panelHeaderPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
     /** 背景渐变缓存（仅尺寸变化时重建） */
     private var bgGradient: LinearGradient? = null
     private var bgGradientW = 0f
@@ -209,8 +253,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     var onImportConfirmed: (() -> Unit)? = null
     fun requestImportConfirm() { importConfirmPending = true; refresh() }
 
-    /** 当前回合高亮动画帧 */
+    /** 当前回合高亮动画帧（0..59，绘制线程每帧自增） */
     private var highlightFrame = 0
+    /** 全局动画时间戳（ms），用于呼吸/脉冲等连续动画 */
+    private var animTime = 0L
+    /** 平滑缓动：当前值向目标值过渡（选中牌上浮等） */
+    private val liftValues = FloatArray(40)
+    /** 桌面出牌入场动画起始时间（按玩家槽位） */
+    private val playAnimStart = LongArray(3)
 
     // ====== 开局手牌展示动画（3 秒内逐张滑入） ======
     /** 动画起始时间戳（System.currentTimeMillis） */
@@ -232,8 +282,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 动画总时长：最后一张出发时刻 + 单张时长 */
     private fun revealTotalMs(handSize: Int) = (handSize - 1) * REVEAL_STAGGER_MS + REVEAL_DUR_MS
 
-    /** 音效播放器 */
-    private var toneGenerator: ToneGenerator? = null
+    /** 音效引擎（程序化合成 PCM，AudioTrack 播放；ToneGenerator 兜底已内置其中） */
+    private var soundEngine: SoundEngine? = null
     private var vibrator: Vibrator? = null
 
     init {
@@ -245,10 +295,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 初始化音效/振动（surface 重建后也会重新调用） */
     private fun initAudio() {
         try {
-            if (toneGenerator == null) {
-                // 音量：ToneGenerator 音量参数上限为 100（即系统流音量的满档），已是可程序控制的最大值
-                toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
-            }
+            if (soundEngine == null) soundEngine = SoundEngine(context)
             // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -261,11 +308,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         } catch (_: Exception) {}
     }
 
-    /** 播放简单音效 */
-    private fun playTone(toneType: Int, durationMs: Int = 100) {
-        try {
-            toneGenerator?.startTone(toneType, durationMs)
-        } catch (_: Exception) {}
+    /** 统一音效入口（委托给合成引擎；引擎未就绪则静默） */
+    private fun sfx(block: (SoundEngine) -> Unit) {
+        try { soundEngine?.let(block) } catch (_: Exception) {}
     }
 
     /** 振动类型（按反馈强度区分，便于映射到系统预定义波形） */
@@ -307,7 +352,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 剩最后一张牌的特殊提醒音效 */
     fun playLastCardAlert() {
-        playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 260)
+        sfx { it.lastCardAlert() }
     }
 
     /** 剩最后一张牌的三段脉冲振动提醒（震-停-震-停-震，振幅减半） */
@@ -340,20 +385,25 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         vibrate(VibrationKind.HEAVY)
     }
 
-    /** 播放出牌音效 */
-    fun playCardSound() {
-        playTone(ToneGenerator.TONE_PROP_BEEP, 80)
+    /** 播放出牌音效（按牌型区分：炸弹/火箭为爆炸轰鸣，其余为甩牌"唰"声） */
+    fun playCardSound(isBomb: Boolean = false) {
+        if (isBomb) sfx { it.bomb() } else sfx { it.cardPlay() }
     }
 
     /** 播放错误音效 */
     fun playErrorSound() {
-        playTone(ToneGenerator.TONE_CDMA_ABBR_INTERCEPT, 150)
+        sfx { it.error() }
         vibrate(VibrationKind.HEAVY)
     }
 
-    /** 播放胜利音效 */
+    /** 播放胜利音效（上行琶音） */
     fun playWinSound() {
-        playTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 300)
+        sfx { it.win() }
+    }
+
+    /** 播放失败音效（下行三连音，柔和不刺耳） */
+    fun playLoseSound() {
+        sfx { it.lose() }
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
@@ -373,8 +423,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stopDrawThread()
-        toneGenerator?.release()
-        toneGenerator = null
+        soundEngine?.stop()
+        soundEngine?.release()
+        soundEngine = null
     }
 
     fun startDrawThread() {
@@ -462,8 +513,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         masterThinkSeconds = seconds.coerceIn(2, 60)
     }
 
-    /** 设置任意玩家的桌面出牌展示 */
+    /** 设置任意玩家的桌面出牌展示（新牌入手时记录动画起始时间，用于入场动效） */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
+        if (cards != null && cards.isNotEmpty()) playAnimStart[playerIndex] = System.currentTimeMillis()
         tablePlayedCards[playerIndex] = cards
     }
 
@@ -561,10 +613,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (idx < 0) return
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
-            playTone(ToneGenerator.TONE_PROP_ACK, 25)
+            sfx { it.tapDeselect() }
         } else {
             gameEngine.selectedCardIndices.add(idx)
-            playTone(ToneGenerator.TONE_PROP_ACK, 30)
+            sfx { it.tapSelect() }
         }
         refresh()
     }
@@ -577,10 +629,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         lastDragCardIndex = idx
         if (idx in gameEngine.selectedCardIndices) {
             gameEngine.selectedCardIndices.remove(idx)
-            playTone(ToneGenerator.TONE_PROP_ACK, 25)
+            sfx { it.tapDeselect() }
         } else {
             gameEngine.selectedCardIndices.add(idx)
-            playTone(ToneGenerator.TONE_PROP_ACK, 30)
+            sfx { it.tapSelect() }
         }
         refresh()
     }
@@ -659,7 +711,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                         val idx = hand.indexOfFirst { it.id == card.id }
                         if (idx >= 0) gameEngine.selectedCardIndices.add(idx)
                     }
-                    playTone(ToneGenerator.TONE_PROP_ACK, 50)
+                    sfx { it.confirm() }
                 } else {
                     showError("没有能出的牌", 1500)
                 }
@@ -668,7 +720,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             action.startsWith("bid_") -> {
                 hapticActionConfirm()
                 gameEngine.humanBid(action.removePrefix("bid_").toInt())
-                playTone(ToneGenerator.TONE_PROP_ACK, 50)
+                sfx { it.confirm() }
             }
             action == "restart" -> {
                 clearAllPlayedCards()
@@ -772,6 +824,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun drawGame(canvas: Canvas) {
         if (screenWidth == 0 || screenHeight == 0) return
         highlightFrame = (highlightFrame + 1) % 60
+        animTime = System.currentTimeMillis()
         val pendingButtons = mutableListOf<ButtonRect>()
 
         // 每帧重新计算手牌间距
@@ -829,31 +882,63 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     private fun drawBackground(canvas: Canvas) {
         if (bgGradient == null || bgGradientW != screenWidth.toFloat() || bgGradientH != screenHeight.toFloat()) {
+            // 三段式绿呢渐变：顶部深 → 中部亮 → 底部沉，模拟灯光落在桌心
             bgGradient = LinearGradient(
                 0f, 0f, 0f, screenHeight.toFloat(),
-                Color.parseColor("#0D3B0D"), Color.parseColor("#1B5E20"),
+                intArrayOf(
+                    Color.parseColor("#0A3110"),
+                    Color.parseColor("#175C24"),
+                    Color.parseColor("#0C3A12")
+                ),
+                floatArrayOf(0f, 0.42f, 1f),
                 Shader.TileMode.CLAMP
             )
             bgGradientW = screenWidth.toFloat()
             bgGradientH = screenHeight.toFloat()
+
+            // 桌心柔光（径向渐变，缓存复用）
+            val cx = screenWidth / 2f
+            val cy = screenHeight * 0.40f
+            tableGlow = RadialGradient(
+                cx, cy, max(screenWidth, screenHeight) * 0.42f,
+                intArrayOf(Color.argb(46, 255, 248, 200), Color.argb(14, 255, 248, 200), Color.TRANSPARENT),
+                floatArrayOf(0f, 0.55f, 1f),
+                Shader.TileMode.CLAMP
+            )
         }
         bgPaint.shader = bgGradient
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), bgPaint)
         bgPaint.shader = null
 
-        // 桌面中央椭圆装饰
+        // 桌心柔光晕
+        tableGlow?.let {
+            ovalPaint.shader = it
+            canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), ovalPaint)
+            ovalPaint.shader = null
+        }
+
+        // 桌面中央椭圆装饰（描边 + 淡填充，像赌桌压线）
         val cx = screenWidth / 2f
         val cy = screenHeight * 0.40f
-        canvas.drawOval(
-            RectF(cx - screenWidth * 0.30f, cy - screenHeight * 0.20f,
-                  cx + screenWidth * 0.30f, cy + screenHeight * 0.20f),
-            ovalPaint
-        )
+        val oval = RectF(cx - screenWidth * 0.30f, cy - screenHeight * 0.20f,
+                         cx + screenWidth * 0.30f, cy + screenHeight * 0.20f)
+        ovalPaint.color = Color.argb(16, 255, 236, 179)
+        canvas.drawOval(oval, ovalPaint)
+        cardBorderPaint.color = Color.argb(40, 255, 236, 179)
+        cardBorderPaint.strokeWidth = 3f
+        canvas.drawOval(oval, cardBorderPaint)
     }
 
     private fun drawTopBar(canvas: Canvas) {
-        val barH = 80f
-        canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH, topBarPaint)
+        val barH = 84f
+        // 顶栏：黑→透明渐变收底，比硬色块更柔和
+        topBarPaint.shader = LinearGradient(
+            0f, 0f, 0f, barH * 1.6f,
+            Color.argb(160, 0, 0, 0), Color.TRANSPARENT,
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH * 1.6f, topBarPaint)
+        topBarPaint.shader = null
         // 回合指示已下放到各玩家牌堆附近绘制（AI 见 drawAiTurnTip，人类见 drawHumanTurnTip），
         // 顶部状态栏仅保留背景条，右上角统计面板由 drawStats 绘制
     }
@@ -885,15 +970,36 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val panelH = 180f
         val panelX = centerX - panelW / 2
 
-        // 当前回合高亮背景
+        // 当前回合：呼吸光晕（正弦波，比三角脉冲更细腻）
         if (isCurrentTurn) {
-            val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 100 + 60).toInt()
-            aiHighlightPaint.color = Color.argb(pulseAlpha, 255, 235, 59)
-            canvas.drawRoundRect(RectF(panelX - 10f, topY - 10f, panelX + panelW + 10f, topY + panelH + 10f),
-                22f, 22f, aiHighlightPaint)
+            val breathe = ((sin(animTime / 550.0 * PI) + 1.0) / 2.0).toFloat()   // 0..1
+            val glowR = 16f + breathe * 10f
+            breathGlowPaint.shader = RadialGradient(
+                centerX, topY + panelH / 2f, panelW * 0.62f,
+                Color.argb((70 + breathe * 60).toInt(), 255, 213, 79),
+                Color.TRANSPARENT,
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawRoundRect(RectF(panelX - glowR, topY - glowR,
+                panelX + panelW + glowR, topY + panelH + glowR), 30f, 30f, breathGlowPaint)
+            breathGlowPaint.shader = null
         }
 
+        // 信息面板：柔和投影 + 深色渐变玻璃底 + 细描边
+        aiInfoPaint.color = Color.argb(70, 0, 0, 0)
+        canvas.drawRoundRect(RectF(panelX + 3f, topY + 6f, panelX + panelW + 3f, topY + panelH + 6f),
+            18f, 18f, aiInfoPaint)
+        aiInfoPaint.shader = LinearGradient(
+            0f, topY, 0f, topY + panelH,
+            Color.argb(120, 18, 44, 26), Color.argb(96, 8, 24, 14),
+            Shader.TileMode.CLAMP
+        )
+        aiInfoPaint.color = Color.WHITE
         canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, aiInfoPaint)
+        aiInfoPaint.shader = null
+        cardBorderPaint.color = Color.argb(70, 255, 236, 179)
+        cardBorderPaint.strokeWidth = 2f
+        canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, cardBorderPaint)
 
         // 角色（身份：地主/农民）移到顶部，字号用原名称的 50f，颜色保持不变
         val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
@@ -920,7 +1026,18 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val totalBackW = backSpacing * (count - 1) + aiBackW
             val backStartX = centerX - totalBackW / 2
             for (i in 0 until count) {
-                drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
+                // 轻微扇形旋转，牌堆更像手持
+                val mid = (count - 1) / 2f
+                val rot = (i - mid) * 1.6f
+                if (rot == 0f) {
+                    drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
+                } else {
+                    canvas.save()
+                    canvas.rotate(rot, backStartX + i * backSpacing + aiBackW / 2,
+                        topY + panelH + 16f + aiBackH / 2)
+                    drawCardBack(canvas, backStartX + i * backSpacing, topY + panelH + 16f, aiBackW, aiBackH)
+                    canvas.restore()
+                }
             }
         }
     }
@@ -934,10 +1051,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != playerIndex) return
         textPaint.textSize = 44f
-        textPaint.color = Color.parseColor("#FFD600")
-        textPaint.textAlign = Paint.Align.CENTER
-        val tip = if (playerIndex == 1) "电脑A思考中..." else "电脑B思考中..."
-        canvas.drawText(tip, centerX, topY + 180f + 16f + aiBackH + 52f, textPaint)
+        drawTextWithShadow(canvas, thinkingTip(playerIndex), centerX,
+            topY + 180f + 16f + aiBackH + 52f, textPaint, Color.parseColor("#FFD600"))
     }
 
     /**
@@ -961,7 +1076,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 左侧AI出的牌
         tablePlayedCards[2]?.let { cards ->
             if (cards.isNotEmpty()) {
-                drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY)
+                drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY, slot = 2)
                 textPaint.textSize = 36f
                 textPaint.color = Color.parseColor("#A5D6A7")
                 canvas.drawText("电脑B", screenWidth * 0.30f, centerY - tableCardH / 2 - 20f, textPaint)
@@ -971,7 +1086,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 人类玩家出的牌
         tablePlayedCards[0]?.let { cards ->
             if (cards.isNotEmpty()) {
-                drawPlayedCardsAt(canvas, cards, screenWidth * 0.50f, centerY + 50f)
+                drawPlayedCardsAt(canvas, cards, screenWidth * 0.50f, centerY + 50f, slot = 0)
                 textPaint.textSize = 36f
                 textPaint.color = Color.parseColor("#FFFFFF")
                 canvas.drawText("你", screenWidth * 0.50f, centerY + 50f - tableCardH / 2 - 20f, textPaint)
@@ -981,7 +1096,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 右侧AI出的牌
         tablePlayedCards[1]?.let { cards ->
             if (cards.isNotEmpty()) {
-                drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY)
+                drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY, slot = 1)
                 textPaint.textSize = 36f
                 textPaint.color = Color.parseColor("#A5D6A7")
                 canvas.drawText("电脑A", screenWidth * 0.70f, centerY - tableCardH / 2 - 20f, textPaint)
@@ -989,16 +1104,31 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
-    /** 在指定位置绘制一组出牌 */
-    private fun drawPlayedCardsAt(canvas: Canvas, cards: List<Card>, centerX: Float, centerY: Float) {
+    /** 在指定位置绘制一组出牌（带逐张落桌入场动画：从上方轻落 + 淡入） */
+    private fun drawPlayedCardsAt(canvas: Canvas, cards: List<Card>, centerX: Float, centerY: Float,
+                                  slot: Int = -1) {
         if (cards.isEmpty()) return
         val totalW = tableSpacing * (cards.size - 1) + tableCardW
         val startX = centerX - totalW / 2
         val startY = centerY - tableCardH / 2
 
+        val elapsed = if (slot >= 0) animTime - playAnimStart[slot] else Long.MAX_VALUE
+
         for ((i, card) in cards.withIndex()) {
-            drawMiniCard(canvas, startX + i * tableSpacing, startY, tableCardW, tableCardH, card, faceUp = true)
+            val p = ((elapsed - i * 45L).toFloat() / 240f).coerceIn(0f, 1f)
+            if (p <= 0f) continue
+            val e = easeOutCubic(p)
+            val dropY = startY - (1f - e) * 60f
+            val alpha = 0.35f + 0.65f * e
+            drawMiniCard(canvas, startX + i * tableSpacing, dropY, tableCardW, tableCardH,
+                card, faceUp = true, alpha = alpha)
         }
+    }
+
+    /** ease-out-cubic：先快后缓的落定曲线 */
+    private fun easeOutCubic(t: Float): Float {
+        val x = t - 1f
+        return 1f + x * x * x
     }
 
     /** 底部人类手牌（间距最多填满95%宽度，开局有 3 秒逐张滑入动画） */
@@ -1023,10 +1153,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val arcOffset = (-cos(distFromCenter * 0.04) * 6.0 + 6.0).toFloat()
             val rotation = (distFromCenter * 0.8).toFloat()
 
+            // 选中上移使用平滑缓动（每帧向目标值靠拢，形成连续上浮/回落动画）
+            val liftTarget = if (isSelected) 60f else 0f
+            if (i < liftValues.size) {
+                val cur = liftValues[i]
+                var next = cur + (liftTarget - cur) * 0.35f
+                if (abs(next - liftTarget) < 0.5f) next = liftTarget
+                liftValues[i] = next
+            }
+            val lift = if (i < liftValues.size) liftValues[i] else liftTarget
+
             // 默认位置（含选中上移、微弧偏移）
-            var cy = baseY - (if (isSelected) 60f else 0f) - arcOffset
+            var cy = baseY - lift - arcOffset
             var alpha = 1f
             var scale = 1f
+            // 选中牌轻微放大
+            if (!isHandReveal && lift > 1f) scale = 1f + 0.03f * (lift / 60f)
 
             if (isHandReveal) {
                 val p = ((elapsed - i * REVEAL_STAGGER_MS).toFloat() / REVEAL_DUR_MS).coerceIn(0f, 1f)
@@ -1077,23 +1219,39 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.save()
         canvas.rotate(rotation, x + cardW / 2, y + cardH / 2)
 
-        // 选中阴影
+        // 投影：始终有一层柔和底影，选中时加深加高，营造悬浮感
+        if (fade) shadowPaint.alpha = a
+        shadowPaint.color = if (selected) Color.argb(90, 0, 0, 0) else Color.argb(45, 0, 0, 0)
+        val shOff = if (selected) 10f else 6f
+        canvas.drawRoundRect(x + 4f, y + shOff, x + cardW + 4f, y + cardH + shOff,
+            cardRadius, cardRadius, shadowPaint)
+        if (fade) shadowPaint.alpha = 255
+
+        // 选中金色光晕（径向渐变包裹整牌）
         if (selected) {
-            if (fade) shadowPaint.alpha = a
-            canvas.drawRoundRect(x + 4f, y + 8f, x + cardW + 4f, y + cardH + 8f,
-                cardRadius, cardRadius, shadowPaint)
-            if (fade) shadowPaint.alpha = 255
+            selectGlowPaint.shader = RadialGradient(
+                x + cardW / 2, y + cardH / 2, max(cardW, cardH) * 0.75f,
+                intArrayOf(Color.argb((110 * alpha).toInt(), 255, 214, 64),
+                           Color.argb((40 * alpha).toInt(), 255, 214, 64), Color.TRANSPARENT),
+                floatArrayOf(0.62f, 0.8f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            canvas.drawRoundRect(x - 12f, y - 12f, x + cardW + 12f, y + cardH + 12f,
+                cardRadius + 10f, cardRadius + 10f, selectGlowPaint)
+            selectGlowPaint.shader = null
         }
 
-        // 牌面
-        cardPaint.color = if (selected) Color.parseColor("#FFF9C4") else Color.WHITE
+        // 牌面：象牙白→冷白微渐变（更有纸质厚度感）
+        cardPaint.shader = cardFaceShader
+        cardPaint.color = Color.WHITE
         if (fade) cardPaint.alpha = a
         canvas.drawRoundRect(x, y, x + cardW, y + cardH, cardRadius, cardRadius, cardPaint)
+        cardPaint.shader = null
         if (fade) cardPaint.alpha = 255
 
-        // 边框
-        cardBorderPaint.color = if (selected) Color.parseColor("#FFD600") else Color.parseColor("#BDBDBD")
-        cardBorderPaint.strokeWidth = if (selected) 6f else 3f
+        // 边框：选中金框，普通浅灰细框
+        cardBorderPaint.color = if (selected) Color.parseColor("#FFC107") else Color.parseColor("#C9CFD6")
+        cardBorderPaint.strokeWidth = if (selected) 5f else 2.5f
         if (fade) cardBorderPaint.alpha = a
         canvas.drawRoundRect(x, y, x + cardW, y + cardH, cardRadius, cardRadius, cardBorderPaint)
         if (fade) cardBorderPaint.alpha = 255
@@ -1127,22 +1285,33 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.restore()
     }
 
-    /** 绘制小尺寸牌（桌面展示/底牌） */
+    /** 绘制小尺寸牌（桌面展示/底牌）；alpha 用于入场淡入 */
     private fun drawMiniCard(canvas: Canvas, x: Float, y: Float, w: Float, h: Float,
-                             card: Card, faceUp: Boolean) {
+                             card: Card, faceUp: Boolean, alpha: Float = 1f) {
         if (!faceUp) { drawCardBack(canvas, x, y, w, h); return }
+        val fade = alpha < 0.999f
+        val a = if (fade) (alpha * 255f).toInt().coerceIn(0, 255) else 255
 
         val r = 10f
+        // 轻投影
+        shadowPaint.color = Color.argb((36 * alpha).toInt(), 0, 0, 0)
+        canvas.drawRoundRect(x + 2f, y + 4f, x + w + 2f, y + h + 4f, r, r, shadowPaint)
+        cardPaint.shader = cardFaceShader
         cardPaint.color = Color.WHITE
+        if (fade) cardPaint.alpha = a
         canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardPaint)
-        cardBorderPaint.color = Color.parseColor("#BDBDBD")
+        cardPaint.shader = null
+        cardBorderPaint.color = Color.parseColor("#C9CFD6")
         cardBorderPaint.strokeWidth = 2f
+        if (fade) cardBorderPaint.alpha = a
         canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardBorderPaint)
+        if (fade) { cardPaint.alpha = 255; cardBorderPaint.alpha = 255 }
 
         val textColor = if (card.isRed) Color.parseColor("#D32F2F") else Color.parseColor("#212121")
 
         smallTextPaint.textSize = w * 0.32f
         smallTextPaint.color = textColor
+        if (fade) smallTextPaint.alpha = a
         smallTextPaint.textAlign = Paint.Align.LEFT
         canvas.drawText(card.suitSymbol, x + 6f, y + h * 0.22f, smallTextPaint)
         smallTextPaint.textSize = w * 0.40f
@@ -1150,22 +1319,42 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         textPaint.textSize = w * 0.58f
         textPaint.color = textColor
+        if (fade) textPaint.alpha = a
         textPaint.textAlign = Paint.Align.CENTER
         canvas.drawText(card.displayText, x + w / 2, y + h * 0.78f, textPaint)
+        if (fade) { smallTextPaint.alpha = 255; textPaint.alpha = 255 }
     }
 
-    /** 绘制牌背 */
+    /** 绘制牌背：白切边 + 蓝色渐变主体 + 内描线 + 中心菱形徽记 */
     private fun drawCardBack(canvas: Canvas, x: Float, y: Float, w: Float, h: Float) {
         val r = 8f
-        cardPaint.color = Color.parseColor("#1565C0")
+        // 外白边（真实纸牌的切边感）
+        cardPaint.shader = null
+        cardPaint.color = Color.parseColor("#E8EDF3")
         canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardPaint)
-        cardBorderPaint.color = Color.parseColor("#0D47A1")
-        cardBorderPaint.strokeWidth = 2f
-        canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardBorderPaint)
-        // 内部花纹
-        cardPaint.color = Color.parseColor("#1976D2")
-        val m = w * 0.12f
-        canvas.drawRoundRect(x + m, y + m, x + w - m, y + h - m, r, r, cardPaint)
+        // 蓝色渐变主体
+        cardPaint.shader = cardBackShader
+        cardPaint.color = Color.WHITE
+        val inset = (w * 0.045f).coerceAtLeast(2f)
+        canvas.drawRoundRect(x + inset, y + inset, x + w - inset, y + h - inset, r - 2f, r - 2f, cardPaint)
+        cardPaint.shader = null
+        // 内侧浅色描线
+        cardBorderPaint.color = Color.argb(120, 255, 255, 255)
+        cardBorderPaint.strokeWidth = 1.5f
+        val m = w * 0.14f
+        canvas.drawRoundRect(x + m, y + m, x + w - m, y + h - m, r - 3f, r - 3f, cardBorderPaint)
+        // 中心菱形徽记
+        val cx = x + w / 2
+        val cy = y + h / 2
+        val dr = min(w, h) * 0.16f
+        cardPaint.color = Color.argb(90, 255, 236, 179)
+        canvas.save()
+        canvas.rotate(45f, cx, cy)
+        canvas.drawRect(cx - dr, cy - dr, cx + dr, cy + dr, cardPaint)
+        cardPaint.color = Color.argb(140, 255, 236, 179)
+        val dr2 = dr * 0.55f
+        canvas.drawRect(cx - dr2, cy - dr2, cx + dr2, cy + dr2, cardPaint)
+        canvas.restore()
     }
 
     // ==================== 结算时显示所有玩家剩余牌（正面） ====================
@@ -1412,22 +1601,64 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 判断是否被按下（按动作匹配，按钮列表重建也不会错位）
         val isPressed = action == pressedAction
-        buttonPaint.color = if (isPressed) pressedColor else color
+        // 柔和投影：抬起悬浮、按下贴桌
+        shadowPaint.color = Color.argb(if (isPressed) 60 else 100, 0, 0, 0)
+        val shOff = if (isPressed) 3f else 7f
+        canvas.drawRoundRect(RectF(x + 3f, y + shOff, x + w + 3f, y + h + shOff), 22f, 22f, shadowPaint)
+        // 主体：纵向渐变（亮面→底色），比纯色更立体
+        buttonPaint.shader = LinearGradient(
+            0f, y, 0f, y + h,
+            lighten(color, 0.20f), if (isPressed) pressedColor else darken(color, 0.10f),
+            Shader.TileMode.CLAMP
+        )
+        buttonPaint.color = Color.WHITE
         canvas.drawRoundRect(rect, 22f, 22f, buttonPaint)
-        
+        buttonPaint.shader = null
+
         // 按下时添加深色覆盖层
         if (isPressed) {
             canvas.drawRoundRect(rect, 22f, 22f, buttonOverlayPaint)
         }
-        
-        // 按钮高光
-        canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
+
+        // 按钮顶部高光弧带 + 细描边（玻璃边缘感）
+        canvas.drawRoundRect(RectF(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f), 22f, 22f, buttonHighlightPaint)
+        canvas.drawRoundRect(rect, 22f, 22f, buttonStrokePaint)
 
         // 文字颜色固定白色：buttonTextPaint 被设置窗口等复用且会被改成灰色，
         // 若此处不显式复位，退出设置后游戏内按钮会继承灰色（叫分/提示/出牌变灰）。
         buttonTextPaint.color = Color.WHITE
         buttonTextPaint.textSize = 56f
-        canvas.drawText(text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
+        drawTextWithShadow(canvas, text, x + w / 2, y + h / 2 + 18f, buttonTextPaint, Color.WHITE)
+    }
+
+    /** 颜色提亮（factor 0..1，向白靠拢） */
+    private fun lighten(color: Int, f: Float): Int {
+        val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
+        fun ch(c: Int) = min(255, max(0, (c + (255 - c) * f).toInt()))
+        return Color.argb(Color.alpha(color), ch(r), ch(g), ch(b))
+    }
+
+    /** 颜色压暗（factor 0..1，向黑靠拢） */
+    private fun darken(color: Int, f: Float): Int {
+        val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
+        fun ch(c: Int) = min(255, max(0, (c * (1f - f)).toInt()))
+        return Color.argb(Color.alpha(color), ch(r), ch(g), ch(b))
+    }
+
+    /** 带柔和投影的文字（提升深底文字可读性与层次）；调用方负责 paint 的 textSize/color/align */
+    private fun drawTextWithShadow(canvas: Canvas, text: String, cx: Float, baseY: Float,
+                                   paint: Paint, color: Int) {
+        val saved = paint.color
+        paint.color = Color.argb(80, 0, 0, 0)
+        canvas.drawText(text, cx + 2f, baseY + 3f, paint)
+        paint.color = saved
+        canvas.drawText(text, cx, baseY, paint)
+    }
+
+    /** 思考中动态省略号：随时间循环 . .. ... */
+    private fun thinkingTip(playerIndex: Int): String {
+        val dots = ".".repeat(((animTime / 400L) % 3L).toInt() + 1)
+        return (if (playerIndex == 1) "电脑A思考中" else "电脑B思考中") + dots
     }
 
     /**
@@ -1442,10 +1673,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         target.add(ButtonRect(mode.name, rect, color, pressedColor, action))
 
         val isPressed = action == pressedAction
-        buttonPaint.color = if (isPressed) pressedColor else color
+        shadowPaint.color = Color.argb(if (isPressed) 60 else 100, 0, 0, 0)
+        val shOff = if (isPressed) 3f else 7f
+        canvas.drawRoundRect(RectF(x + 3f, y + shOff, x + w + 3f, y + h + shOff), 22f, 22f, shadowPaint)
+        buttonPaint.shader = LinearGradient(
+            0f, y, 0f, y + h,
+            lighten(color, 0.20f), if (isPressed) pressedColor else darken(color, 0.10f),
+            Shader.TileMode.CLAMP
+        )
+        buttonPaint.color = Color.WHITE
         canvas.drawRoundRect(rect, 22f, 22f, buttonPaint)
+        buttonPaint.shader = null
         if (isPressed) canvas.drawRoundRect(rect, 22f, 22f, buttonOverlayPaint)
-        canvas.drawRoundRect(RectF(x, y, x + w, y + h * 0.5f), 22f, 22f, buttonHighlightPaint)
+        canvas.drawRoundRect(RectF(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f), 22f, 22f, buttonHighlightPaint)
+        canvas.drawRoundRect(rect, 22f, 22f, buttonStrokePaint)
 
         val stat = modeStats[mode] ?: ModeStat()
         val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
