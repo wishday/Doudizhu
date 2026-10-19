@@ -554,7 +554,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private inline fun hintActive(text: String, timer: Long): Boolean =
         text.isNotEmpty() && System.currentTimeMillis() <= timer
 
-    /** 结算横幅是否仍处于活动期（滑入约 750ms + 停留 3 秒 + 淡出约 400ms；结束后停止重绘省电）。
+    /** 结算横幅是否仍处于活动期（滑入 450ms + 停留 3 秒 + 淡出 400ms，共约 4.05 秒；结束后停止重绘省电）。
      *  必须用 currentTimeMillis：横幅静止后不再有 refresh，animTime 会冻结在最后一帧的旧值，
      *  若用 animTime 判断则 elapsed 永远偏小 → shouldDraw 恒真 → 停帧逻辑失效、持续耗电。 */
     private fun bannerActive(): Boolean =
@@ -1499,12 +1499,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (fade) smallTextPaint.alpha = 255
 
         // 中央大牌值字点数（主视觉：以大字点数取代原来的大花色符号；「小王/大王」显示「小/大」）
+        // 注意必须用普通字体画笔 smallTextPaint：此处复用左上角索引时其 textAlign 为 LEFT，需显式置 CENTER
         smallTextPaint.textSize = cardW * 0.52f
         smallTextPaint.color = textColor
         smallTextPaint.textAlign = Paint.Align.CENTER
         if (fade) smallTextPaint.alpha = a
         canvas.drawText(card.displayText, x + cardW / 2, y + cardH * 0.68f, smallTextPaint)
         if (fade) smallTextPaint.alpha = 255
+        smallTextPaint.textAlign = Paint.Align.LEFT
 
         // 右下角点数（旋转 180° 绘制，模拟真实纸牌的对角镜像索引）
         canvas.save()
@@ -1572,6 +1574,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (fade) smallTextPaint.alpha = a
         canvas.drawText(card.displayText, x + w / 2, y + h * 0.86f, smallTextPaint)
         if (fade) { smallTextPaint.alpha = 255 }
+        // 复位对齐方式：smallTextPaint 为共享画笔，下游（牌面索引/文字）默认按 LEFT 使用
+        smallTextPaint.textAlign = Paint.Align.LEFT
     }
 
     /** 绘制牌背：白切边 + 蓝色渐变主体 + 内描线 + 中心菱形徽记 */
