@@ -840,6 +840,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
             action == "restart" -> {
                 clearAllPlayedCards()
+                gameOverAnimStart = 0L   // 重置结算横幅时间轴，防止新一局 GAME_OVER 前误画残留横幅
                 hapticActionConfirm()
                 gameEngine.startNewGame()
             }
@@ -1259,7 +1260,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             passBubblePaint.alpha = 255
             textPaint.color = Color.parseColor("#ECEFF1")
             textPaint.textAlign = Paint.Align.CENTER
-            canvas.drawText(label, centerX, by + bh / 2f + 14f, textPaint)
+            // 淡入期间文字透明度跟随气泡底漆（drawTextWithShadow 内部会改 color，故此处用 ARGB 直接控制）
+            if (e < 1f) {
+                val ta = (236 * e).toInt().coerceIn(0, 255)   // 基色 #ECEFF1 各通道约 236+，取整体 alpha
+                textPaint.color = Color.argb(ta, 236, 239, 241)
+                canvas.drawText(label, centerX, by + bh / 2f + 14f, textPaint)
+                textPaint.color = Color.parseColor("#ECEFF1")
+            } else {
+                canvas.drawText(label, centerX, by + bh / 2f + 14f, textPaint)
+            }
         }
     }
 
@@ -1875,6 +1884,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             else -> "农民失利，下把翻盘"
         }
         // 第三行：本局得分变化 + 倍数说明（合并自原 showMessage 的结算积分提示）
+        // scoreDelta=0 视为未提供积分信息：隐藏该行并压缩布局，避免显示误导性的「本局 +0 分」
+        val hasScore = lastRoundScoreDelta != 0
         val sign = if (lastRoundScoreDelta >= 0) "+" else "-"
         val scoreLine = "本局 $sign${abs(lastRoundScoreDelta)} 分" +
             if (lastRoundMultiplierText.isNotEmpty()) "（${lastRoundMultiplierText}）" else ""
@@ -1887,6 +1898,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             else 1f - ((elapsed - BANNER_SLIDE_MS - BANNER_HOLD_MS).toFloat() / BANNER_FADE_MS).coerceIn(0f, 1f)
         if (fade <= 0f) return
         val appear = e * fade
+        // 文字整体透明度跟随入场/淡出（alpha=255 时与不设置完全等价，正常态零开销）
+        val textAlpha = (255 * appear).toInt().coerceIn(0, 255)
 
         val bw = min(screenWidth * 0.62f, 820f)
         val bh = 210f
@@ -1905,19 +1918,29 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         bannerPaint.alpha = 255
         canvas.restore()
 
+        textPaint.textAlign = Paint.Align.CENTER   // 共享画笔默认 CENTER，显式声明防上游残留 LEFT
         textPaint.textSize = 62f
-        textPaint.color = if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1")
-        textPaint.textAlign = Paint.Align.CENTER
+        textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha)
         drawTextWithShadow(canvas, title, screenWidth / 2f, by + 76f, textPaint,
-            if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"))
-        textPaint.textSize = 40f
-        textPaint.color = if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1")
-        canvas.drawText(scoreLine, screenWidth / 2f, by + 132f, textPaint)
-        textPaint.textSize = 28f
-        textPaint.color = if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC")
-        canvas.drawText(sub, screenWidth / 2f, by + 178f, textPaint)
-        textPaint.textAlign = Paint.Align.LEFT
+            withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha))
+        // hasScore=false（未提供积分）时不画得分行，副题上移补位，避免横幅中部留大片空白
+        if (hasScore) {
+            textPaint.textSize = 40f
+            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
+            canvas.drawText(scoreLine, screenWidth / 2f, by + 132f, textPaint)
+            textPaint.textSize = 28f
+            textPaint.color = withAlpha(if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC"), textAlpha)
+            canvas.drawText(sub, screenWidth / 2f, by + 178f, textPaint)
+        } else {
+            textPaint.textSize = 40f
+            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
+            canvas.drawText(sub, screenWidth / 2f, by + 150f, textPaint)
+        }
+        // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawMessage/drawStats 等下游绘制
     }
+
+    /** 替换颜色的 alpha 通道（供结算横幅文字跟随入场/淡出统一透明） */
+    private fun withAlpha(color: Int, alpha: Int): Int = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
     private fun addButton(canvas: Canvas, target: MutableList<ButtonRect>, text: String, x: Float, y: Float,
                           w: Float, h: Float, color: Int, pressedColor: Int, action: String) {
