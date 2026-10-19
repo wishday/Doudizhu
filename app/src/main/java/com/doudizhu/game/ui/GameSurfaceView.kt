@@ -1132,7 +1132,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             // 中心点取面板几何中心（panelW/panelH 为常量），故 key 不含位置信息
             val glowKey = "${quantR.toInt()}_$innerA"
             if (breathGlowKey != glowKey) {
-                breathGlowShader?.release()
+                // Shader 没有公开的可调用的释放方法（native 资源由 Finalizer/WeakReference 自动回收），
+                // 直接丢弃旧引用即可，无需（也不能）调用 release()
                 breathGlowShader = RadialGradient(
                     panelW / 2f, panelH / 2f, max(panelW * 0.62f, quantR * 2.2f),
                     Color.argb(innerA, 255, 213, 79),
