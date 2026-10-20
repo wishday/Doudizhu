@@ -243,15 +243,38 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
 
-    /** 电脑「思考中」提示字号（基线值，绘制时放大 2 倍） */
+    /** 电脑「思考中」提示字号（出牌阶段与叫分阶段统一使用 44f，不再放大） */
     private val AI_THINKING_TIP_TEXT_SIZE = 44f
 
-    /** 「不出」气泡文字字号：与「电脑A/B思考中」（放大 2 倍后）保持一致 */
-    private val PASS_BUBBLE_TEXT_SIZE = AI_THINKING_TIP_TEXT_SIZE * 2f
+    /** 「不出」气泡文字字号：与「电脑A/B思考中」一致（44f） */
+    private val PASS_BUBBLE_TEXT_SIZE = AI_THINKING_TIP_TEXT_SIZE
 
     /** 「不出」气泡状态：各玩家槽位最近一次过牌的时间戳与代号（-1 表示无气泡；新一轮由 clearAllPlayedCards 清除） */
     private val passAnimStart = LongArray(3)
     private val passSlotEpoch = IntArray(3) { -1 }
+
+    /** 叫分阶段快照（@Volatile：绘制线程读取、UI 线程写入，整组一次性替换保证一致性）。
+     *  记录各电脑玩家本轮的叫分情况，显示在其牌背下方；开始发牌（clearAllPlayedCards）时清除。 */
+    private data class BidSnapshot(
+        val phase: GamePhase,
+        /** 各玩家有效叫分（0=不叫/未叫），下标即玩家槽位 */
+        val scores: IntArray,
+        /** 各玩家是否已完成本轮叫分 */
+        val done: BooleanArray,
+        /** 当前正在叫分的玩家（用于"思考中"提示） */
+        val current: Int
+    ) {
+        override fun equals(other: Any?): Boolean =
+            other is BidSnapshot && phase == other.phase && scores.contentEquals(other.scores) &&
+                done.contentEquals(other.done) && current == other.current
+
+        override fun hashCode(): Int =
+            ((phase.hashCode() * 31 + current) * 31 + scores.contentHashCode()) * 31 + done.contentHashCode()
+    }
+    @Volatile
+    private var bidSnapshot: BidSnapshot? = null
+    /** 叫分阶段提示字号：与「不出」气泡、「电脑A/B思考中」文字一致（44f） */
+    private val AI_BID_TIP_TEXT_SIZE = PASS_BUBBLE_TEXT_SIZE
     /** 过牌代号计数器：每次任意玩家过牌自增，用于区分"连续两次不出"与新的一手 */
     private var passEpochCounter = 0
     /** 「不出」气泡淡入动画时长（ms）：仅用于驱动淡入期间的持续重绘；气泡本身不自动消退 */
@@ -269,6 +292,32 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         passAnimStart[playerIndex] = System.currentTimeMillis()
         passSlotEpoch[playerIndex] = ++passEpochCounter
         refresh()
+    }
+
+    /** 更新叫分阶段展示（由 MainActivity 在叫分开始/某玩家叫分时调用）：
+     *  把各电脑玩家"已叫的分数 / 不叫 / 尚未行动"整组快照原子发布给绘制线程，
+     *  绘制时显示在该电脑牌背下方；发牌开始时由 clearAllPlayedCards 清除。
+     *  @param bidScores 各玩家本轮有效叫分（0=不叫或尚未叫）
+     *  @param bidDone   各玩家是否已完成本轮叫分
+     *  @param currentBidder 当前正在叫分的玩家索引 */
+    fun updateBidDisplay(bidScores: IntArray, bidDone: BooleanArray, currentBidder: Int) {
+        if (!::gameEngine.isInitialized) return
+        val phase = gameEngine.stateMachine.phase
+        // 越界值钳制到合法叫分范围，避免脏数据直接画出屏幕
+        val safeScores = IntArray(3) { i ->
+            bidScores.getOrElse(i) { 0 }.coerceIn(0, 3)
+        }
+        val safeDone = BooleanArray(3) { i -> bidDone.getOrElse(i) { false } }
+        bidSnapshot = BidSnapshot(phase, safeScores, safeDone, currentBidder)
+        refresh()
+    }
+
+    /** 主动清除叫分展示（保留给外部流程显式调用；正常情况下由 clearAllPlayedCards 统一清除） */
+    fun clearBidDisplay() {
+        if (bidSnapshot != null) {
+            bidSnapshot = null
+            refresh()
+        }
     }
 
     /** 错误提示（红色弹窗）：仅在非法操作时弹出，展示到期后自动清除 */
@@ -540,6 +589,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val phase = gameEngine.stateMachine.phase
         // 出牌阶段：呼吸光晕/思考省略号等连续动画需逐帧刷新
         if (phase == GamePhase.PLAYING) return true
+        // 叫分阶段：轮到电脑时其下方「思考中」省略号需逐帧刷新（BIDDING 阶段画面本身是静止的）
+        if (phase == GamePhase.BIDDING && bidSnapshot?.current?.let { it != 0 } == true) return true
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
         // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
         // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
@@ -638,12 +689,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 清除所有桌面出牌展示（新一手开始/重开一局/返回主界面时；结算时不调用，保留最后一手牌）；
-     *  同时清空全部「不出」气泡 */
+     *  同时清空全部「不出」气泡与叫分阶段的电脑叫分展示（下一局开始发牌即清除上一局残留） */
     fun clearAllPlayedCards() {
         for (i in tablePlayedCards.indices) {
             tablePlayedCards[i] = null
             passSlotEpoch[i] = -1
         }
+        // 开始发牌：清除叫分阶段的两台电脑叫分显示
+        bidSnapshot = null
     }
 
     // ==================== 触摸事件（支持滑动选牌 + 按钮按压反馈） ====================
@@ -972,6 +1025,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             drawAiTurnTip(canvas, 2, 260f, 100f)
         }
 
+        // 叫分阶段：在两台电脑玩家下方分别显示其叫分情况（开始发牌时清除）
+        drawAiBidTips(canvas)
+
         // 底部人类手牌
         drawHumanHand(canvas)
 
@@ -1249,7 +1305,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 「不出」气泡：牌背下方居中，圆角胶囊 + 尾尖指向头像区，淡入动画；
         // 不自动消退：一直显示到其它玩家出牌/过牌（registerPassBubble 清除）或新一手清桌（clearAllPlayedCards）
-        // 文字字号与「电脑A/B思考中」（放大 2 倍后）保持一致，胶囊尺寸随文字宽度自适应
+        // 文字字号与「电脑A/B思考中」一致（44f），胶囊尺寸随文字宽度自适应
         if (showPassBubble) {
             val elapsed = System.currentTimeMillis() - passAnimStart[playerIndex]
             val appear = (elapsed.toFloat() / PASS_BUBBLE_FADEIN_MS).coerceIn(0f, 1f)
@@ -1296,14 +1352,60 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawAiTurnTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != playerIndex) return
-        // 字号放大 2 倍（44f -> 88f）；「不出」气泡文字与此处保持一致
-        textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE * 2f
+        // 字号统一为 44f（与「不出」气泡文字一致）
+        textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE
         // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制（如中央出牌的绿色玩家名）
         // 会残留其颜色；不显式设色时提示文字会偶发变成绿色/白色（bug 修复）
         textPaint.color = Color.parseColor("#FFD600")
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, thinkingTip(playerIndex), centerX,
             topY + 180f + 16f + aiBackH + 52f, textPaint, Color.parseColor("#FFD600"))
+    }
+
+    /**
+     * 叫分阶段：在两台电脑玩家的牌背下方分别显示其叫分情况。
+     * - 已叫分：显示「叫1分 / 叫2分 / 叫3分」（金色）；不叫：显示「不叫」（灰色）
+     * - 轮到该电脑但尚未行动：显示「电脑A/B思考中」+ 动态省略号（与出牌阶段提示同款文案，
+     *   字号统一为 44f）
+     * - 其它玩家（未轮到）：不显示任何内容
+     * 数据来自 updateBidDisplay 发布的快照；开始发牌（clearAllPlayedCards）后快照被清空，显示随之消失。
+     */
+    private fun drawAiBidTips(canvas: Canvas) {
+        val snap = bidSnapshot ?: return
+        if (snap.phase != GamePhase.BIDDING) return
+        // 与 drawAIPlayer / drawAiTurnTip 的槽位坐标保持一致
+        drawAiBidTip(canvas, 1, screenWidth - 260f, 100f, snap)
+        drawAiBidTip(canvas, 2, 260f, 100f, snap)
+    }
+
+    private fun drawAiBidTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float,
+                             snap: BidSnapshot) {
+        val label: String
+        val color: Int
+        when {
+            snap.done[playerIndex] -> {
+                val score = snap.scores[playerIndex]
+                if (score > 0) {
+                    label = "叫${score}分"
+                    color = Color.parseColor("#FFD600")
+                } else {
+                    label = "不叫"
+                    color = Color.parseColor("#B0BEC5")
+                }
+            }
+            snap.current == playerIndex -> {
+                label = thinkingTip(playerIndex)
+                color = Color.parseColor("#FFD600")
+            }
+            else -> return
+        }
+        textPaint.textSize = AI_BID_TIP_TEXT_SIZE
+        // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制会残留其颜色
+        textPaint.color = color
+        textPaint.textAlign = Paint.Align.CENTER
+        // 位置与出牌阶段「思考中」提示一致（牌背下方），两个阶段不会同时出现，无重叠之虞
+        drawTextWithShadow(canvas, label, centerX,
+            topY + 180f + 16f + aiBackH + 52f, textPaint, color)
     }
 
     /**

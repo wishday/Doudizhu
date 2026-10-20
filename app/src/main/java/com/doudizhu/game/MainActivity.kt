@@ -408,14 +408,32 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
-            gameSurfaceView.refresh()
+            // 叫分阶段：把各玩家当前叫分情况同步给绘制层（电脑下方显示）
+            publishBidDisplay()
         }
     }
 
     override fun onPlayerBid(playerIndex: Int, score: Int) {
         runOnUiThread {
-            gameSurfaceView.refresh()
+            publishBidDisplay()
         }
+    }
+
+    /** 汇总当前叫分进度并发布到 GameSurfaceView（在两台电脑玩家下方显示各自的叫分情况）。
+     *  已行动玩家取 Player.bidScore（引擎写入的有效叫分，0=不叫）；
+     *  是否"已行动"由状态机推断：叫分顺序为 firstBidder → +1 → +2（即 currentMaxBid 玩家、
+     *  maxBidPlayerIndex 玩家、以及 bidRoundCount==3 时的最后一名），避免改动引擎与状态机。 */
+    private fun publishBidDisplay() {
+        val sm = gameEngine.stateMachine
+        val scores = IntArray(3) { i -> gameEngine.players[i].bidScore.coerceIn(0, 3) }
+        val done = BooleanArray(3)
+        if (sm.phase == com.doudizhu.game.state.GamePhase.BIDDING) {
+            val first = ((sm.currentPlayerIndex - sm.bidRoundCount) % 3 + 3) % 3
+            for (i in 0 until sm.bidRoundCount.coerceAtMost(3)) {
+                done[(first + i) % 3] = true
+            }
+        }
+        gameSurfaceView.updateBidDisplay(scores, done, sm.currentPlayerIndex)
     }
 
     override fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>) {
