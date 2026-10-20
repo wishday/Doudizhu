@@ -136,7 +136,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
         color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
-    private val msgBgPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
+    /** 错误提示弹窗背景（深红半透明圆角底） */
     private val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
     private val aiHighlightPaint = Paint().apply {
         color = Color.argb(120, 255, 152, 0); style = Paint.Style.FILL
@@ -260,11 +260,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         refresh()
     }
 
-    /** 消息提示 */
-    private var messageText = ""
-    private var messageTimer = 0L
-
-    /** 错误提示（红色） */
+    /** 错误提示（红色弹窗）：仅在非法操作时弹出，展示到期后自动清除 */
     private var errorText = ""
     private var errorTimer = 0L
 
@@ -337,8 +333,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         lastRoundScoreDelta = scoreDelta
         lastRoundMultiplierText = multiplierText
         gameOverAnimStart = System.currentTimeMillis()
-        // 新一局结算：清除上一手残留的桌面出牌与「不出」气泡，避免与剩余牌展示混叠
-        clearAllPlayedCards()
+        // 结算时保留最后一手打出的牌：桌面出牌展示与「不出」气泡原样留在桌上不清空，
+        // 重开一局/返回主界面时才由 clearAllPlayedCards 清除
         refresh()
     }
 
@@ -541,8 +537,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
         // 结算横幅：滑入 + 停留 3 秒 + 淡出期间持续重绘；淡出结束后停止（省电）
         if ((phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING) && bannerActive()) return true
-        // 提示条展示期内需持续重绘以在到期后自动消失（否则静止画面会永久残留旧提示）
-        return hintActive(messageText, messageTimer) || hintActive(errorText, errorTimer)
+        // 错误提示弹窗展示期内需持续重绘以在到期后自动消失（否则静止画面会永久残留旧提示）
+        return hintActive(errorText, errorTimer)
     }
 
     /** 本帧已绘制完成（仅当恰好有一个待处理请求时清空，避免丢失绘制期间新到达的 refresh） */
@@ -550,7 +546,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         redrawRequests.compareAndSet(1, 0)
     }
 
-    /** 提示条是否仍在展示期内（供 shouldDraw 判断是否需要持续重绘以自动消失） */
+    /** 提示弹窗是否仍在展示期内（供 shouldDraw 判断是否需要持续重绘以自动消失） */
     private inline fun hintActive(text: String, timer: Long): Boolean =
         text.isNotEmpty() && System.currentTimeMillis() <= timer
 
@@ -584,15 +580,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         cb?.let { runnable -> post { if (gen == revealGeneration) runnable() } }
     }
 
-    fun showMessage(msg: String, durationMs: Long = 2000) {
-        messageText = msg
-        messageTimer = System.currentTimeMillis() + durationMs
-    }
-
-    fun showError(msg: String, durationMs: Long = 2000) {
+    /** 非法操作统一反馈（牌型不合法/打不过上家/未选牌/无牌可出）：
+     *  弹出红色文字提示框 + 原有错误音效与振动提示 */
+    private fun rejectPlay(msg: String, durationMs: Long = 2000) {
         errorText = msg
         errorTimer = System.currentTimeMillis() + durationMs
         playErrorSound()
+        refresh()
     }
 
     /** 设置某模式的统计（积分/局数/胜场） */
@@ -632,7 +626,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tablePlayedCards[playerIndex] = cards
     }
 
-    /** 清除所有桌面出牌展示（新一手开始/重开一局时）；同时清空全部「不出」气泡 */
+    /** 清除所有桌面出牌展示（新一手开始/重开一局/返回主界面时；结算时不调用，保留最后一手牌）；
+     *  同时清空全部「不出」气泡 */
     fun clearAllPlayedCards() {
         for (i in tablePlayedCards.indices) {
             tablePlayedCards[i] = null
@@ -790,10 +785,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     .sorted()
                     .map { gameEngine.players[0].handCards[it] }
                 if (selectedCards.isNotEmpty()) {
-                    // 先校验牌型合法性，不合法则提示且不清空桌面
+                    // 先校验牌型合法性：不合法弹出红色提示框并给音效/振动反馈，桌面出牌与选择保持不变
                     val group = com.doudizhu.game.logic.CardRuleEngine.identify(selectedCards)
                     if (group.type == CardType.INVALID) {
-                        showError("牌型不合法，请重新选择", 2000)
+                        rejectPlay("牌型不合法，请重新选择", 2000)
                         return
                     }
                     // 检查是否能管上家（用规则引擎的正规合法校验，避免炸弹/火箭误判）
@@ -801,7 +796,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     val lastPlayer = gameEngine.stateMachine.lastPlayedPlayerIndex
                     if (lastGroup != null && lastPlayer != 0) {
                         if (!com.doudizhu.game.logic.CardRuleEngine.isValidPlay(group, lastGroup)) {
-                            showError("打不过上家的牌，请重新选择", 2000)
+                            rejectPlay("打不过上家的牌，请重新选择", 2000)
                             return
                         }
                     }
@@ -811,7 +806,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     hapticActionConfirm()
                     gameEngine.humanPlay(selectedCards)
                 } else {
-                    showError("请先选择要出的牌", 1500)
+                    rejectPlay("请先选择要出的牌", 1500)
                 }
             }
             action == "pass" -> {
@@ -829,7 +824,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     }
                     sfx { it.confirm() }
                 } else {
-                    showError("没有能出的牌", 1500)
+                    rejectPlay("没有能出的牌", 1500)
                 }
                 refresh()
             }
@@ -978,10 +973,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 轮到你出牌提示（出牌按钮下方、手牌上方）
         drawHumanTurnTip(canvas)
 
-        // 消息
-        drawMessage(canvas)
-
-        // 错误提示
+        // 错误提示（红色弹窗，非法操作时弹出）
         drawError(canvas)
 
         // 计分显示
@@ -1950,7 +1942,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
             canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_ONLY_BASE_Y, textPaint)
         }
-        // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawMessage/drawStats 等下游绘制
+        // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawStats 等下游绘制
     }
 
     /** 替换颜色的 alpha 通道（供结算横幅文字跟随入场/淡出统一透明） */
@@ -2315,28 +2307,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_import")
     }
 
-    /** 消息提示 */
-    private fun drawMessage(canvas: Canvas) {
-        if (messageText.isEmpty()) return
-        if (System.currentTimeMillis() > messageTimer) { messageText = ""; return }
-
-        textPaint.textSize = 48f
-        textPaint.color = Color.parseColor("#FFD600")
-        textPaint.textAlign = Paint.Align.CENTER
-
-        val tw = textPaint.measureText(messageText)
-        val msgRect = RectF(
-            screenWidth / 2 - tw / 2 - 40f, screenHeight * 0.18f,
-            screenWidth / 2 + tw / 2 + 40f, screenHeight * 0.18f + 72f
-        )
-        canvas.drawRoundRect(msgRect, 16f, 16f, msgBgPaint)
-        canvas.drawText(messageText, screenWidth / 2f, screenHeight * 0.18f + 54f, textPaint)
-    }
-
-    /** 错误提示（红色） */
+    /** 错误提示（红色弹窗，非法操作时弹出；到期自动清除）。
+     *  注意：清除时必须再触发一次重绘——非 PLAYING 阶段（叫分/结算）画面静止时绘制线程会停帧，
+     *  若仅在此帧 return 而不 refresh，弹窗文字将残留在最后一帧画面上直到下一次刷新才消失。
+     *  （PLAYING 阶段本就逐帧重绘，此处多发的一次 refresh 会被立即消费，无额外开销） */
     private fun drawError(canvas: Canvas) {
         if (errorText.isEmpty()) return
-        if (System.currentTimeMillis() > errorTimer) { errorText = ""; return }
+        if (System.currentTimeMillis() > errorTimer) { errorText = ""; refresh(); return }
 
         textPaint.textSize = 48f
         textPaint.color = Color.parseColor("#FF5252")
