@@ -1856,13 +1856,26 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
+    /**
+     * 结算横幅尺寸/字号常量：文字放大后统一由此派生（横幅高度、纵向渐变、各行基线），
+     * 调整字号或行距时只需改这里，避免出现「字大框小」或渐变与底框错位。
+     */
+    private val BANNER_TITLE_TEXT = 62f          // 胜负标题字号
+    private val BANNER_SCORE_TEXT = 56f          // 本局得分变化 + 倍数说明字号（与放大后的角色说明一致）
+    private val BANNER_SUB_TEXT = 56f            // 获胜方角色说明字号（原 28f，按要求放大一倍）
+    private val BANNER_TITLE_BASE_Y = 84f        // 标题基线（相对横幅顶部）
+    private val BANNER_SCORE_BASE_Y = 158f       // 得分行基线
+    private val BANNER_SUB_BASE_Y = 226f         // 角色说明基线
+    private val BANNER_SUB_ONLY_BASE_Y = 176f    // 无得分行时角色说明基线（上移补位）
+    private val BANNER_HEIGHT = 258f             // 横幅高度（须与渐变终止坐标一致）
+
     /** 结算横幅纵向渐变缓存：入场动画期间 by 每帧变化，用画布平移对准位置复用，避免逐帧 new */
     private val bannerGradWin = LinearGradient(
-        0f, 0f, 0f, 210f,
+        0f, 0f, 0f, BANNER_HEIGHT,
         Color.parseColor("#FFD54F"), Color.parseColor("#F57F17"), Shader.TileMode.CLAMP
     )
     private val bannerGradLose = LinearGradient(
-        0f, 0f, 0f, 210f,
+        0f, 0f, 0f, BANNER_HEIGHT,
         Color.parseColor("#90A4AE"), Color.parseColor("#455A64"), Shader.TileMode.CLAMP
     )
 
@@ -1901,8 +1914,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 文字整体透明度跟随入场/淡出（alpha=255 时与不设置完全等价，正常态零开销）
         val textAlpha = (255 * appear).toInt().coerceIn(0, 255)
 
-        val bw = min(screenWidth * 0.62f, 820f)
-        val bh = 210f
+        // 字号放大后横幅加宽：保证「本局 +N 分（倍数说明）」一行在最小屏上也能容纳
+        val bw = min(screenWidth * 0.78f, 1040f)
+        val bh = BANNER_HEIGHT
         val bx = (screenWidth - bw) / 2f
         val by = screenHeight * 0.16f - (1f - e) * 60f
 
@@ -1919,22 +1933,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.restore()
 
         textPaint.textAlign = Paint.Align.CENTER   // 共享画笔默认 CENTER，显式声明防上游残留 LEFT
-        textPaint.textSize = 62f
+        textPaint.textSize = BANNER_TITLE_TEXT
         textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha)
-        drawTextWithShadow(canvas, title, screenWidth / 2f, by + 76f, textPaint,
+        drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y, textPaint,
             withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha))
         // hasScore=false（未提供积分）时不画得分行，副题上移补位，避免横幅中部留大片空白
         if (hasScore) {
-            textPaint.textSize = 40f
+            textPaint.textSize = BANNER_SCORE_TEXT
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
-            canvas.drawText(scoreLine, screenWidth / 2f, by + 132f, textPaint)
-            textPaint.textSize = 28f
+            canvas.drawText(scoreLine, screenWidth / 2f, by + BANNER_SCORE_BASE_Y, textPaint)
+            textPaint.textSize = BANNER_SUB_TEXT
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC"), textAlpha)
-            canvas.drawText(sub, screenWidth / 2f, by + 178f, textPaint)
+            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_BASE_Y, textPaint)
         } else {
-            textPaint.textSize = 40f
+            textPaint.textSize = BANNER_SUB_TEXT
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
-            canvas.drawText(sub, screenWidth / 2f, by + 150f, textPaint)
+            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_ONLY_BASE_Y, textPaint)
         }
         // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawMessage/drawStats 等下游绘制
     }
