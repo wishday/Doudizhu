@@ -243,6 +243,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
 
+    /** 电脑「思考中」提示字号（基线值，绘制时放大 2 倍） */
+    private val AI_THINKING_TIP_TEXT_SIZE = 44f
+
+    /** 「不出」气泡文字字号：与「电脑A/B思考中」（放大 2 倍后）保持一致 */
+    private val PASS_BUBBLE_TEXT_SIZE = AI_THINKING_TIP_TEXT_SIZE * 2f
+
     /** 「不出」气泡状态：各玩家槽位最近一次过牌的时间戳与代号（-1 表示无气泡；新一轮由 clearAllPlayedCards 清除） */
     private val passAnimStart = LongArray(3)
     private val passSlotEpoch = IntArray(3) { -1 }
@@ -1243,37 +1249,41 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 「不出」气泡：牌背下方居中，圆角胶囊 + 尾尖指向头像区，淡入动画；
         // 不自动消退：一直显示到其它玩家出牌/过牌（registerPassBubble 清除）或新一手清桌（clearAllPlayedCards）
+        // 文字字号与「电脑A/B思考中」（放大 2 倍后）保持一致，胶囊尺寸随文字宽度自适应
         if (showPassBubble) {
             val elapsed = System.currentTimeMillis() - passAnimStart[playerIndex]
             val appear = (elapsed.toFloat() / PASS_BUBBLE_FADEIN_MS).coerceIn(0f, 1f)
             val e = easeOutCubic(appear)
             val label = "不出"
-            textPaint.textSize = 40f
+            textPaint.textSize = PASS_BUBBLE_TEXT_SIZE
             val tw = textPaint.measureText(label)
-            val bw = tw + 56f
-            val bh = 66f
+            // 胶囊内边距按字号比例（原 40f 字号：横向 ±28f、纵向 ±13f）等比放大
+            val bw = tw + PASS_BUBBLE_TEXT_SIZE * 1.8f
+            val bh = PASS_BUBBLE_TEXT_SIZE * 2.35f
             val bx = centerX - bw / 2f
             val by = topY + panelH + 16f + aiBackH + 26f - (1f - e) * 14f
             passBubblePaint.alpha = (200 * e).toInt().coerceIn(0, 255)
             canvas.drawRoundRect(RectF(bx, by, bx + bw, by + bh), bh / 2f, bh / 2f, passBubblePaint)
-            // 尾尖小三角（指向上方牌堆）
+            // 尾尖小三角（指向上方牌堆）：随气泡放大同比加宽加高，保持比例
             passTrianglePath.reset()
-            passTrianglePath.moveTo(centerX - 12f, by + 2f)
-            passTrianglePath.lineTo(centerX + 12f, by + 2f)
-            passTrianglePath.lineTo(centerX, by - 14f)
+            passTrianglePath.moveTo(centerX - 18f, by + 2f)
+            passTrianglePath.lineTo(centerX + 18f, by + 2f)
+            passTrianglePath.lineTo(centerX, by - 20f)
             passTrianglePath.close()
             canvas.drawPath(passTrianglePath, passBubblePaint)
             passBubblePaint.alpha = 255
             textPaint.color = Color.parseColor("#ECEFF1")
             textPaint.textAlign = Paint.Align.CENTER
+            // 文字垂直居中偏移随字号等比缩放（原 40f 字号对应 +14f，即 0.35×字号）
+            val textBaselineY = by + bh / 2f + PASS_BUBBLE_TEXT_SIZE * 0.35f
             // 淡入期间文字透明度跟随气泡底漆（drawTextWithShadow 内部会改 color，故此处用 ARGB 直接控制）
             if (e < 1f) {
                 val ta = (236 * e).toInt().coerceIn(0, 255)   // 基色 #ECEFF1 各通道约 236+，取整体 alpha
                 textPaint.color = Color.argb(ta, 236, 239, 241)
-                canvas.drawText(label, centerX, by + bh / 2f + 14f, textPaint)
+                canvas.drawText(label, centerX, textBaselineY, textPaint)
                 textPaint.color = Color.parseColor("#ECEFF1")
             } else {
-                canvas.drawText(label, centerX, by + bh / 2f + 14f, textPaint)
+                canvas.drawText(label, centerX, textBaselineY, textPaint)
             }
         }
     }
@@ -1286,7 +1296,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawAiTurnTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != playerIndex) return
-        textPaint.textSize = 44f
+        // 字号放大 2 倍（44f -> 88f）；「不出」气泡文字与此处保持一致
+        textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE * 2f
         // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制（如中央出牌的绿色玩家名）
         // 会残留其颜色；不显式设色时提示文字会偶发变成绿色/白色（bug 修复）
         textPaint.color = Color.parseColor("#FFD600")
