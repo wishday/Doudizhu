@@ -234,16 +234,22 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         // 恢复大师模式 AI 策略设置
         loadMasterStrategy()
 
-        // 全屏显示
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
+        // 全屏显示。注意：requestWindowFeature(FEATURE_NO_TITLE) 必须在创建任何
+        // AppCompat 子装饰（如 WindowCompat.setDecorFitsSystemWindows 触发的
+        // ensureSubDecor）之前调用；一旦提前实例化 delegate 的 sub-decor，
+        // requestFeature 会抛 IllegalStateException("Features must be requested
+        // before the activity is displayed")，导致 onCreate 打开即闪退。
+        // 主题 Theme.DouDiZhu 已是 NoActionBar，此处 try/catch 双重防御。
+        try {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+        } catch (_: Throwable) {}
         window.setFlags(
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
         )
-        // 沉浸式 + 挖孔屏适配：让内容延伸到刘海/挖孔区域，横屏无黑边
-        applyImmersiveFullscreen()
 
-        // 创建游戏视图
+        // 创建游戏视图（放在沉浸设置之前：先完成 setContentView/sub-decor 初始化，
+        // 之后的 WindowCompat.setDecorFitsSystemWindows 等调用不会再触发 feature 冲突）
         gameSurfaceView = GameSurfaceView(this)
 
         // 初始化游戏引擎
@@ -294,6 +300,12 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameSurfaceView.onImportConfirmed = { applyImportedBackup() }
 
         setContentView(gameSurfaceView)
+
+        // 沉浸式 + 挖孔屏适配：让内容延伸到刘海/挖孔区域，横屏无黑边。
+        // 必须放在 setContentView 之后：WindowCompat.setDecorFitsSystemWindows
+        // 会触发 AppCompat ensureSubDecor，若在 requestWindowFeature 之前调用
+        // 会导致后续 requestFeature 抛异常（打开即闪退）。
+        applyImmersiveFullscreen()
     }
 
     /**
@@ -304,14 +316,36 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
      *    消除全面屏手势白条的白底（旧版 systemUiVisibility 无法控制 gesture handle）。
      */
     private fun applyImmersiveFullscreen() {
+        // 整体兜底：沉浸式/挖孔相关 API（LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS、
+        // isNavigationBarContrastEnforced 等）在个别厂商 ROM 上可能抛出 NoSuchFieldError /
+        // NoSuchMethodError 等 Error（Exception 捕获不到），一旦在 onCreate/onWindowFocusChanged
+        // 中抛出会直接导致打开即闪退。此处捕获 Throwable，失败仅影响沉浸效果，不影响启动。
+        try {
+            applyImmersiveFullscreenInner()
+        } catch (_: Throwable) {}
+    }
+
+    private fun applyImmersiveFullscreenInner() {
         // 关键：允许内容绘制到刘海/挖孔区域。
         // R(API 30)+ 用 ALWAYS（横竖屏任意侧挖孔都填充）；
         // P(API 28-29) 与 O_MR1(API 27) 只有 shortEdges（横屏左右短边挖孔）；
         // 更早版本无挖孔屏，忽略。
+        // 注意：LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS 是 API 30 新增常量，部分厂商 ROM /
+        // 旧工具链生成的 APK 在低版本设备上运行时按名字解析该字段会抛 NoSuchFieldError，
+        // 导致 onCreate 直接崩溃（打开即闪退）。此处用数值 3 + try/catch 双重防御。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.attributes = window.attributes.apply {
-                layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            try {
+                window.attributes = window.attributes.apply {
+                    layoutInDisplayCutoutMode = 3 // LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                }
+            } catch (_: Throwable) {
+                // ALWAYS 设置失败时回退为 shortEdges（API 27+ 稳定可用）
+                try {
+                    window.attributes = window.attributes.apply {
+                        layoutInDisplayCutoutMode =
+                            WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+                } catch (_: Throwable) {}
             }
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             window.attributes = window.attributes.apply {
@@ -332,12 +366,13 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             // 内容铺满整屏（含状态栏/导航栏区域）
             WindowCompat.setDecorFitsSystemWindows(window, false)
             // 方案 b：关闭导航栏对比度遮罩 + 透明导航栏背景。
-            // 原 Manifest 属性 android:enforceNavigationBarContrast="false"
-            // 在 minSdk=24 下会导致 AAPT 编译失败（资源定义于 API 29），
-            // 故改用代码等效设置；二者均为 API 29+ 方法，本分支（API 30+）安全。
+            // isNavigationBarContrastEnforced 是 API 29 新增方法，个别 ROM 上可能缺失
+            // （调用抛 NoSuchMethodError），try/catch 防御避免 onCreate 闪退。
             @Suppress("DEPRECATION")
             window.setNavigationBarColor(android.graphics.Color.TRANSPARENT)
-            window.isNavigationBarContrastEnforced = false
+            try {
+                window.isNavigationBarContrastEnforced = false
+            } catch (_: Throwable) {}
         } else {
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
