@@ -171,13 +171,11 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                     os.write(json.toByteArray(Charsets.UTF_8))
                 } ?: throw IOException("无法写入文件")
                 runOnUiThread {
-                    gameSurfaceView.showMessage("已导出备份", 1500)
-                    gameSurfaceView.refresh()
+                    toast("已导出备份")
                 }
             } catch (_: Exception) {
                 runOnUiThread {
-                    gameSurfaceView.showMessage("导出失败", 1500)
-                    gameSurfaceView.refresh()
+                    toast("导出失败")
                 }
             }
         }
@@ -199,8 +197,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 }
             } catch (_: Exception) {
                 runOnUiThread {
-                    gameSurfaceView.showMessage("导入失败：文件无效", 1500)
-                    gameSurfaceView.refresh()
+                    toast("导入失败：文件无效")
                 }
             }
         }
@@ -222,8 +219,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameSurfaceView.setMasterStrategy(data.farmer, data.hint)
         gameSurfaceView.setMasterThinkSeconds(data.sec)
         for ((m, st) in stats) gameSurfaceView.setModeStats(m, st.score, st.games, st.wins)
-        gameSurfaceView.showMessage("已导入备份", 1500)
-        gameSurfaceView.refresh()
+        toast("已导入备份")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -412,30 +408,19 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
-            val name = gameEngine.players[playerIndex].name
-            if (playerIndex == 0) {
-                gameSurfaceView.showMessage("轮到你叫分", 2000)
-            } else {
-                gameSurfaceView.showMessage("$name 正在思考...", 1500)
-            }
             gameSurfaceView.refresh()
         }
     }
 
     override fun onPlayerBid(playerIndex: Int, score: Int) {
         runOnUiThread {
-            val name = gameEngine.players[playerIndex].name
-            val text = if (score == 0) "$name 不叫" else "$name 叫 $score 分"
-            gameSurfaceView.showMessage(text, 1500)
             gameSurfaceView.refresh()
         }
     }
 
     override fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>) {
         runOnUiThread {
-            val name = gameEngine.players[landlordIndex].name
-            val cards = bottomCards.joinToString(" ") { it.toString() }
-            gameSurfaceView.showMessage("$name 成为地主！底牌: $cards", 3000)
+            // 底牌已在顶部中央翻面展示（drawBottomCards），不再叠加文字提示条
             gameSurfaceView.refresh()
         }
     }
@@ -448,11 +433,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onPlayerPlay(playerIndex: Int, cards: List<Card>, group: CardGroup) {
         runOnUiThread {
+            // 新一手开始：清空桌面后展示本手出牌（结算时不清空，最后一手牌留在桌上）
             gameSurfaceView.clearAllPlayedCards()
             gameSurfaceView.setTablePlayedCards(playerIndex, cards)
-            val name = gameEngine.players[playerIndex].name
-            val cardText = cards.joinToString(" ") { it.toString() }
-            gameSurfaceView.showMessage("$name: $cardText", 2000)
             // 炸弹/火箭用爆炸轰鸣音效，普通牌型用甩牌声
             gameSurfaceView.playCardSound(
                 isBomb = group.type == CardType.BOMB || group.type == CardType.ROCKET)
@@ -530,6 +513,11 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             gameSurfaceView.refresh()
             saveStats()
         }
+    }
+
+    /** 轻量系统提示（替代原游戏内消息提示条：仅用于备份导入/导出等操作反馈） */
+    private fun toast(msg: String) {
+        android.widget.Toast.makeText(this, msg, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     override fun onPause() {
