@@ -83,7 +83,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     // ====== 画笔 ======
-    private val bgPaint = Paint().apply { style = Paint.Style.FILL }
+    // isDither：软件渲染下对渐变做有序抖动，消除 8-bit 量化导致的色阶带（背景/光晕/暗角）。
+    // 注意：bgPaint / vignettePaint 仅用于绘制渐变 shader；ovalPaint 还兼画纯色椭圆装饰，
+    // 故不给 ovalPaint 开启 dither——有序抖动会让纯色填充出现可见的网点纹理。
+    private val bgPaint = Paint().apply { style = Paint.Style.FILL; isDither = true }
     private val cardPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
     private val cardBorderPaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.STROKE; strokeWidth = 4f
@@ -116,6 +119,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     // ====== 缓存的装饰画笔（避免每帧分配 Paint 对象） ======
     private val ovalPaint = Paint().apply {
+        // 不加 isDither：此画笔兼画纯色椭圆装饰（见 drawBackground），抖动会产生网点纹理；
+        // 桌心柔光的渐变抖动已由 bgPaint / vignettePaint 覆盖
         color = Color.parseColor("#15491A"); style = Paint.Style.FILL; isAntiAlias = true
     }
     private val topBarPaint = Paint().apply { color = Color.parseColor("#80000000"); style = Paint.Style.FILL }
@@ -211,7 +216,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 暗角径向渐变缓存（屏幕尺寸变化时重建） */
     private var vignette: RadialGradient? = null
     private var vignetteKey = ""
-    private val vignettePaint = Paint().apply { isAntiAlias = false; style = Paint.Style.FILL }
+    private val vignettePaint = Paint().apply { isAntiAlias = false; style = Paint.Style.FILL; isDither = true }
 
     // ====== 新增：呼吸光晕/「不出」气泡/花色符号所需状态与画笔 ======
     /** 回合呼吸光晕 shader 缓存（半径/alpha 量化后按需重建，避免每帧分配） */
@@ -1014,10 +1019,16 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             bgGradientH = screenHeight.toFloat()
 
             // 桌心柔光（径向渐变，缓存复用）
+            // 半径必须 ≥ 光晕中心到屏幕最远角的距离：否则 CLAMP 外圈恒 alpha 带
+            // 被屏幕裁切成左右/上下对称的"椭圆弧形色阶"伪影（竖屏下旧值 max(w,h)*0.42
+            // 小于该距离，正是伪影成因）。取对角线 ×0.6（= 半对角线 ×1.2），在典型
+            // 9:16~9:20 竖屏与横屏下均可覆盖最远角；中心峰值亮度不变，
+            // 仅光晕铺展范围变大、边缘更柔和。
             val cx = screenWidth / 2f
             val cy = screenHeight * 0.40f
+            val glowRadius = hypot(screenWidth.toFloat(), screenHeight.toFloat()) * 0.6f
             tableGlow = RadialGradient(
-                cx, cy, max(screenWidth, screenHeight) * 0.42f,
+                cx, cy, glowRadius,
                 intArrayOf(Color.argb(46, 255, 248, 200), Color.argb(14, 255, 248, 200), Color.TRANSPARENT),
                 floatArrayOf(0f, 0.55f, 1f),
                 Shader.TileMode.CLAMP
@@ -1027,7 +1038,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 screenWidth / 2f, screenHeight / 2f,
                 hypot(screenWidth.toFloat(), screenHeight.toFloat()) / 2f,
                 intArrayOf(Color.TRANSPARENT, Color.argb(28, 0, 0, 0), Color.argb(96, 0, 0, 0)),
-                floatArrayOf(0.55f, 0.82f, 1f),
+                floatArrayOf(0.5f, 0.78f, 1f),
                 Shader.TileMode.CLAMP
             )
             vignetteKey = key
@@ -1060,7 +1071,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 screenWidth / 2f, screenHeight / 2f,
                 hypot(screenWidth.toFloat(), screenHeight.toFloat()) / 2f,
                 intArrayOf(Color.TRANSPARENT, Color.argb(28, 0, 0, 0), Color.argb(96, 0, 0, 0)),
-                floatArrayOf(0.55f, 0.82f, 1f),
+                floatArrayOf(0.5f, 0.78f, 1f),
                 Shader.TileMode.CLAMP
             )
             vignetteKey = key
@@ -1079,7 +1090,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
-    /** 生成绿呢噪点纹理：透明底 + 极淡的明/暗颗粒（约 8% 覆盖率），REPEAT 平铺无缝 */
+    /** 生成绿呢噪点纹理：透明底 + 明/暗颗粒（约 20% 覆盖率），REPEAT 平铺无缝。
+     *  颗粒 alpha 在 6~14 间随机抖动，兼作蓝噪 dithering，打散渐变的量化色阶带 */
     private fun buildClothNoise(): Bitmap? {
         return try {
             val size = 96
@@ -1089,8 +1101,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             for (i in px.indices) {
                 val r = rnd.nextDouble()
                 px[i] = when {
-                    r < 0.04 -> Color.argb(10, 255, 255, 240)   // 亮粒（受光绒毛）
-                    r < 0.08 -> Color.argb(12, 0, 0, 0)          // 暗粒（绒毛阴影）
+                    // 亮粒（受光绒毛）：alpha 6~14 随机
+                    r < 0.10 -> Color.argb(6 + rnd.nextInt(9), 255, 255, 240)
+                    // 暗粒（绒毛阴影）：alpha 6~14 随机
+                    r < 0.20 -> Color.argb(6 + rnd.nextInt(9), 0, 0, 0)
                     else -> Color.TRANSPARENT
                 }
             }
