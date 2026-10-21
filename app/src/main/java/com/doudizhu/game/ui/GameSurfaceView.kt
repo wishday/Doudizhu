@@ -273,6 +273,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var bidSnapshot: BidSnapshot? = null
     /** 叫分阶段提示字号：与「不出」气泡、「电脑A/B思考中」文字一致（44f） */
     private val AI_BID_TIP_TEXT_SIZE = PASS_BUBBLE_TEXT_SIZE
+
+    /** 每条叫分结果（叫X分 / 不叫）在屏幕上必须完整展示的最短时长（毫秒），
+     *  与引擎 `GameEngine.AI_BID_RESULT_HOLD_MS` 严格一致：UI 以此作为「节拍保护期」，
+     *  期间既不绘制也不响应玩家的叫分按钮，确保玩家一定看得见每一条已公布的叫分。 */
+    private val BID_RESULT_MIN_REVEAL_MS = 1500L
+
+    /** 最近一次「某位玩家的叫分结果上屏」的时刻（毫秒，0=本轮尚无结果）。
+     *  在 updateBidDisplay 收到新的已行动者时刷新；开始发牌 / 新一轮叫分时清零。
+     *  @Volatile：绘制线程读取、UI 线程写入。 */
+    @Volatile
+    private var lastBidRevealTimeMs = 0L
     /** 过牌代号计数器：每次任意玩家过牌自增，用于区分"连续两次不出"与新的一手 */
     private var passEpochCounter = 0
     /** 「不出」气泡淡入动画时长（ms）：仅用于驱动淡入期间的持续重绘；气泡本身不自动消退 */
@@ -305,8 +316,45 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             bidScores.getOrElse(i) { 0 }.coerceIn(0, 3)
         }
         val safeDone = BooleanArray(3) { i -> bidDone.getOrElse(i) { false } }
+        val prevDone = bidSnapshot?.done
+        val newlyRevealed = prevDone == null ||
+            (0 until 3).any { i -> safeDone[i] && !(prevDone.getOrNull(i) ?: false) }
+        if (newlyRevealed) {
+            // 有新的叫分结果上屏：开启节拍保护期（期间不出现玩家的叫分按钮），
+            // 并安排一次到期强制重绘——叫分阶段画面静止会停帧，若不补这一帧，
+            // 保护期结束后按钮可能迟迟不出现。
+            lastBidRevealTimeMs = System.currentTimeMillis()
+            scheduleBidHoldExpiryRedraw()
+        }
         bidSnapshot = BidSnapshot(phase, safeScores, safeDone)
         refresh()
+    }
+
+    /** 节拍保护期到期后强制重绘一帧（Handler.postDelayed 保证绘制线程已停帧时也能唤醒） */
+    private fun scheduleBidHoldExpiryRedraw() {
+        removeCallbacks(bidHoldExpiryRunnable)
+        postDelayed(bidHoldExpiryRunnable, BID_RESULT_MIN_REVEAL_MS + 60L)
+    }
+
+    private val bidHoldExpiryRunnable = Runnable {
+        // 保护期结束：刷新画面（此时轮到玩家的话，叫分按钮应正常出现）
+        refresh()
+        // 兜底二：若此刻恰好处于「xx开始叫地主 / xx成为地主」中央弹窗展示期——
+        // 弹窗的关闭回调由**绘制线程**在到期那一帧执行（drawLandlordPopup），而该帧发布的
+        // currentButtons 仍是保护期内未注册叫分按钮的旧列表；此后画面静止、绘制线程停帧，
+        // 弹窗消失后若无新帧发布，叫分按钮虽被绘制却不在触摸命中列表中，导致"看得见点不动"。
+        // 这里再补一次延时重绘：最后一帧在无保护期状态下发布，重新注册叫分按钮。
+        if (landlordPopupActive()) {
+            postDelayed({ refresh() }, LANDLORD_POPUP_MS + 120L)
+        }
+    }
+
+    /** 清除叫分节拍状态（新一轮发牌 / 新一轮叫分时调用）：
+     *  防止上一局的叫分时间戳残留导致本局保护期为 0，
+     *  出现「刚显示电脑叫3分就直接弹成为地主并进得出牌阶段」的异常节奏。 */
+    private fun resetBidRhythm() {
+        lastBidRevealTimeMs = 0L
+        removeCallbacks(bidHoldExpiryRunnable)
     }
 
     /** 主动清除叫分展示（保留给外部流程显式调用；正常情况下由 clearAllPlayedCards 统一清除） */
@@ -343,9 +391,27 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         showCenterPopup("${name}成为地主", LANDLORD_POPUP_MS, onDismiss)
     }
 
-    /** 地主弹窗是否仍在展示期内（供 shouldDraw 持续重绘以便到期自动消失） */
+    /** 地主/中央提示弹窗是否仍在展示期内（供 shouldDraw 持续重绘以便到期自动消失） */
     private fun landlordPopupActive(): Boolean =
         landlordPopupText.isNotEmpty() && System.currentTimeMillis() <= landlordPopupUntil
+
+    /**
+     * 「叫分节拍保护期」：以下时段内**禁止绘制与响应玩家的叫分按钮**——
+     *  1) 中央「xx开始叫地主」提示框展示期间；
+     *  2) 任意一位玩家（含电脑）的叫分结果刚公布、屏幕尚未完整展示满一次保留时长
+     *     （[BID_RESULT_MIN_REVEAL_MS]，与引擎的 AI_BID_RESULT_HOLD_MS 一致）时。
+     * 若不做此保护，会出现两类异常：
+     *  - 电脑A 叫3分后，其「叫3分」还没看清就直接弹「电脑A成为地主」并进得出牌画面
+     *    （上一局的叫分时间戳残留导致保留期为 0）；
+     *  - 轮到电脑先叫分时，其结果还没上屏，玩家的「不叫 / 1分 / 2分 / 3分」按钮就提前出现。
+     * 用 currentTimeMillis 判断（与 lastBidRevealTimeMs 同一时钟），静止停帧时也不会误判。
+     */
+    private fun isBidHoldActive(): Boolean {
+        if (!::gameEngine.isInitialized) return false
+        if (landlordPopupActive()) return true
+        val t = lastBidRevealTimeMs
+        return t > 0L && System.currentTimeMillis() - t < BID_RESULT_MIN_REVEAL_MS
+    }
 
     /** 绘制「xx成为地主」中央弹窗：屏幕正中深色圆角底 + 金色大字；到期清除并触发关闭回调 */
     private fun drawLandlordPopup(canvas: Canvas) {
@@ -645,6 +711,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 叫分阶段：画面本身静止（已无「思考中」省略号等逐帧动画），仅在待重绘请求或弹窗活动期刷新
         // 「xx成为地主」弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段的回调
         if (landlordPopupActive()) return true
+        // 叫分节拍保护期内也需持续重绘：保护期结束（玩家的叫分按钮该出现/该消失）时能立刻刷新一帧，
+        // 否则静止停帧会让按钮延迟到下一次状态变化才出现
+        if (phase == GamePhase.BIDDING && lastBidRevealTimeMs > 0L) {
+            if (System.currentTimeMillis() - lastBidRevealTimeMs < BID_RESULT_MIN_REVEAL_MS + 120L) return true
+        }
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
         // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
         // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
@@ -749,8 +820,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             tablePlayedCards[i] = null
             passSlotEpoch[i] = -1
         }
-        // 开始发牌：清除叫分阶段的两台电脑叫分显示
+        // 开始发牌：清除叫分阶段的两台电脑叫分显示与节拍状态（防止上一局残留影响本局节奏）
         bidSnapshot = null
+        resetBidRhythm()
     }
 
     // ==================== 触摸事件（支持滑动选牌 + 按钮按压反馈） ====================
@@ -947,6 +1019,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 refresh()
             }
             action.startsWith("bid_") -> {
+                // 节拍保护期内（上一条叫分结果尚未完整展示满 1.5s）忽略叫分点击：
+                // 正常情况下此时按钮并未绘制/注册，这里再兜一层防止旧帧的按钮被误触，
+                // 出现"电脑的叫分还没看清就被玩家的叫分抢拍推进"。
+                if (isBidHoldActive()) {
+                    refresh()
+                    return
+                }
                 hapticActionConfirm()
                 gameEngine.humanBid(action.removePrefix("bid_").toInt())
                 sfx { it.confirm() }
@@ -1972,31 +2051,36 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
             // 叫地主阶段
             phase == GamePhase.BIDDING && currentPlayer == 0 -> {
-                // 只显示允许的分数（必须高于当前最高分，否则不叫）
-                val maxBid = gameEngine.stateMachine.currentMaxBid
-                val allowedScores = listOf(0, 1, 2, 3).filter { it == 0 || it > maxBid }
-                // 按钮数量多时按屏幕宽度缩小，避免溢出屏幕
-                val bidCount = allowedScores.size
-                val rawTotal = btnW * bidCount + gap * (bidCount - 1)
-                if (rawTotal > screenWidth) {
-                    btnW = ((screenWidth - gap * (bidCount - 1)) / bidCount).coerceAtLeast(120f)
-                }
-                val totalW = btnW * bidCount + gap * (bidCount - 1)
-                val startX = (screenWidth - totalW) / 2
-                val y = screenHeight - cardH - 380f  // 位置上移
+                // 节拍保护期内（「xx开始叫地主」提示框展示中 / 某位玩家的叫分结果尚未完整展示满 1.5s）
+                // **不绘制、也不注册**玩家的叫分按钮：避免"电脑的叫分还没看清，玩家的不叫/1分/2分/3分
+                // 就提前冒出来"甚至抢在电脑之前叫分打断节奏。保护期结束由持续重绘自动恢复按钮。
+                if (!isBidHoldActive()) {
+                    // 只显示允许的分数（必须高于当前最高分，否则不叫）
+                    val maxBid = gameEngine.stateMachine.currentMaxBid
+                    val allowedScores = listOf(0, 1, 2, 3).filter { it == 0 || it > maxBid }
+                    // 按钮数量多时按屏幕宽度缩小，避免溢出屏幕
+                    val bidCount = allowedScores.size
+                    val rawTotal = btnW * bidCount + gap * (bidCount - 1)
+                    if (rawTotal > screenWidth) {
+                        btnW = ((screenWidth - gap * (bidCount - 1)) / bidCount).coerceAtLeast(120f)
+                    }
+                    val totalW = btnW * bidCount + gap * (bidCount - 1)
+                    val startX = (screenWidth - totalW) / 2
+                    val y = screenHeight - cardH - 380f  // 位置上移
 
-                val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
-                val colors = mapOf(
-                    0 to Color.parseColor("#616161"), 1 to Color.parseColor("#1976D2"),
-                    2 to Color.parseColor("#F57C00"), 3 to Color.parseColor("#D32F2F")
-                )
-                val pressedColors = mapOf(
-                    0 to Color.parseColor("#424242"), 1 to Color.parseColor("#0D47A1"),
-                    2 to Color.parseColor("#E65100"), 3 to Color.parseColor("#B71C1C")
-                )
-                allowedScores.forEachIndexed { i, s ->
-                    addButton(canvas, target, labels[s]!!, startX + i * (btnW + gap), y, btnW, btnH,
-                        colors[s]!!, pressedColors[s]!!, "bid_$s")
+                    val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
+                    val colors = mapOf(
+                        0 to Color.parseColor("#616161"), 1 to Color.parseColor("#1976D2"),
+                        2 to Color.parseColor("#F57C00"), 3 to Color.parseColor("#D32F2F")
+                    )
+                    val pressedColors = mapOf(
+                        0 to Color.parseColor("#424242"), 1 to Color.parseColor("#0D47A1"),
+                        2 to Color.parseColor("#E65100"), 3 to Color.parseColor("#B71C1C")
+                    )
+                    allowedScores.forEachIndexed { i, s ->
+                        addButton(canvas, target, labels[s]!!, startX + i * (btnW + gap), y, btnW, btnH,
+                            colors[s]!!, pressedColors[s]!!, "bid_$s")
+                    }
                 }
             }
             // 出牌阶段
