@@ -320,6 +320,55 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
+    /** 「xx成为地主」中央弹窗（所有人叫分完成后弹出，保持 1.5s 后自动关闭并触发 onDismiss）。
+     *  @Volatile：绘制线程读取、UI 线程写入；到期清除时须再 refresh 一次，防止静止画面残留。 */
+    @Volatile
+    private var landlordPopupText = ""
+    @Volatile
+    private var landlordPopupUntil = 0L
+    private var onLandlordPopupDismiss: Runnable? = null
+    /** 地主弹窗展示时长（ms）：保持 1.5s 后关闭，随后进入正常出牌阶段 */
+    private val LANDLORD_POPUP_MS = 1500L
+
+    /** 显示「xx成为地主」弹窗（由 MainActivity 在叫分全部完成时调用）；
+     *  弹窗到期自动关闭后执行 onDismiss（进入出牌阶段）。重复调用以最后一次为准。 */
+    fun showLandlordPopup(name: String, onDismiss: () -> Unit) {
+        landlordPopupText = "${name}成为地主"
+        landlordPopupUntil = System.currentTimeMillis() + LANDLORD_POPUP_MS
+        onLandlordPopupDismiss = Runnable { post(onDismiss) }
+        refresh()
+    }
+
+    /** 地主弹窗是否仍在展示期内（供 shouldDraw 持续重绘以便到期自动消失） */
+    private fun landlordPopupActive(): Boolean =
+        landlordPopupText.isNotEmpty() && System.currentTimeMillis() <= landlordPopupUntil
+
+    /** 绘制「xx成为地主」中央弹窗：屏幕正中深色圆角底 + 金色大字；到期清除并触发关闭回调 */
+    private fun drawLandlordPopup(canvas: Canvas) {
+        val text = landlordPopupText
+        if (text.isEmpty()) return
+        if (System.currentTimeMillis() > landlordPopupUntil) {
+            landlordPopupText = ""
+            val cb = onLandlordPopupDismiss
+            onLandlordPopupDismiss = null
+            cb?.run()
+            // 必须再触发重绘：非逐帧阶段若仅 return 不刷新，弹窗会残留在最后一帧画面上
+            refresh()
+            return
+        }
+
+        textPaint.textSize = 56f
+        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.textAlign = Paint.Align.CENTER
+
+        val tw = textPaint.measureText(text)
+        val cx = screenWidth / 2f
+        val cy = screenHeight / 2f
+        val rect = RectF(cx - tw / 2 - 70f, cy - 80f, cx + tw / 2 + 70f, cy + 80f)
+        canvas.drawRoundRect(rect, 24f, 24f, errBgPaint)
+        drawTextWithShadow(canvas, text, cx, cy + 20f, textPaint, Color.parseColor("#FFD600"))
+    }
+
     /** 错误提示（红色弹窗）：仅在非法操作时弹出，展示到期后自动清除 */
     private var errorText = ""
     private var errorTimer = 0L
@@ -591,6 +640,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (phase == GamePhase.PLAYING) return true
         // 叫分阶段：轮到电脑时其下方「思考中」省略号需逐帧刷新（BIDDING 阶段画面本身是静止的）
         if (phase == GamePhase.BIDDING && bidSnapshot?.current?.let { it != 0 } == true) return true
+        // 「xx成为地主」弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段的回调
+        if (landlordPopupActive()) return true
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
         // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
         // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
@@ -899,6 +950,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
             action == "restart" -> {
                 clearAllPlayedCards()
+                // 重开新局：立即作废在途的「xx成为地主」弹窗（若此刻正处于弹窗 1.5s 等待期）
+                landlordPopupText = ""
+                onLandlordPopupDismiss = null
                 gameOverAnimStart = 0L   // 重置结算横幅时间轴，防止新一局 GAME_OVER 前误画残留横幅
                 hapticActionConfirm()
                 gameEngine.startNewGame()
@@ -907,6 +961,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             action == "start_master" -> startGameAt(Difficulty.MASTER)
             action == "to_menu" -> {
                 clearAllPlayedCards()
+                // 返回主界面：同样作废在途的地主弹窗，防止旧回调串场触发新对局状态切换
+                landlordPopupText = ""
+                onLandlordPopupDismiss = null
                 hapticActionConfirm()
                 gameEngine.returnToMenu()
             }
@@ -1042,6 +1099,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 错误提示（红色弹窗，非法操作时弹出）
         drawError(canvas)
+
+        // 「xx成为地主」中央弹窗（叫分全部完成后弹出，保持 1.5s；绘制在按钮之上确保居中显眼）
+        drawLandlordPopup(canvas)
 
         // 计分显示
         drawStats(canvas)

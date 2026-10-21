@@ -406,15 +406,36 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         }
     }
 
+    /** 叫分节奏控制：轮到电脑A/B 时，先在屏幕显示「思考中」提示并暂停保持约 1 秒，
+     *  到期后放行引擎 → 显示该电脑的叫分结果，然后进入下一位叫分。
+     *  （引擎侧 scheduleAIBid 排期 0.5s 计算并挂起叫分值；本 1s 放行到期必然在其之后，
+     *   「挂起值已算出 + UI 思考中已满 1s」两条件齐备才公布结果。） */
+    private val aiBidThinkingHoldMs = 1000L
+
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
-            // 叫分阶段：把各玩家当前叫分情况同步给绘制层（电脑下方显示）
+            // 立即发布快照：轮到电脑时其下方马上显示「思考中…」（省略号逐帧动画随之启动），
+            // 不延迟——否则前一位 AI 的结果会被新快照的「未行动」状态覆盖，屏幕出现空白闪烁。
             publishBidDisplay()
+            if (playerIndex != 0 && gameEngine.stateMachine.phase ==
+                com.doudizhu.game.state.GamePhase.BIDDING) {
+                // 轮到电脑A/B：思考中提示已上屏，保持约 1s 后再放行引擎公布其叫分结果并进入下一位。
+                // （引擎侧 scheduleAIBid 同时排期 0.5s 计算挂起叫分值；本 1s 到期放行必然在其之后，
+                //   两条件齐备时引擎才 processBid 公布结果。）
+                postDelayed({
+                    if (gameEngine.stateMachine.phase ==
+                        com.doudizhu.game.state.GamePhase.BIDDING &&
+                        gameEngine.stateMachine.currentPlayerIndex == playerIndex) {
+                        gameEngine.notifyAiBidThinkingShown()
+                    }
+                }, aiBidThinkingHoldMs)
+            }
         }
     }
 
     override fun onPlayerBid(playerIndex: Int, score: Int) {
         runOnUiThread {
+            // 某玩家叫分完毕：立即刷新展示——该电脑下方由「思考中」切换为叫分结果（叫X分/不叫）
             publishBidDisplay()
         }
     }
@@ -438,7 +459,20 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>) {
         runOnUiThread {
-            // 底牌已在顶部中央翻面展示（drawBottomCards），不再叠加文字提示条
+            // 所有人叫分完成：屏幕中央弹出「xx成为地主」，保持 1.5s；
+            // 弹窗关闭回调中清除所有电脑的叫分结果，然后引擎正式进入正常出牌阶段。
+            val landlordName = gameEngine.players[landlordIndex].name
+            gameSurfaceView.showLandlordPopup(landlordName) {
+                // 弹窗已关闭：先清除两台电脑的叫分展示，再切入出牌阶段（触发逐帧重绘，清屏立即生效）
+                gameSurfaceView.clearBidDisplay()
+                gameEngine.proceedAfterLandlordPopup()
+            }
+        }
+    }
+
+    override fun onBiddingProceed(landlordIndex: Int) {
+        runOnUiThread {
+            // 已进入出牌阶段：底牌在顶部中央翻面展示（drawBottomCards），刷新画面即可
             gameSurfaceView.refresh()
         }
     }
