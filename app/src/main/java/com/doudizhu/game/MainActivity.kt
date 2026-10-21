@@ -410,8 +410,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     }
 
     /** 叫分节奏控制（引擎侧实现，UI 仅被动展示快照）：轮到电脑A/B 时**不显示「思考中」**——
-     *  上一位叫分结果在其牌背下方保持展示约 1.5s（引擎暂停期，其间静默算好本位电脑的分数），
-     *  到期后立即公布本位电脑的叫分结果并进入下一位叫分。 */
+     *  引擎经极短反应间隔立即公布该电脑的叫分结果（显示在其牌背下方），**保留展示 1.5s** 后
+     *  再进入下一位叫分；所有人叫完 → 中央弹窗「xx成为地主」保持 1.5s
+     *  → 关闭后清除所有叫分结果 → 进入正常出牌阶段。 */
 
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
@@ -431,16 +432,15 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     /** 汇总当前叫分进度并发布到 GameSurfaceView（在两台电脑玩家下方显示各自的叫分情况）。
      *  已行动玩家取 Player.bidScore（引擎写入的有效叫分，0=不叫）；
-     *  是否"已行动"由状态机推断：叫分顺序为 firstBidder → +1 → +2（即 currentMaxBid 玩家、
-     *  maxBidPlayerIndex 玩家、以及 bidRoundCount==3 时的最后一名），避免改动引擎与状态机。 */
+     *  是否"已行动"由状态机直接判定：叫分顺序为 firstBidderIndex → +1 → +2，
+     *  前 bidRoundCount 位即已完成本轮叫分的玩家。 */
     private fun publishBidDisplay() {
         val sm = gameEngine.stateMachine
         val scores = IntArray(3) { i -> gameEngine.players[i].bidScore.coerceIn(0, 3) }
         val done = BooleanArray(3)
         if (sm.phase == com.doudizhu.game.state.GamePhase.BIDDING) {
-            val first = ((sm.currentPlayerIndex - sm.bidRoundCount) % 3 + 3) % 3
             for (i in 0 until sm.bidRoundCount.coerceAtMost(3)) {
-                done[(first + i) % 3] = true
+                done[(sm.firstBidderIndex + i) % 3] = true
             }
         }
         // 叫分阶段只展示已公布的叫分结果（不再显示「思考中」提示）
