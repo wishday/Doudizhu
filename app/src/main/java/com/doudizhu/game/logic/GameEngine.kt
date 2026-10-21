@@ -44,9 +44,10 @@ interface GameEngineCallback {
 class GameEngine {
 
     companion object {
-        /** 「轮到电脑A/B → 公布其叫分结果」之间的极短反应间隔（毫秒）：
-         *  仅避免结果在同一瞬间闪现，让"轮到→出结果"有可感知的先后次序。 */
-        private const val aiBidRevealDelayMs = 200L
+        /** 「轮到电脑A/B → 公布其叫分结果」之间的反应间隔（毫秒）：
+         *  叫分阶段全程不显示「思考中」，此间隔仅避免结果在同一瞬间闪现，
+         *  让"轮到→出结果"有可感知的先后次序。 */
+        private const val aiBidRevealDelayMs = 500L
 
         /** 「公布叫分结果 → 进入下一位叫分」之间的结果保留时长（毫秒）：
          *  即每条「叫X分 / 不叫」在屏幕上保持 1.5s 后才推进下一位，与需求严格一致。 */
@@ -110,7 +111,7 @@ class GameEngine {
      * 则补足延时后再出牌，避免电脑出牌过快导致玩家看不清节奏。
      * 只作用于电脑自动出牌链路，不影响玩家点「提示」（getHint 为同步调用，与此无关）。
      */
-    private val MIN_AI_TURN_MS = 1500L
+    private val MIN_AI_TURN_MS = 2000L
     /** 提示（getHint）同步搜索时长预算（毫秒），必须小以免卡 UI */
     private val HINT_DEADLINE_MS = 300L
     /** 提示（getHint）同步搜索节点预算 */
