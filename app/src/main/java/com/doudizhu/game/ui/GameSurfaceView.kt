@@ -260,16 +260,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         /** 各玩家有效叫分（0=不叫/未叫），下标即玩家槽位 */
         val scores: IntArray,
         /** 各玩家是否已完成本轮叫分 */
-        val done: BooleanArray,
-        /** 当前正在叫分的玩家（用于"思考中"提示） */
-        val current: Int
+        val done: BooleanArray
     ) {
         override fun equals(other: Any?): Boolean =
             other is BidSnapshot && phase == other.phase && scores.contentEquals(other.scores) &&
-                done.contentEquals(other.done) && current == other.current
+                done.contentEquals(other.done)
 
         override fun hashCode(): Int =
-            ((phase.hashCode() * 31 + current) * 31 + scores.contentHashCode()) * 31 + done.contentHashCode()
+            (phase.hashCode() * 31 + scores.contentHashCode()) * 31 + done.contentHashCode()
     }
     @Volatile
     private var bidSnapshot: BidSnapshot? = null
@@ -298,9 +296,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
      *  把各电脑玩家"已叫的分数 / 不叫 / 尚未行动"整组快照原子发布给绘制线程，
      *  绘制时显示在该电脑牌背下方；发牌开始时由 clearAllPlayedCards 清除。
      *  @param bidScores 各玩家本轮有效叫分（0=不叫或尚未叫）
-     *  @param bidDone   各玩家是否已完成本轮叫分
-     *  @param currentBidder 当前正在叫分的玩家索引 */
-    fun updateBidDisplay(bidScores: IntArray, bidDone: BooleanArray, currentBidder: Int) {
+     *  @param bidDone   各玩家是否已完成本轮叫分 */
+    fun updateBidDisplay(bidScores: IntArray, bidDone: BooleanArray) {
         if (!::gameEngine.isInitialized) return
         val phase = gameEngine.stateMachine.phase
         // 越界值钳制到合法叫分范围，避免脏数据直接画出屏幕
@@ -308,7 +305,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             bidScores.getOrElse(i) { 0 }.coerceIn(0, 3)
         }
         val safeDone = BooleanArray(3) { i -> bidDone.getOrElse(i) { false } }
-        bidSnapshot = BidSnapshot(phase, safeScores, safeDone, currentBidder)
+        bidSnapshot = BidSnapshot(phase, safeScores, safeDone)
         refresh()
     }
 
@@ -366,7 +363,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val cy = screenHeight / 2f
         val rect = RectF(cx - tw / 2 - 70f, cy - 80f, cx + tw / 2 + 70f, cy + 80f)
         canvas.drawRoundRect(rect, 24f, 24f, errBgPaint)
-        drawTextWithShadow(canvas, text, cx, cy + 20f, textPaint, Color.parseColor("#FFD600"))
+        drawTextWithShadow(canvas, text, cx, cy + 20f, textPaint)
     }
 
     /** 错误提示（红色弹窗）：仅在非法操作时弹出，展示到期后自动清除 */
@@ -638,8 +635,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val phase = gameEngine.stateMachine.phase
         // 出牌阶段：呼吸光晕/思考省略号等连续动画需逐帧刷新
         if (phase == GamePhase.PLAYING) return true
-        // 叫分阶段：轮到电脑时其下方「思考中」省略号需逐帧刷新（BIDDING 阶段画面本身是静止的）
-        if (phase == GamePhase.BIDDING && bidSnapshot?.current?.let { it != 0 } == true) return true
+        // 叫分阶段：画面本身静止（已无「思考中」省略号等逐帧动画），仅在待重绘请求或弹窗活动期刷新
         // 「xx成为地主」弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段的回调
         if (landlordPopupActive()) return true
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
@@ -1419,15 +1415,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.color = Color.parseColor("#FFD600")
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, thinkingTip(playerIndex), centerX,
-            topY + 180f + 16f + aiBackH + 52f, textPaint, Color.parseColor("#FFD600"))
+            topY + 180f + 16f + aiBackH + 52f, textPaint)
     }
 
     /**
      * 叫分阶段：在两台电脑玩家的牌背下方分别显示其叫分情况。
      * - 已叫分：显示「叫1分 / 叫2分 / 叫3分」（金色）；不叫：显示「不叫」（灰色）
-     * - 轮到该电脑但尚未行动：显示「电脑A/B思考中」+ 动态省略号（与出牌阶段提示同款文案，
-     *   字号统一为 44f）
-     * - 其它玩家（未轮到）：不显示任何内容
+     * - 尚未行动的玩家：**不显示任何内容**（不再出现「电脑A/B思考中」提示——
+     *   叫分节奏由引擎控制：每位结果展示后暂停约 1.5s 才进入下一位，结果上屏即清晰可读）
      * 数据来自 updateBidDisplay 发布的快照；开始发牌（clearAllPlayedCards）后快照被清空，显示随之消失。
      */
     private fun drawAiBidTips(canvas: Canvas) {
@@ -1453,10 +1448,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     color = Color.parseColor("#B0BEC5")
                 }
             }
-            snap.current == playerIndex -> {
-                label = thinkingTip(playerIndex)
-                color = Color.parseColor("#FFD600")
-            }
+            // 未行动：留白（不显示「思考中」）
             else -> return
         }
         textPaint.textSize = AI_BID_TIP_TEXT_SIZE
@@ -1465,7 +1457,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.textAlign = Paint.Align.CENTER
         // 位置与出牌阶段「思考中」提示一致（牌背下方），两个阶段不会同时出现，无重叠之虞
         drawTextWithShadow(canvas, label, centerX,
-            topY + 180f + 16f + aiBackH + 52f, textPaint, color)
+            topY + 180f + 16f + aiBackH + 52f, textPaint)
     }
 
     /**
@@ -2114,8 +2106,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.textAlign = Paint.Align.CENTER   // 共享画笔默认 CENTER，显式声明防上游残留 LEFT
         textPaint.textSize = BANNER_TITLE_TEXT
         textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha)
-        drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y, textPaint,
-            withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha))
+        drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y, textPaint)
         // hasScore=false（未提供积分）时不画得分行，副题上移补位，避免横幅中部留大片空白
         if (hasScore) {
             textPaint.textSize = BANNER_SCORE_TEXT
@@ -2170,7 +2161,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 若此处不显式复位，退出设置后游戏内按钮会继承灰色（叫分/提示/出牌变灰）。
         buttonTextPaint.color = Color.WHITE
         buttonTextPaint.textSize = 56f
-        drawTextWithShadow(canvas, text, x + w / 2, y + h / 2 + 18f, buttonTextPaint, Color.WHITE)
+        drawTextWithShadow(canvas, text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
     }
 
     /** 颜色提亮（factor 0..1，向白靠拢） */
@@ -2189,7 +2180,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 带柔和投影的文字（提升深底文字可读性与层次）；调用方负责 paint 的 textSize/color/align */
     private fun drawTextWithShadow(canvas: Canvas, text: String, cx: Float, baseY: Float,
-                                   paint: Paint, color: Int) {
+                                   paint: Paint) {
         val saved = paint.color
         paint.color = Color.argb(80, 0, 0, 0)
         canvas.drawText(text, cx + 2f, baseY + 3f, paint)

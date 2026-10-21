@@ -114,10 +114,8 @@ class GameEngine {
         searchEpoch++
         // 作废未完成的「地主弹窗 → 进入出牌」流程，防止重开/返回菜单后旧回调串场触发新对局状态切换
         pendingLandlordProceedIndex = -1
-        // 作废在途的 AI 叫分（思考挂起/放行信号），防止跨局串场
-        pendingAIBidIndex = -1
-        aiBidThinkingShown = false
-        pendingBidScoreCache.fill(-1)
+        // 递增叫分局代号：使在途的 AI 叫分延时任务立即作废，防止跨局串场
+        bidEpoch++
         // 重置所有玩家状态
         players.forEach {
             it.handCards.clear()
@@ -148,11 +146,9 @@ class GameEngine {
     fun returnToMenu() {
         // 退回主界面同样废弃在途后台搜索
         searchEpoch++
-        // 作废在途的「地主弹窗 → 进入出牌」流程与 AI 叫分（思考挂起/放行信号），防止回菜单后旧回调串场
+        // 作废在途的「地主弹窗 → 进入出牌」流程与 AI 叫分延时任务，防止回菜单后旧回调串场
         pendingLandlordProceedIndex = -1
-        pendingAIBidIndex = -1
-        aiBidThinkingShown = false
-        pendingBidScoreCache.fill(-1)
+        bidEpoch++
         players.forEach { it.handCards.clear() }
         stateMachine.startMenu()
     }
@@ -203,64 +199,31 @@ class GameEngine {
         processBid(0, score)
     }
 
-    /** 轮到 AI 叫分的待放行标记（其索引；-1=无）。
-     *  UI 在「思考中」提示上屏约 1s 后调用 [notifyAiBidThinkingShown] 放行，引擎才公布该 AI 的叫分结果。 */
-    private var pendingAIBidIndex = -1
-
     /**
-     * AI自动叫分：先排期计算好叫分值，但**不立即公布**——等待 UI 展示完约 1 秒的
-     * 「电脑A/B思考中」提示后，经 [notifyAiBidThinkingShown] 放行再发布叫分结果，然后进入下一位叫分。
+     * AI自动叫分节奏：**全程不显示「思考中」**——轮到电脑A/B 时，引擎先静默等待
+     * [aiBidResultHoldMs]（上一位叫分结果已在此期间保持展示），到期后直接公布该电脑的叫分结果
+     * （onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）；结果再保持同样时长后才进入下一位叫分。
      */
     private fun scheduleAIBid(playerIndex: Int) {
         val player = players[playerIndex]
-        // 延迟模拟思考：到期时基于最新局面计算叫分值并挂起，等 UI 放行
+        val epoch = bidEpoch
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            // 跨局保护：重开/回菜单后在途的旧叫分任务直接丢弃
+            if (epoch != bidEpoch) return@postDelayed
             if (stateMachine.phase != GamePhase.BIDDING ||
                 stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
-            pendingBidScoreCache[playerIndex] = calculateAIBid(player)
-            pendingAIBidIndex = playerIndex
-            // 若 UI 的「思考中」提示已先行上屏（竞态：快照发布早于此处排期完成），立即放行
-            if (aiBidThinkingShown) {
-                aiBidThinkingShown = false
-                releasePendingAIBid(playerIndex)
-            }
-        }, 500)
+            processBid(playerIndex, calculateAIBid(player))
+        }, aiBidResultHoldMs())
     }
 
-    /** 各 AI 挂起的叫分值缓存（下标即玩家槽位；-1=尚未算出） */
-    private val pendingBidScoreCache = intArrayOf(-1, -1, -1)
-    /** UI「思考中」提示是否已上屏（放行信号，与挂起叫分值二者齐备时才公布结果）。
-     *  @Volatile：UI 线程写入、主线程 Handler 到期回调读取，保证跨线程可见性 */
-    @Volatile
-    private var aiBidThinkingShown = false
+    /** 叫分局代号：每次开新局 / 退回主界面自增，用于作废在途的 AI 叫分延时任务 */
+    private var bidEpoch = 0
 
-    /**
-     * 由 UI 在「思考中」提示展示约 1 秒后调用：放行当前 AI 的叫分结果。
-     * 若引擎尚未算好（罕见竞态），置位标志由 scheduleAIBid 到期时自行公布。
-     */
-    fun notifyAiBidThinkingShown() {
-        val idx = pendingAIBidIndex
-        if (idx >= 0) {
-            aiBidThinkingShown = false
-            releasePendingAIBid(idx)
-        } else {
-            aiBidThinkingShown = true
-        }
-    }
-
-    /** 公布已挂起的 AI 叫分结果（内部方法：仅当该玩家仍是当前叫分者时生效） */
-    private fun releasePendingAIBid(playerIndex: Int) {
-        if (pendingAIBidIndex != playerIndex) return
-        if (stateMachine.phase != GamePhase.BIDDING ||
-            stateMachine.currentPlayerIndex != playerIndex) {
-            pendingAIBidIndex = -1
-            return
-        }
-        pendingAIBidIndex = -1
-        val score = pendingBidScoreCache[playerIndex].coerceAtLeast(0)
-        pendingBidScoreCache[playerIndex] = -1
-        processBid(playerIndex, score)
-    }
+    /** 叫分节奏时长（毫秒）：每位电脑玩家「叫分结果保持展示 → 进入下一位」的暂停长度。
+     *  默认 1500ms（与需求"显示结果后暂停 1.5s 再进入下一位"一致）；
+     *  若用户在设置中调大了「AI最大思考时间」（>3s），则沿用其一半，尊重用户自定义节奏。 */
+    private fun aiBidResultHoldMs(): Long =
+        if (masterDeadlineMs > 3000L) masterDeadlineMs / 2 else 1500L
 
     /**
      * AI计算叫分值（使用智能决策）
@@ -277,7 +240,9 @@ class GameEngine {
     }
 
     /**
-     * 处理叫分逻辑
+     * 处理叫分逻辑：公布本位玩家的叫分结果（onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）后，
+     * **暂停** [aiBidResultHoldMs]（默认 1.5s）让所有人看清该结果，到期再进入下一位叫分；
+     * 全程不显示「思考中」。最后一位叫完则直接进入地主弹窗流程。
      */
     private fun processBid(playerIndex: Int, score: Int) {
         // 有效叫分规则统一由状态机 computeRealBid 计算，避免两处不一致
@@ -291,9 +256,21 @@ class GameEngine {
             finalizeBidding()
         } else {
             val nextPlayer = stateMachine.currentPlayerIndex
-            callback?.onBiddingStart(nextPlayer)
             if (!players[nextPlayer].isHuman) {
+                // 下一位仍是电脑：不显示「思考中」——在本暂停期内静默算好其叫分值，
+                // 到期后立即公布结果并继续循环（每位之间均保持 aiBidResultHoldMs 的节奏）
                 scheduleAIBid(nextPlayer)
+            } else {
+                // 下一位是人类：先让其看到刚公布的电脑结果，暂停到期后才提示轮到自己叫分
+                val epoch = bidEpoch
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    // 跨局保护：重开/回菜单后在途的旧推进任务直接丢弃
+                    if (epoch != bidEpoch) return@postDelayed
+                    if (stateMachine.phase != GamePhase.BIDDING ||
+                        stateMachine.currentPlayerIndex != nextPlayer) return@postDelayed
+                    callback?.onBiddingStart(nextPlayer)
+                    callback?.onRequestRefresh()
+                }, aiBidResultHoldMs())
             }
         }
         callback?.onRequestRefresh()

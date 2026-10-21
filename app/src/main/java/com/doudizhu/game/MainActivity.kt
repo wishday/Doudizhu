@@ -3,8 +3,6 @@ package com.doudizhu.game
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.view.View
 import android.view.Window
 import android.view.WindowInsets
@@ -411,39 +409,22 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         }
     }
 
-    /** 叫分节奏控制：轮到电脑A/B 时，先在屏幕显示「思考中」提示并暂停保持约 1 秒，
-     *  到期后放行引擎 → 显示该电脑的叫分结果，然后进入下一位叫分。
-     *  （引擎侧 scheduleAIBid 排期 0.5s 计算并挂起叫分值；本 1s 放行到期必然在其之后，
-     *   「挂起值已算出 + UI 思考中已满 1s」两条件齐备才公布结果。） */
-    private val aiBidThinkingHoldMs = 1000L
-
-    /** 主线程 Handler，用于 postDelayed 延迟放行引擎 */
-    private val mainHandler = Handler(Looper.getMainLooper())
+    /** 叫分节奏控制（引擎侧实现，UI 仅被动展示快照）：轮到电脑A/B 时**不显示「思考中」**——
+     *  上一位叫分结果在其牌背下方保持展示约 1.5s（引擎暂停期，其间静默算好本位电脑的分数），
+     *  到期后立即公布本位电脑的叫分结果并进入下一位叫分。 */
 
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
-            // 立即发布快照：轮到电脑时其下方马上显示「思考中…」（省略号逐帧动画随之启动），
-            // 不延迟——否则前一位 AI 的结果会被新快照的「未行动」状态覆盖，屏幕出现空白闪烁。
+            // 发布快照：current 指向即将行动的玩家；因其「已行动」标记为 false 且 UI 不再绘制
+            // 「思考中」提示（见 GameSurfaceView.drawAiBidTip），屏幕上只保留各人已公布的叫分结果。
             publishBidDisplay()
-            if (playerIndex != 0 && gameEngine.stateMachine.phase ==
-                com.doudizhu.game.state.GamePhase.BIDDING) {
-                // 轮到电脑A/B：思考中提示已上屏，保持约 1s 后再放行引擎公布其叫分结果并进入下一位。
-                // （引擎侧 scheduleAIBid 同时排期 0.5s 计算挂起叫分值；本 1s 到期放行必然在其之后，
-                //   两条件齐备时引擎才 processBid 公布结果。）
-                mainHandler.postDelayed({
-                    if (gameEngine.stateMachine.phase ==
-                        com.doudizhu.game.state.GamePhase.BIDDING &&
-                        gameEngine.stateMachine.currentPlayerIndex == playerIndex) {
-                        gameEngine.notifyAiBidThinkingShown()
-                    }
-                }, aiBidThinkingHoldMs)
-            }
         }
     }
 
     override fun onPlayerBid(playerIndex: Int, score: Int) {
         runOnUiThread {
-            // 某玩家叫分完毕：立即刷新展示——该电脑下方由「思考中」切换为叫分结果（叫X分/不叫）
+            // 某玩家叫分完毕：立即刷新展示——该电脑下方显示其叫分结果（叫X分/不叫），
+            // 并保持到引擎暂停期结束、下一位行动为止
             publishBidDisplay()
         }
     }
@@ -462,7 +443,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 done[(first + i) % 3] = true
             }
         }
-        gameSurfaceView.updateBidDisplay(scores, done, sm.currentPlayerIndex)
+        // 叫分阶段只展示已公布的叫分结果（不再显示「思考中」提示）
+        gameSurfaceView.updateBidDisplay(scores, done)
     }
 
     override fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>) {
