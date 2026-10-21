@@ -21,8 +21,10 @@ interface GameEngineCallback {
     fun onBiddingStart(playerIndex: Int)
     /** 玩家叫分 */
     fun onPlayerBid(playerIndex: Int, score: Int)
-    /** 叫地主结束，地主确定 */
+    /** 所有人叫分完成，地主确定（UI 先弹窗提示「xx成为地主」并停留 1.5s，再回调 onBiddingProceed 进入出牌） */
     fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>)
+    /** 地主弹窗展示结束：正式进入出牌阶段（由 UI 在弹窗关闭后调用 gameEngine.proceedAfterLandlordPopup() 触发） */
+    fun onBiddingProceed(landlordIndex: Int)
     /** 轮到某玩家出牌 */
     fun onPlayerTurn(playerIndex: Int)
     /** 玩家出牌 */
@@ -110,6 +112,12 @@ class GameEngine {
     fun startNewGame() {
         // 新局：使任何在途的后台搜索结果作废
         searchEpoch++
+        // 作废未完成的「地主弹窗 → 进入出牌」流程，防止重开/返回菜单后旧回调串场触发新对局状态切换
+        pendingLandlordProceedIndex = -1
+        // 作废在途的 AI 叫分（思考挂起/放行信号），防止跨局串场
+        pendingAIBidIndex = -1
+        aiBidThinkingShown = false
+        pendingBidScoreCache.fill(-1)
         // 重置所有玩家状态
         players.forEach {
             it.handCards.clear()
@@ -140,6 +148,11 @@ class GameEngine {
     fun returnToMenu() {
         // 退回主界面同样废弃在途后台搜索
         searchEpoch++
+        // 作废在途的「地主弹窗 → 进入出牌」流程与 AI 叫分（思考挂起/放行信号），防止回菜单后旧回调串场
+        pendingLandlordProceedIndex = -1
+        pendingAIBidIndex = -1
+        aiBidThinkingShown = false
+        pendingBidScoreCache.fill(-1)
         players.forEach { it.handCards.clear() }
         stateMachine.startMenu()
     }
@@ -190,18 +203,63 @@ class GameEngine {
         processBid(0, score)
     }
 
+    /** 轮到 AI 叫分的待放行标记（其索引；-1=无）。
+     *  UI 在「思考中」提示上屏约 1s 后调用 [notifyAiBidThinkingShown] 放行，引擎才公布该 AI 的叫分结果。 */
+    private var pendingAIBidIndex = -1
+
     /**
-     * AI自动叫分
+     * AI自动叫分：先排期计算好叫分值，但**不立即公布**——等待 UI 展示完约 1 秒的
+     * 「电脑A/B思考中」提示后，经 [notifyAiBidThinkingShown] 放行再发布叫分结果，然后进入下一位叫分。
      */
     private fun scheduleAIBid(playerIndex: Int) {
-        // 延迟模拟思考
         val player = players[playerIndex]
-        val score = calculateAIBid(player)
-
-        // 使用postDelayed模拟延迟（简化处理，直接执行）
+        // 延迟模拟思考：到期时基于最新局面计算叫分值并挂起，等 UI 放行
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            processBid(playerIndex, score)
-        }, 1000)
+            if (stateMachine.phase != GamePhase.BIDDING ||
+                stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
+            pendingBidScoreCache[playerIndex] = calculateAIBid(player)
+            pendingAIBidIndex = playerIndex
+            // 若 UI 的「思考中」提示已先行上屏（竞态：快照发布早于此处排期完成），立即放行
+            if (aiBidThinkingShown) {
+                aiBidThinkingShown = false
+                releasePendingAIBid(playerIndex)
+            }
+        }, 500)
+    }
+
+    /** 各 AI 挂起的叫分值缓存（下标即玩家槽位；-1=尚未算出） */
+    private val pendingBidScoreCache = intArrayOf(-1, -1, -1)
+    /** UI「思考中」提示是否已上屏（放行信号，与挂起叫分值二者齐备时才公布结果）。
+     *  @Volatile：UI 线程写入、主线程 Handler 到期回调读取，保证跨线程可见性 */
+    @Volatile
+    private var aiBidThinkingShown = false
+
+    /**
+     * 由 UI 在「思考中」提示展示约 1 秒后调用：放行当前 AI 的叫分结果。
+     * 若引擎尚未算好（罕见竞态），置位标志由 scheduleAIBid 到期时自行公布。
+     */
+    fun notifyAiBidThinkingShown() {
+        val idx = pendingAIBidIndex
+        if (idx >= 0) {
+            aiBidThinkingShown = false
+            releasePendingAIBid(idx)
+        } else {
+            aiBidThinkingShown = true
+        }
+    }
+
+    /** 公布已挂起的 AI 叫分结果（内部方法：仅当该玩家仍是当前叫分者时生效） */
+    private fun releasePendingAIBid(playerIndex: Int) {
+        if (pendingAIBidIndex != playerIndex) return
+        if (stateMachine.phase != GamePhase.BIDDING ||
+            stateMachine.currentPlayerIndex != playerIndex) {
+            pendingAIBidIndex = -1
+            return
+        }
+        pendingAIBidIndex = -1
+        val score = pendingBidScoreCache[playerIndex].coerceAtLeast(0)
+        pendingBidScoreCache[playerIndex] = -1
+        processBid(playerIndex, score)
     }
 
     /**
@@ -241,8 +299,13 @@ class GameEngine {
         callback?.onRequestRefresh()
     }
 
+    /** 地主弹窗展示结束后进入出牌阶段的待执行索引（-1=无）；防止 UI 重复触发 */
+    private var pendingLandlordProceedIndex = -1
+
     /**
-     * 完成叫地主阶段
+     * 完成叫地主阶段：确定地主、分配底牌后**不再立即进入出牌阶段**，
+     * 而是通过 onBiddingComplete 通知 UI 在屏幕中央弹出「xx成为地主」提示并保持 1.5s；
+     * 弹窗关闭后由 UI 调用 [proceedAfterLandlordPopup] 清除叫分展示并正式进入出牌阶段。
      */
     private fun finalizeBidding() {
         if (stateMachine.hasLandlord) {
@@ -255,19 +318,31 @@ class GameEngine {
             // 记录底分
             stateMachine.currentBidScore = stateMachine.currentMaxBid
 
+            pendingLandlordProceedIndex = li
             callback?.onBiddingComplete(li, stateMachine.bottomCards.toList())
-
-            // 进入出牌阶段
-            stateMachine.startPlaying()
-            callback?.onPlayerTurn(li)
-
-            // 如果地主是AI
-            if (!players[li].isHuman) {
-                scheduleAIPlay(li)
-            }
         } else {
             // 没人叫地主，重新发牌
             startNewGame()
+        }
+    }
+
+    /**
+     * 「xx成为地主」弹窗展示结束（约 1.5s 后由 UI 调用）：
+     * 此时状态机切入出牌阶段（UI 借此机会清除所有电脑的叫分结果），然后进入正常出牌流程。
+     */
+    fun proceedAfterLandlordPopup() {
+        val li = pendingLandlordProceedIndex
+        if (li < 0) return
+        pendingLandlordProceedIndex = -1
+
+        // 进入出牌阶段
+        stateMachine.startPlaying()
+        callback?.onBiddingProceed(li)
+        callback?.onPlayerTurn(li)
+
+        // 如果地主是AI，由其先出牌
+        if (!players[li].isHuman) {
+            scheduleAIPlay(li)
         }
     }
 
