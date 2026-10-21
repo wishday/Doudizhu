@@ -327,13 +327,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 地主弹窗展示时长（ms）：保持 1.5s 后关闭，随后进入正常出牌阶段 */
     private val LANDLORD_POPUP_MS = 1500L
 
+    /** 通用中央提示弹窗（复用「xx成为地主」同款样式与绘制逻辑）：
+     *  用于叫分开始前提示「xx开始叫地主」等，保持指定时长后自动关闭并触发 onDismiss。
+     *  注意：会覆盖当前正在展示的地主弹窗文本（设计上两者时序互斥，不会并发使用）。 */
+    fun showCenterPopup(text: String, durationMs: Long, onDismiss: () -> Unit) {
+        landlordPopupText = text
+        landlordPopupUntil = System.currentTimeMillis() + durationMs
+        onLandlordPopupDismiss = Runnable { post(onDismiss) }
+        refresh()
+    }
+
     /** 显示「xx成为地主」弹窗（由 MainActivity 在叫分全部完成时调用）；
      *  弹窗到期自动关闭后执行 onDismiss（进入出牌阶段）。重复调用以最后一次为准。 */
     fun showLandlordPopup(name: String, onDismiss: () -> Unit) {
-        landlordPopupText = "${name}成为地主"
-        landlordPopupUntil = System.currentTimeMillis() + LANDLORD_POPUP_MS
-        onLandlordPopupDismiss = Runnable { post(onDismiss) }
-        refresh()
+        showCenterPopup("${name}成为地主", LANDLORD_POPUP_MS, onDismiss)
     }
 
     /** 地主弹窗是否仍在展示期内（供 shouldDraw 持续重绘以便到期自动消失） */

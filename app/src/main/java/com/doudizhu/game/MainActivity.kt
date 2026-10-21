@@ -404,8 +404,15 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onDealingComplete() {
         runOnUiThread {
-            // 启动 3 秒手牌逐张滑入动画，动画结束后进入叫分阶段
-            gameSurfaceView.startHandReveal { gameEngine.startBiddingPhase() }
+            // 启动 3 秒手牌逐张滑入动画；动画结束后决定首位叫分玩家，先用与「xx成为地主」
+            // 相同的中央提示框展示「xx开始叫地主」，保持 1s 关闭后再正式进入叫分流程。
+            gameSurfaceView.startHandReveal {
+                val firstBidder = gameEngine.prepareFirstBidder()
+                val firstName = gameEngine.players[firstBidder].name
+                gameSurfaceView.showCenterPopup("${firstName}开始叫地主", 1000L) {
+                    gameEngine.beginBiddingAfterFirstBidderPopup(firstBidder)
+                }
+            }
         }
     }
 
@@ -439,8 +446,12 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         val scores = IntArray(3) { i -> gameEngine.players[i].bidScore.coerceIn(0, 3) }
         val done = BooleanArray(3)
         if (sm.phase == com.doudizhu.game.state.GamePhase.BIDDING) {
-            for (i in 0 until sm.bidRoundCount.coerceAtMost(3)) {
-                done[(sm.firstBidderIndex + i) % 3] = true
+            // 以状态机记录的「实际行动过的玩家集合」为权威数据标记已行动者：
+            // 正常流程与 bidRoundCount 等价；若有人叫3分提前结束（bidRoundCount 被置满），
+            // 只有真正行动过的玩家显示其结果，未行动者保持留白——屏幕上重点保留
+            // 叫3分那位电脑的「叫3分」展示（引擎会保持 1.5s 后再弹地主提示）。
+            for (i in 0 until 3) {
+                done[i] = i in sm.actedBidPlayers
             }
         }
         // 叫分阶段只展示已公布的叫分结果（不再显示「思考中」提示）
