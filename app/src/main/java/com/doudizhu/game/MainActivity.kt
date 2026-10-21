@@ -3,6 +3,8 @@ package com.doudizhu.game
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.view.Window
 import android.view.WindowInsets
@@ -239,6 +241,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         try {
             requestWindowFeature(Window.FEATURE_NO_TITLE)
         } catch (_: Throwable) {}
+        @Suppress("DEPRECATION") // FLAG_FULLSCREEN 在 API 30 起被 WindowInsetsController 取代，
+        // 但本项目 minSdk=24，低版本设备仍需此标志实现全屏；高版本的沉浸效果由
+        // applyImmersiveFullscreen() 中的新版 WindowInsetsController API 负责。
         window.setFlags(
             WindowManager.LayoutParams.FLAG_FULLSCREEN,
             WindowManager.LayoutParams.FLAG_FULLSCREEN
@@ -412,6 +417,9 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
      *   「挂起值已算出 + UI 思考中已满 1s」两条件齐备才公布结果。） */
     private val aiBidThinkingHoldMs = 1000L
 
+    /** 主线程 Handler，用于 postDelayed 延迟放行引擎 */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun onBiddingStart(playerIndex: Int) {
         runOnUiThread {
             // 立即发布快照：轮到电脑时其下方马上显示「思考中…」（省略号逐帧动画随之启动），
@@ -422,7 +430,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 // 轮到电脑A/B：思考中提示已上屏，保持约 1s 后再放行引擎公布其叫分结果并进入下一位。
                 // （引擎侧 scheduleAIBid 同时排期 0.5s 计算挂起叫分值；本 1s 到期放行必然在其之后，
                 //   两条件齐备时引擎才 processBid 公布结果。）
-                postDelayed({
+                mainHandler.postDelayed({
                     if (gameEngine.stateMachine.phase ==
                         com.doudizhu.game.state.GamePhase.BIDDING &&
                         gameEngine.stateMachine.currentPlayerIndex == playerIndex) {

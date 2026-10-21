@@ -479,7 +479,7 @@ class GameEngine {
                     primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
                     teammateIndex = getTeammateIndex(playerIndex)
                 )
-                applyAIDecisionPaced(playerIndex, decision, lastPlay, turnStartMs, epoch)
+                applyAIDecisionPaced(playerIndex, decision, turnStartMs, epoch)
             }
         }, if (shouldUseMasterPlay(playerIndex)) MASTER_DELAY_MS else 1200L)
     }
@@ -490,19 +490,19 @@ class GameEngine {
      * 延时期间局面可能变化（新局 / 换人 / 阶段切换），触发时需重新校验。
      */
     private fun applyAIDecisionPaced(
-        playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?,
+        playerIndex: Int, decision: CardGroup?,
         turnStartMs: Long, epoch: Int
     ) {
         val remain = MIN_AI_TURN_MS - (System.currentTimeMillis() - turnStartMs)
         if (remain <= 0L) {
-            applyAIDecision(playerIndex, decision, lastPlay)
+            applyAIDecision(playerIndex, decision)
             return
         }
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (epoch != searchEpoch) return@postDelayed
             if (stateMachine.phase != GamePhase.PLAYING) return@postDelayed
             if (stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
-            applyAIDecision(playerIndex, decision, lastPlay)
+            applyAIDecision(playerIndex, decision)
         }, remain)
     }
 
@@ -524,7 +524,7 @@ class GameEngine {
                 if (epoch != searchEpoch) return@post
                 if (stateMachine.phase != GamePhase.PLAYING) return@post
                 if (stateMachine.currentPlayerIndex != playerIndex) return@post
-                applyAIDecisionPaced(playerIndex, decision, stateMachine.lastPlayedGroup, turnStartMs, epoch)
+                applyAIDecisionPaced(playerIndex, decision, turnStartMs, epoch)
             }
         }
     }
@@ -536,7 +536,8 @@ class GameEngine {
      *  - 否则过牌。
      * 语义与改动前普通模式分支完全一致，大师模式复用同一套兜底。
      */
-    private fun applyAIDecision(playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?) {
+    private fun applyAIDecision(playerIndex: Int, decision: CardGroup?) {
+        // 上一手牌已由 decision 的生成过程隐式使用；此处只需应用决策结果，无需再传 lastPlay
         val player = players[playerIndex]
         val aiMustPlay = stateMachine.mustPlay()
         if (decision != null && decision.type != CardType.INVALID) {
