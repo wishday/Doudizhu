@@ -34,6 +34,9 @@ class GameStateMachine {
     /** 叫分轮次计数 */
     var bidRoundCount: Int = 0
 
+    /** 首位叫分玩家索引（叫分顺序为 firstBidderIndex → +1 → +2，UI 据此推断各人已行动状态） */
+    var firstBidderIndex: Int = 0
+
     /** 上一手出牌的牌组信息 */
     var lastPlayedGroup: com.doudizhu.game.model.CardGroup? = null
 
@@ -81,6 +84,7 @@ class GameStateMachine {
         currentMaxBid = 0
         maxBidPlayerIndex = -1
         bidRoundCount = 0
+        firstBidderIndex = 0
         hasLandlord = false
         playHistory.clear()
         bombCount = 0
@@ -108,6 +112,7 @@ class GameStateMachine {
     fun startBidding(firstBidPlayer: Int) {
         phase = GamePhase.BIDDING
         currentPlayerIndex = firstBidPlayer
+        firstBidderIndex = firstBidPlayer
     }
 
     /**

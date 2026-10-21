@@ -162,9 +162,17 @@ class GameEngine {
         stateMachine.startBidding(firstBidder)
         callback?.onBiddingStart(firstBidder)
 
-        // 如果是AI先叫，自动处理
+        // 如果是AI先叫：与后续各拍一致——结果保留期内完成推进（onBiddingStart 刷新画面）后，
+        // 再进入该 AI 的叫分节拍（公布其结果 → 保留 1.5s → 下一位）；人类首位则直接等待点按。
         if (!players[firstBidder].isHuman) {
-            scheduleAIBid(firstBidder)
+            val epoch = bidEpoch
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (epoch != bidEpoch) return@postDelayed
+                if (stateMachine.phase != GamePhase.BIDDING ||
+                    stateMachine.currentPlayerIndex != firstBidder) return@postDelayed
+                callback?.onRequestRefresh()
+                scheduleAIBid(firstBidder)
+            }, aiBidResultHoldMs())
         }
     }
 
@@ -200,9 +208,10 @@ class GameEngine {
     }
 
     /**
-     * AI自动叫分节奏：**全程不显示「思考中」**——轮到电脑A/B 时，引擎先静默等待
-     * [aiBidResultHoldMs]（上一位叫分结果已在此期间保持展示），到期后直接公布该电脑的叫分结果
-     * （onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）；结果再保持同样时长后才进入下一位叫分。
+     * AI自动叫分节奏：**全程不显示「思考中」**——轮到电脑A/B 时，引擎做一次极短的
+     * 反应间隔（[aiBidRevealDelayMs]）后立即公布其叫分结果
+     * （onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）；随后**保留展示
+     * [aiBidResultHoldMs]（1.5s）**，到期再进入下一位叫分。
      */
     private fun scheduleAIBid(playerIndex: Int) {
         val player = players[playerIndex]
@@ -213,17 +222,22 @@ class GameEngine {
             if (stateMachine.phase != GamePhase.BIDDING ||
                 stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
             processBid(playerIndex, calculateAIBid(player))
-        }, aiBidResultHoldMs())
+        }, aiBidRevealDelayMs)
     }
 
     /** 叫分局代号：每次开新局 / 退回主界面自增，用于作废在途的 AI 叫分延时任务 */
     private var bidEpoch = 0
 
-    /** 叫分节奏时长（毫秒）：每位电脑玩家「叫分结果保持展示 → 进入下一位」的暂停长度。
-     *  默认 1500ms（与需求"显示结果后暂停 1.5s 再进入下一位"一致）；
-     *  若用户在设置中调大了「AI最大思考时间」（>3s），则沿用其一半，尊重用户自定义节奏。 */
-    private fun aiBidResultHoldMs(): Long =
-        if (masterDeadlineMs > 3000L) masterDeadlineMs / 2 else 1500L
+    /** 「轮到电脑A/B → 公布其叫分结果」之间的极短反应间隔（毫秒）：
+     *  仅避免结果在同一瞬间闪现，让"轮到→出结果"有可感知的先后次序。 */
+    private const val aiBidRevealDelayMs = 200L
+
+    /** 「公布叫分结果 → 进入下一位叫分」之间的结果保留时长（毫秒）：
+     *  即每条「叫X分 / 不叫」在屏幕上保持 1.5s 后才推进下一位，与需求严格一致。 */
+    private const val AI_BID_RESULT_HOLD_MS = 1500L
+
+    /** 供 startBiddingPhase / processBid 统一取用叫分结果保留时长 */
+    private fun aiBidResultHoldMs(): Long = AI_BID_RESULT_HOLD_MS
 
     /**
      * AI计算叫分值（使用智能决策）
@@ -241,7 +255,8 @@ class GameEngine {
 
     /**
      * 处理叫分逻辑：公布本位玩家的叫分结果（onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）后，
-     * **暂停** [aiBidResultHoldMs]（默认 1.5s）让所有人看清该结果，到期再进入下一位叫分；
+     * **保留展示** [aiBidResultHoldMs]（1.5s）让所有人看清该结果，到期再进入下一位叫分；
+     * 若下一位是电脑，其轮到后仅经极短反应间隔即公布自己的结果，再同样保留 1.5s。
      * 全程不显示「思考中」。最后一位叫完则直接进入地主弹窗流程。
      */
     private fun processBid(playerIndex: Int, score: Int) {
@@ -256,22 +271,22 @@ class GameEngine {
             finalizeBidding()
         } else {
             val nextPlayer = stateMachine.currentPlayerIndex
-            if (!players[nextPlayer].isHuman) {
-                // 下一位仍是电脑：不显示「思考中」——在本暂停期内静默算好其叫分值，
-                // 到期后立即公布结果并继续循环（每位之间均保持 aiBidResultHoldMs 的节奏）
-                scheduleAIBid(nextPlayer)
-            } else {
-                // 下一位是人类：先让其看到刚公布的电脑结果，暂停到期后才提示轮到自己叫分
-                val epoch = bidEpoch
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                    // 跨局保护：重开/回菜单后在途的旧推进任务直接丢弃
-                    if (epoch != bidEpoch) return@postDelayed
-                    if (stateMachine.phase != GamePhase.BIDDING ||
-                        stateMachine.currentPlayerIndex != nextPlayer) return@postDelayed
+            // 先保持本位结果展示 1.5s，到期后再进入下一位叫分
+            val epoch = bidEpoch
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                // 跨局保护：重开/回菜单后在途的旧推进任务直接丢弃
+                if (epoch != bidEpoch) return@postDelayed
+                if (stateMachine.phase != GamePhase.BIDDING ||
+                    stateMachine.currentPlayerIndex != nextPlayer) return@postDelayed
+                if (!players[nextPlayer].isHuman) {
+                    // 下一位是电脑：不显示「思考中」，由 scheduleAIBid 短暂反应后即公布其结果
+                    scheduleAIBid(nextPlayer)
+                } else {
+                    // 下一位是人类：提示轮到自己叫分
                     callback?.onBiddingStart(nextPlayer)
                     callback?.onRequestRefresh()
-                }, aiBidResultHoldMs())
-            }
+                }
+            }, aiBidResultHoldMs())
         }
         callback?.onRequestRefresh()
     }
