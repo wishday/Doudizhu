@@ -43,6 +43,16 @@ interface GameEngineCallback {
  */
 class GameEngine {
 
+    companion object {
+        /** 「轮到电脑A/B → 公布其叫分结果」之间的极短反应间隔（毫秒）：
+         *  仅避免结果在同一瞬间闪现，让"轮到→出结果"有可感知的先后次序。 */
+        private const val aiBidRevealDelayMs = 200L
+
+        /** 「公布叫分结果 → 进入下一位叫分」之间的结果保留时长（毫秒）：
+         *  即每条「叫X分 / 不叫」在屏幕上保持 1.5s 后才推进下一位，与需求严格一致。 */
+        private const val AI_BID_RESULT_HOLD_MS = 1500L
+    }
+
     /** 三位玩家 */
     val players = listOf(
         Player(0, "你", isHuman = true),
@@ -227,14 +237,6 @@ class GameEngine {
 
     /** 叫分局代号：每次开新局 / 退回主界面自增，用于作废在途的 AI 叫分延时任务 */
     private var bidEpoch = 0
-
-    /** 「轮到电脑A/B → 公布其叫分结果」之间的极短反应间隔（毫秒）：
-     *  仅避免结果在同一瞬间闪现，让"轮到→出结果"有可感知的先后次序。 */
-    private const val aiBidRevealDelayMs = 200L
-
-    /** 「公布叫分结果 → 进入下一位叫分」之间的结果保留时长（毫秒）：
-     *  即每条「叫X分 / 不叫」在屏幕上保持 1.5s 后才推进下一位，与需求严格一致。 */
-    private const val AI_BID_RESULT_HOLD_MS = 1500L
 
     /** 供 startBiddingPhase / processBid 统一取用叫分结果保留时长 */
     private fun aiBidResultHoldMs(): Long = AI_BID_RESULT_HOLD_MS
