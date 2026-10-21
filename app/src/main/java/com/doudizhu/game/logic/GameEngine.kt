@@ -164,12 +164,27 @@ class GameEngine {
     }
 
     /**
-     * 进入叫地主阶段（在开局手牌展示动画结束后由 UI 回调）
-     * 随机选第一个叫分玩家，若 AI 先叫则自动处理
+     * 决定首个叫分玩家并进入 BIDDING 阶段（在开局手牌展示动画结束后由 UI 调用）。
+     * 本方法只做「随机选人 + 状态机置为叫分」，**不立即开始叫分**：由 UI 先用与
+     * 「xx成为地主」相同的中央提示框展示「xx开始叫地主」，保持 1s 关闭后再调用
+     * [beginBiddingAfterFirstBidderPopup] 正式进入叫分流程。
+     * @return 首个叫分玩家索引（0=人类 / 1=电脑A / 2=电脑B）
      */
-    fun startBiddingPhase() {
+    fun prepareFirstBidder(): Int {
         val firstBidder = (0..2).random()
         stateMachine.startBidding(firstBidder)
+        return firstBidder
+    }
+
+    /**
+     * 「xx开始叫地主」提示框关闭后正式进入叫分：通知首位玩家行动；
+     * 若 AI 先叫则自动处理。
+     */
+    fun beginBiddingAfterFirstBidderPopup(firstBidder: Int) {
+        // 跨局保护：提示框期间玩家可能已重开/退回菜单，此时不再推进叫分
+        if (stateMachine.phase != GamePhase.BIDDING ||
+            stateMachine.firstBidderIndex != firstBidder) return
+
         callback?.onBiddingStart(firstBidder)
 
         // 如果是AI先叫：与后续各拍一致——结果保留期内完成推进（onBiddingStart 刷新画面）后，
@@ -238,7 +253,7 @@ class GameEngine {
     /** 叫分局代号：每次开新局 / 退回主界面自增，用于作废在途的 AI 叫分延时任务 */
     private var bidEpoch = 0
 
-    /** 供 startBiddingPhase / processBid 统一取用叫分结果保留时长 */
+    /** 供 beginBiddingAfterFirstBidderPopup / processBid 统一取用叫分结果保留时长 */
     private fun aiBidResultHoldMs(): Long = AI_BID_RESULT_HOLD_MS
 
     /**
@@ -270,7 +285,21 @@ class GameEngine {
         val biddingDone = stateMachine.processBid(playerIndex, realScore)
 
         if (biddingDone) {
-            finalizeBidding()
+            if (stateMachine.biddingEndedByThreeBid) {
+                // 有电脑直接叫3分提前结束：**不补发**其他玩家的默认叫分，
+                // 而是把这位电脑的「叫3分」结果在屏幕上保持展示 1.5s（与其他叫分节拍一致），
+                // 到期后再确定地主并弹出「xx成为地主」——避免刚显示3分就被弹窗打断。
+                // 跨局保护：重开/回菜单后作废本次延迟推进
+                val epoch = bidEpoch
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (epoch != bidEpoch) return@postDelayed
+                    if (stateMachine.phase != GamePhase.BIDDING ||
+                        !stateMachine.hasLandlord) return@postDelayed
+                    finalizeBidding()
+                }, aiBidResultHoldMs())
+            } else {
+                finalizeBidding()
+            }
         } else {
             val nextPlayer = stateMachine.currentPlayerIndex
             // 先保持本位结果展示 1.5s，到期后再进入下一位叫分
