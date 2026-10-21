@@ -96,11 +96,9 @@ object MasterAIDecision {
      *
      * @param deadlineMs  绝对截止时长（毫秒），到点立刻中止回退到已搜到的最优解
      * @param nodeLimit   展开节点上限，防极端局面耗尽预算
-     * @param allowSim    保留参数仅为向后兼容（旧版一步模拟已废弃），本实现忽略
      */
     fun decide(
         snapshot: Snapshot,
-        allowSim: Boolean = true,
         deadlineMs: Long = DEFAULT_DEADLINE_MS,
         nodeLimit: Int = DEFAULT_NODE_LIMIT
     ): CardGroup? {

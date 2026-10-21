@@ -65,15 +65,14 @@ data class Card(
  */
 fun createDeck(): MutableList<Card> {
     val deck = mutableListOf<Card>()
-    var id = 0
-    // 四种花色，每种13张（3~2，对应rank 3~15）
-    for (suit in listOf(Suit.SPADE, Suit.HEART, Suit.CLUB, Suit.DIAMOND)) {
+    // 四种花色，每种13张（3~2，对应rank 3~15）；id 取牌在副牌中的序号（0~53），保证唯一
+    for ((index, suit) in listOf(Suit.SPADE, Suit.HEART, Suit.CLUB, Suit.DIAMOND).withIndex()) {
         for (rank in 3..15) {
-            deck.add(Card(suit, rank, id++))
+            deck.add(Card(suit, rank, index * 13 + (rank - 3)))
         }
     }
     // 大小王
-    deck.add(Card(Suit.JOKER, 16, id++))  // 小王
-    deck.add(Card(Suit.JOKER, 17, id++))  // 大王
+    deck.add(Card(Suit.JOKER, 16, 52))  // 小王
+    deck.add(Card(Suit.JOKER, 17, 53))  // 大王
     return deck
 }

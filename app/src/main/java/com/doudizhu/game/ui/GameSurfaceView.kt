@@ -480,7 +480,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 初始化音效/振动（surface 重建后也会重新调用） */
     private fun initAudio() {
         try {
-            if (soundEngine == null) soundEngine = SoundEngine(context)
+            if (soundEngine == null) soundEngine = SoundEngine()
             // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -660,7 +660,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 提示弹窗是否仍在展示期内（供 shouldDraw 判断是否需要持续重绘以自动消失） */
-    private inline fun hintActive(text: String, timer: Long): Boolean =
+    private fun hintActive(text: String, timer: Long): Boolean =
         text.isNotEmpty() && System.currentTimeMillis() <= timer
 
     /** 结算横幅是否仍处于活动期（滑入 450ms + 停留 3 秒 + 淡出 400ms，共约 4.05 秒；结束后停止重绘省电）。
@@ -2135,6 +2135,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 替换颜色的 alpha 通道（供结算横幅文字跟随入场/淡出统一透明） */
     private fun withAlpha(color: Int, alpha: Int): Int = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
 
+    @Suppress("UNUSED_PARAMETER") // color 保留在签名中仅为与 drawTextWithShadow 等绘制辅助函数保持一致的调用约定
     private fun addButton(canvas: Canvas, target: MutableList<ButtonRect>, text: String, x: Float, y: Float,
                           w: Float, h: Float, color: Int, pressedColor: Int, action: String) {
         val rect = RectF(x, y, x + w, y + h)

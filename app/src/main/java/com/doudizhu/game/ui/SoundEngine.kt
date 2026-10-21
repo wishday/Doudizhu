@@ -1,6 +1,5 @@
 package com.doudizhu.game.ui
 
-import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -18,7 +17,7 @@ import kotlin.random.Random
  * 低频"厚度"），且全部在后台线程生成与写入，不阻塞绘制/触摸线程。
  * 内部保留 ToneGenerator 作为兜底：AudioTrack 初始化失败时自动退回提示音模式。
  */
-class SoundEngine(context: Context) {
+class SoundEngine {
 
     private val sampleRate = 44100
     private var track: AudioTrack? = null
