@@ -229,6 +229,9 @@ class GameEngine {
     fun humanBid(score: Int) {
         if (stateMachine.phase != GamePhase.BIDDING) return
         if (stateMachine.currentPlayerIndex != 0) return
+        // 双保险：人类已在本轮叫过分（如刚叫 3 分、引擎保留 1.5s 才弹「xx成为地主」）时，
+        // 不再接受二次叫分，避免重复处理。
+        if (0 in stateMachine.actedBidPlayers) return
 
         processBid(0, score)
     }

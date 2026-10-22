@@ -253,37 +253,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val passAnimStart = LongArray(3)
     private val passSlotEpoch = IntArray(3) { -1 }
 
-    /** 叫分阶段快照（@Volatile：绘制线程读取、UI 线程写入，整组一次性替换保证一致性）。
-     *  记录各电脑玩家本轮的叫分情况，显示在其牌背下方；开始发牌（clearAllPlayedCards）时清除。 */
-    private data class BidSnapshot(
-        val phase: GamePhase,
-        /** 各玩家有效叫分（0=不叫/未叫），下标即玩家槽位 */
-        val scores: IntArray,
-        /** 各玩家是否已完成本轮叫分 */
-        val done: BooleanArray
-    ) {
-        override fun equals(other: Any?): Boolean =
-            other is BidSnapshot && phase == other.phase && scores.contentEquals(other.scores) &&
-                done.contentEquals(other.done)
-
-        override fun hashCode(): Int =
-            (phase.hashCode() * 31 + scores.contentHashCode()) * 31 + done.contentHashCode()
-    }
-    @Volatile
-    private var bidSnapshot: BidSnapshot? = null
     /** 叫分阶段提示字号：与「不出」气泡、「电脑A/B思考中」文字一致（44f） */
     private val AI_BID_TIP_TEXT_SIZE = PASS_BUBBLE_TEXT_SIZE
 
-    /** 每条叫分结果（叫X分 / 不叫）在屏幕上必须完整展示的最短时长（毫秒），
-     *  与引擎 `GameEngine.AI_BID_RESULT_HOLD_MS` 严格一致：UI 以此作为「节拍保护期」，
-     *  期间既不绘制也不响应玩家的叫分按钮，确保玩家一定看得见每一条已公布的叫分。 */
-    private val BID_RESULT_MIN_REVEAL_MS = 1500L
-
-    /** 最近一次「某位玩家的叫分结果上屏」的时刻（毫秒，0=本轮尚无结果）。
-     *  在 updateBidDisplay 收到新的已行动者时刷新；开始发牌 / 新一轮叫分时清零。
-     *  @Volatile：绘制线程读取、UI 线程写入。 */
-    @Volatile
-    private var lastBidRevealTimeMs = 0L
     /** 过牌代号计数器：每次任意玩家过牌自增，用于区分"连续两次不出"与新的一手 */
     private var passEpochCounter = 0
     /** 「不出」气泡淡入动画时长（ms）：仅用于驱动淡入期间的持续重绘；气泡本身不自动消退 */
@@ -303,66 +275,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         refresh()
     }
 
-    /** 更新叫分阶段展示（由 MainActivity 在叫分开始/某玩家叫分时调用）：
-     *  把各电脑玩家"已叫的分数 / 不叫 / 尚未行动"整组快照原子发布给绘制线程，
-     *  绘制时显示在该电脑牌背下方；发牌开始时由 clearAllPlayedCards 清除。
-     *  @param bidScores 各玩家本轮有效叫分（0=不叫或尚未叫）
-     *  @param bidDone   各玩家是否已完成本轮叫分 */
-    fun updateBidDisplay(bidScores: IntArray, bidDone: BooleanArray) {
+    /** 叫分阶段状态变化（由 MainActivity 在叫分开始 / 某玩家叫分时调用）：仅触发一次重绘；
+     *  绘制时直接读取引擎状态，无需 UI 侧快照或墙钟保护。 */
+    fun updateBidDisplay() {
         if (!::gameEngine.isInitialized) return
-        val phase = gameEngine.stateMachine.phase
-        // 越界值钳制到合法叫分范围，避免脏数据直接画出屏幕
-        val safeScores = IntArray(3) { i ->
-            bidScores.getOrElse(i) { 0 }.coerceIn(0, 3)
-        }
-        val safeDone = BooleanArray(3) { i -> bidDone.getOrElse(i) { false } }
-        val prevDone = bidSnapshot?.done
-        val newlyRevealed = prevDone == null ||
-            (0 until 3).any { i -> safeDone[i] && !(prevDone.getOrNull(i) ?: false) }
-        if (newlyRevealed) {
-            // 有新的叫分结果上屏：开启节拍保护期（期间不出现玩家的叫分按钮），
-            // 并安排一次到期强制重绘——叫分阶段画面静止会停帧，若不补这一帧，
-            // 保护期结束后按钮可能迟迟不出现。
-            lastBidRevealTimeMs = System.currentTimeMillis()
-            scheduleBidHoldExpiryRedraw()
-        }
-        bidSnapshot = BidSnapshot(phase, safeScores, safeDone)
         refresh()
-    }
-
-    /** 节拍保护期到期后强制重绘一帧（Handler.postDelayed 保证绘制线程已停帧时也能唤醒） */
-    private fun scheduleBidHoldExpiryRedraw() {
-        removeCallbacks(bidHoldExpiryRunnable)
-        postDelayed(bidHoldExpiryRunnable, BID_RESULT_MIN_REVEAL_MS + 60L)
-    }
-
-    private val bidHoldExpiryRunnable = Runnable {
-        // 保护期结束：刷新画面（此时轮到玩家的话，叫分按钮应正常出现）
-        refresh()
-        // 兜底二：若此刻恰好处于「xx开始叫地主 / xx成为地主」中央弹窗展示期——
-        // 弹窗的关闭回调由**绘制线程**在到期那一帧执行（drawLandlordPopup），而该帧发布的
-        // currentButtons 仍是保护期内未注册叫分按钮的旧列表；此后画面静止、绘制线程停帧，
-        // 弹窗消失后若无新帧发布，叫分按钮虽被绘制却不在触摸命中列表中，导致"看得见点不动"。
-        // 这里再补一次延时重绘：最后一帧在无保护期状态下发布，重新注册叫分按钮。
-        if (landlordPopupActive()) {
-            postDelayed({ refresh() }, LANDLORD_POPUP_MS + 120L)
-        }
-    }
-
-    /** 清除叫分节拍状态（新一轮发牌 / 新一轮叫分时调用）：
-     *  防止上一局的叫分时间戳残留导致本局保护期为 0，
-     *  出现「刚显示电脑叫3分就直接弹成为地主并进得出牌阶段」的异常节奏。 */
-    private fun resetBidRhythm() {
-        lastBidRevealTimeMs = 0L
-        removeCallbacks(bidHoldExpiryRunnable)
-    }
-
-    /** 主动清除叫分展示（保留给外部流程显式调用；正常情况下由 clearAllPlayedCards 统一清除） */
-    fun clearBidDisplay() {
-        if (bidSnapshot != null) {
-            bidSnapshot = null
-            refresh()
-        }
     }
 
     /** 「xx成为地主」中央弹窗（所有人叫分完成后弹出，保持 1.5s 后自动关闭并触发 onDismiss）。
@@ -395,23 +312,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun landlordPopupActive(): Boolean =
         landlordPopupText.isNotEmpty() && System.currentTimeMillis() <= landlordPopupUntil
 
-    /**
-     * 「叫分节拍保护期」：以下时段内**禁止绘制与响应玩家的叫分按钮**——
-     *  1) 中央「xx开始叫地主」提示框展示期间；
-     *  2) 任意一位玩家（含电脑）的叫分结果刚公布、屏幕尚未完整展示满一次保留时长
-     *     （[BID_RESULT_MIN_REVEAL_MS]，与引擎的 AI_BID_RESULT_HOLD_MS 一致）时。
-     * 若不做此保护，会出现两类异常：
-     *  - 电脑A 叫3分后，其「叫3分」还没看清就直接弹「电脑A成为地主」并进得出牌画面
-     *    （上一局的叫分时间戳残留导致保留期为 0）；
-     *  - 轮到电脑先叫分时，其结果还没上屏，玩家的「不叫 / 1分 / 2分 / 3分」按钮就提前出现。
-     * 用 currentTimeMillis 判断（与 lastBidRevealTimeMs 同一时钟），静止停帧时也不会误判。
-     */
-    private fun isBidHoldActive(): Boolean {
-        if (!::gameEngine.isInitialized) return false
-        if (landlordPopupActive()) return true
-        val t = lastBidRevealTimeMs
-        return t > 0L && System.currentTimeMillis() - t < BID_RESULT_MIN_REVEAL_MS
-    }
+
 
     /** 绘制「xx成为地主」中央弹窗：屏幕正中深色圆角底 + 金色大字；到期清除并触发关闭回调 */
     private fun drawLandlordPopup(canvas: Canvas) {
@@ -711,11 +612,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 叫分阶段：画面本身静止（已无「思考中」省略号等逐帧动画），仅在待重绘请求或弹窗活动期刷新
         // 「xx成为地主」弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段的回调
         if (landlordPopupActive()) return true
-        // 叫分节拍保护期内也需持续重绘：保护期结束（玩家的叫分按钮该出现/该消失）时能立刻刷新一帧，
-        // 否则静止停帧会让按钮延迟到下一次状态变化才出现
-        if (phase == GamePhase.BIDDING && lastBidRevealTimeMs > 0L) {
-            if (System.currentTimeMillis() - lastBidRevealTimeMs < BID_RESULT_MIN_REVEAL_MS + 120L) return true
-        }
         // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
         // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
         // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
@@ -820,9 +716,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             tablePlayedCards[i] = null
             passSlotEpoch[i] = -1
         }
-        // 开始发牌：清除叫分阶段的两台电脑叫分显示与节拍状态（防止上一局残留影响本局节奏）
-        bidSnapshot = null
-        resetBidRhythm()
+        // 开始发牌：叫分展示已改为按阶段驱动（仅 BIDDING 阶段绘制），阶段切走即自动消失，
+        // 无需在此显式清除；此处仅复位出牌桌面与「不出」气泡。
     }
 
     // ==================== 触摸事件（支持滑动选牌 + 按钮按压反馈） ====================
@@ -1019,10 +914,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 refresh()
             }
             action.startsWith("bid_") -> {
-                // 节拍保护期内（上一条叫分结果尚未完整展示满 1.5s）忽略叫分点击：
-                // 正常情况下此时按钮并未绘制/注册，这里再兜一层防止旧帧的按钮被误触，
-                // 出现"电脑的叫分还没看清就被玩家的叫分抢拍推进"。
-                if (isBidHoldActive()) {
+                // 中央弹窗（「xx开始叫地主」/「xx成为地主」）展示期间为模态遮挡，忽略叫分点击；
+                // 其它时间按钮始终与状态一致，无需额外墙钟保护。
+                if (landlordPopupActive()) {
                     refresh()
                     return
                 }
@@ -1509,48 +1403,38 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
      * - 已叫分：显示「叫1分 / 叫2分 / 叫3分」（金色）；不叫：显示「不叫」（灰色）
      * - 尚未行动的玩家：**不显示任何内容**（不再出现「电脑A/B思考中」提示——
      *   叫分节奏由引擎控制：每位结果展示后暂停约 1.5s 才进入下一位，结果上屏即清晰可读）
-     * 数据来自 updateBidDisplay 发布的快照；开始发牌（clearAllPlayedCards）后快照被清空，显示随之消失。
+     * 展示为引擎状态的纯函数：直接读 stateMachine.actedBidPlayers 与 Player.bidScore；
+     * 仅在 BIDDING 阶段绘制，阶段切到 PLAYING（地主确定）后自动消失。
      */
     private fun drawAiBidTips(canvas: Canvas) {
-        val snap = bidSnapshot ?: return
-        if (snap.phase != GamePhase.BIDDING) return
+        if (!::gameEngine.isInitialized) return
+        if (gameEngine.stateMachine.phase != GamePhase.BIDDING) return
         // 与 drawAIPlayer / drawAiTurnTip 的槽位坐标保持一致
-        drawAiBidTip(canvas, 1, screenWidth - 260f, 100f, snap)
-        drawAiBidTip(canvas, 2, 260f, 100f, snap)
+        drawAiBidTip(canvas, 1, screenWidth - 260f, 100f)
+        drawAiBidTip(canvas, 2, 260f, 100f)
     }
 
-    private fun drawAiBidTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float,
-                             snap: BidSnapshot) {
+    private fun drawAiBidTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
+        val sm = gameEngine.stateMachine
+        if (playerIndex !in sm.actedBidPlayers) return
+        val score = gameEngine.players[playerIndex].bidScore.coerceIn(0, 3)
         val label: String
         val color: Int
-        when {
-            snap.done[playerIndex] -> {
-                val score = snap.scores[playerIndex]
-                if (score > 0) {
-                    label = "叫${score}分"
-                    color = Color.parseColor("#FFD600")
-                } else {
-                    label = "不叫"
-                    color = Color.parseColor("#B0BEC5")
-                }
-            }
-            // 未行动：留白（不显示「思考中」）
-            else -> return
+        if (score > 0) {
+            label = "叫" + score + "分"
+            color = Color.parseColor("#FFD600")
+        } else {
+            label = "不叫"
+            color = Color.parseColor("#B0BEC5")
         }
         textPaint.textSize = AI_BID_TIP_TEXT_SIZE
-        // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制会残留其颜色
         textPaint.color = color
         textPaint.textAlign = Paint.Align.CENTER
-        // 位置与出牌阶段「思考中」提示一致（牌背下方），两个阶段不会同时出现，无重叠之虞
         drawTextWithShadow(canvas, label, centerX,
             topY + 180f + 16f + aiBackH + 52f, textPaint)
     }
 
-    /**
-     * 「轮到你出牌」提示：绘制在出牌按钮下方、玩家手牌上方。
-     * 按钮顶部 y = screenHeight - cardH - 380f，高 130f，故按钮底部 = screenHeight - cardH - 250f；
-     * 手牌高亮框顶部 = screenHeight - cardH - 110f，取两者之间的空隙居中。
-     */
+
     private fun drawHumanTurnTip(canvas: Canvas) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != 0) return
@@ -2051,10 +1935,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
             // 叫地主阶段
             phase == GamePhase.BIDDING && currentPlayer == 0 -> {
-                // 节拍保护期内（「xx开始叫地主」提示框展示中 / 某位玩家的叫分结果尚未完整展示满 1.5s）
-                // **不绘制、也不注册**玩家的叫分按钮：避免"电脑的叫分还没看清，玩家的不叫/1分/2分/3分
-                // 就提前冒出来"甚至抢在电脑之前叫分打断节奏。保护期结束由持续重绘自动恢复按钮。
-                if (!isBidHoldActive()) {
+                // 仅在中央弹窗（「xx开始叫地主」/「xx成为地主」）未展示、且人类尚未在本轮叫分时，
+                // 才显示/注册叫分按钮；弹窗遮挡或已叫分（如刚叫 3 分、引擎保留 1.5s 再弹地主）时隐藏，避免重复点击。
+                if (!landlordPopupActive() && 0 !in gameEngine.stateMachine.actedBidPlayers) {
                     // 只显示允许的分数（必须高于当前最高分，否则不叫）
                     val maxBid = gameEngine.stateMachine.currentMaxBid
                     val allowedScores = listOf(0, 1, 2, 3).filter { it == 0 || it > maxBid }

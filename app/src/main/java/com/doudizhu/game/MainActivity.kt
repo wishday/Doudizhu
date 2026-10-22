@@ -442,21 +442,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
      *  是否"已行动"由状态机直接判定：叫分顺序为 firstBidderIndex → +1 → +2，
      *  前 bidRoundCount 位即已完成本轮叫分的玩家。 */
     private fun publishBidDisplay() {
-        val sm = gameEngine.stateMachine
-        val scores = IntArray(3) { i -> gameEngine.players[i].bidScore.coerceIn(0, 3) }
-        val done = BooleanArray(3)
-        if (sm.phase == com.doudizhu.game.state.GamePhase.BIDDING) {
-            // 以状态机记录的「实际行动过的玩家集合」为权威数据标记已行动者：
-            // 正常流程与 bidRoundCount 等价；若有人叫3分提前结束（bidRoundCount 被置满），
-            // 只有真正行动过的玩家显示其结果，未行动者保持留白——屏幕上重点保留
-            // 叫3分那位电脑的「叫3分」展示（引擎会保持 1.5s 后再弹地主提示）。
-            for (i in 0 until 3) {
-                done[i] = i in sm.actedBidPlayers
-            }
-        }
-        // 叫分阶段只展示已公布的叫分结果（不再显示「思考中」提示）
-        gameSurfaceView.updateBidDisplay(scores, done)
+        // 叫分展示已改为「引擎状态纯函数」：状态变化只需触发一次重绘，绘制时直接读引擎。
+        gameSurfaceView.updateBidDisplay()
     }
+
 
     override fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>) {
         runOnUiThread {
@@ -464,8 +453,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             // 弹窗关闭回调中清除所有电脑的叫分结果，然后引擎正式进入正常出牌阶段。
             val landlordName = gameEngine.players[landlordIndex].name
             gameSurfaceView.showLandlordPopup(landlordName) {
-                // 弹窗已关闭：先清除两台电脑的叫分展示，再切入出牌阶段（触发逐帧重绘，清屏立即生效）
-                gameSurfaceView.clearBidDisplay()
+                // 弹窗已关闭：阶段即将切到 PLAYING，叫分展示由绘制逻辑按阶段自动清除；
+                // 直接进入出牌阶段（触发逐帧重绘，清屏立即生效）。
                 gameEngine.proceedAfterLandlordPopup()
             }
         }
