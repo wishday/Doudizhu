@@ -8,6 +8,9 @@ import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.os.Handler
+import android.os.Looper
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -34,8 +37,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 游戏引擎引用 */
     lateinit var gameEngine: GameEngine
 
-    /** 绘制线程 */
-    private var drawThread: DrawThread? = null
+    /** 渲染节奏由 Choreographer 的 vsync 帧回调驱动（替换原 Thread.sleep 轮询，消除掉帧/抖动） */
+    private val choreographer: Choreographer = Choreographer.getInstance()
+    @Volatile private var frameScheduled = false
+    /** Surface 是否有效（destroyed 后置 false，避免向已销毁的 Surface 提交画布） */
+    @Volatile private var surfaceAlive = false
+    /** 有待重绘请求（refresh 置位，绘制后清除；多次 refresh 合并为一帧） */
+    @Volatile private var pendingRedraw = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val frameCallback = Choreographer.FrameCallback { onFrame(it) }
 
     /** 屏幕尺寸 */
     private var screenWidth = 0
@@ -222,6 +232,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 回合呼吸光晕 shader 缓存（半径/alpha 量化后按需重建，避免每帧分配） */
     private var breathGlowShader: RadialGradient? = null
     private var breathGlowKey = ""
+    /** 复用矩形（避免逐帧 new RectF 产生 GC 压力） */
+    private val scratchRect = RectF()
+    /** 选中金色光晕 shader 缓存（按量化 alpha 重建，稳态选中不重建） */
+    private var selectGlowShader: RadialGradient? = null
+    private var selectGlowKey = ""
     /** 「不出」气泡底漆（胶囊 + 尾尖共用，随动画淡入调整 alpha） */
     private val passBubblePaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#37474F")
@@ -267,6 +282,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun registerPassBubble(playerIndex: Int) {
         if (playerIndex !in 0..2) return
         tablePlayedCards[playerIndex] = null
+        playAnimEnd[playerIndex] = 0L
         for (i in passSlotEpoch.indices) {
             if (i != playerIndex) passSlotEpoch[i] = -1
         }
@@ -308,7 +324,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         showCenterPopup("${name}成为地主", LANDLORD_POPUP_MS, onDismiss)
     }
 
-    /** 地主/中央提示弹窗是否仍在展示期内（供 shouldDraw 持续重绘以便到期自动消失） */
+    /** 地主/中央提示弹窗是否仍在展示期内（供 shouldKeepDrawing 持续重绘以便到期自动消失） */
     private fun landlordPopupActive(): Boolean =
         landlordPopupText.isNotEmpty() && System.currentTimeMillis() <= landlordPopupUntil
 
@@ -395,6 +411,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val liftValues = FloatArray(40)
     /** 桌面出牌入场动画起始时间（按玩家槽位） */
     private val playAnimStart = LongArray(3)
+    /** 桌面出牌落桌入场动画结束时间（用于精准判断动画是否仍在进行，避免 PLAYING 停帧误杀） */
+    private val playAnimEnd = LongArray(3)
 
     /** 结算横幅状态：本局人类是否获胜 + 进入结算的时间戳（滑入动画起点，由 MainActivity 在 onGameOver 时调用） */
     @Volatile
@@ -567,8 +585,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         screenHeight = height
         recalcSizes()
         initAudio()
-        refresh()           // 重新进入应用时强制至少重绘一帧，避免主界面/结算等静态界面黑屏
-        startDrawThread()
+        startRendering()    // 重新进入应用时启动 vsync 渲染（首帧由 Choreographer 触发，避免静态界面黑屏）
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
@@ -578,56 +595,127 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        stopDrawThread()
+        stopRendering()
         soundEngine?.stop()
         soundEngine?.release()
         soundEngine = null
     }
 
-    fun startDrawThread() {
-        drawThread = DrawThread(holder, this).also { it.start() }
+    fun startRendering() {
+        surfaceAlive = true
+        pendingRedraw = true
+        scheduleFrame()
     }
 
-    fun stopDrawThread() {
-        drawThread?.running = false
-        drawThread = null
+    fun stopRendering() {
+        surfaceAlive = false
+        frameScheduled = false
+        pendingRedraw = false
+        choreographer.removeFrameCallback(frameCallback)
     }
 
-    /** 待重绘请求计数（AtomicInteger：避免绘制期间发生的 refresh 被 onFrameDrawn 丢失） */
-    private val redrawRequests = java.util.concurrent.atomic.AtomicInteger(1)
-
-    /** 请求重绘：状态变化时由引擎回调/触摸事件调用 */
+    /** 请求重绘：状态变化/触摸事件调用；可在任意线程调用（非主线程经 Handler 投递）。
+     *  仅置位 pendingRedraw 并幂等注册下一帧，不计数——多次 refresh 合并为一帧。 */
     fun refresh() {
-        redrawRequests.incrementAndGet()
+        pendingRedraw = true
+        if (Looper.myLooper() == Looper.getMainLooper()) scheduleFrame()
+        else mainHandler.post { scheduleFrame() }
     }
 
-    /** 绘制线程是否需要绘制（有变化，或存在动画/消息需要持续刷新） */
-    fun shouldDraw(): Boolean {
-        if (redrawRequests.get() > 0) return true
-        if (!::gameEngine.isInitialized) return false
+    /** 幂等注册下一帧 vsync 回调，避免重复注册导致一帧多次绘制 */
+    private fun scheduleFrame() {
+        if (frameScheduled) return
+        frameScheduled = true
+        choreographer.postFrameCallback(frameCallback)
+    }
+
+    /** 每帧 vsync 回调：对齐系统刷新节奏，消除原 Thread.sleep 轮询的掉帧/抖动 */
+    private fun onFrame(frameTimeNanos: Long) {
+        frameScheduled = false
+        if (!surfaceAlive) { pendingRedraw = false; return }
+        val need = pendingRedraw || shouldKeepDrawing()
+        if (need) {
+            drawFrame()
+            pendingRedraw = false
+        }
+        // 仍有动画/弹窗需持续刷新才续帧，否则停帧省电
+        if (surfaceAlive && shouldKeepDrawing()) {
+            frameScheduled = true
+            choreographer.postFrameCallback(frameCallback)
+        }
+    }
+
+    /** 锁定画布绘制一帧（在主线程 Choreographer 回调中执行，单线程无需额外加锁） */
+    private fun drawFrame() {
+        var canvas: Canvas? = null
+        try {
+            canvas = holder.lockCanvas()
+            if (canvas != null) drawGame(canvas)
+        } catch (_: Exception) {
+        } finally {
+            canvas?.let { holder.unlockCanvasAndPost(it) }
+        }
+    }
+
+    /** 是否仍需持续绘制：有待重绘请求，或存在需逐帧刷新的动画/弹窗。
+     *  出牌阶段（PLAYING）仅在「有动画在播」时持续刷新；人类回合静止画面会停帧（省电），
+     *  动画播完或人类出牌后自动停帧，下一次触摸/状态变化由 refresh 唤醒。 */
+    fun shouldKeepDrawing(): Boolean {
+        if (!::gameEngine.isInitialized) return isHandReveal || landlordPopupActive()
         if (isHandReveal) return true
         val phase = gameEngine.stateMachine.phase
-        // 出牌阶段：呼吸光晕/思考省略号等连续动画需逐帧刷新
-        if (phase == GamePhase.PLAYING) return true
-        // 叫分阶段：画面本身静止（已无「思考中」省略号等逐帧动画），仅在待重绘请求或弹窗活动期刷新
-        // 「xx成为地主」弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段的回调
+        // 出牌阶段：呼吸光晕/思考省略号/落桌入场/选中上浮等动画在播时持续刷新
+        if (phase == GamePhase.PLAYING) return playingHasAnimation()
+        // 叫分阶段画面静止（已无逐帧动画），仅弹窗活动期刷新
         if (landlordPopupActive()) return true
-        // 「不出」气泡淡入期间需持续重绘（非 PLAYING 阶段或请求被合并时也能正常动画）；
-        // 用 currentTimeMillis 与注册时钟一致，避免 animTime（帧首快照）偏旧导致多刷一帧。
-        // 注意：气泡不自动消退，淡入结束后由出牌/清桌/新气泡逻辑负责移除
         for (i in passSlotEpoch.indices) {
             if (passSlotEpoch[i] >= 0 && System.currentTimeMillis() - passAnimStart[i] < PASS_BUBBLE_FADEIN_MS) return true
         }
-        // 结算横幅：滑入 + 停留 3 秒 + 淡出期间持续重绘；淡出结束后停止（省电）
         if ((phase == GamePhase.GAME_OVER || phase == GamePhase.SETTLING) && bannerActive()) return true
-        // 错误提示弹窗展示期内需持续重绘以在到期后自动消失（否则静止画面会永久残留旧提示）
         return hintActive(errorText, errorTimer)
     }
 
-    /** 本帧已绘制完成（仅当恰好有一个待处理请求时清空，避免丢失绘制期间新到达的 refresh） */
-    fun onFrameDrawn() {
-        redrawRequests.compareAndSet(1, 0)
+    /** PLAYING 阶段是否存在需逐帧刷新的动画/弹窗（决定能否停帧）。
+     *  注意：地主/中央弹窗与错误提示虽非「动画」，但需在展示期内持续重绘以便到期自动关闭/消失，
+     *  否则静止画面会永久残留旧提示；原 shouldDraw 对 PLAYING 无条件返回 true 已隐含覆盖，此处需显式补回。 */
+    private fun playingHasAnimation(): Boolean {
+        // 地主/中央提示弹窗展示期内需持续重绘，以便到期自动关闭并触发进入出牌阶段
+        if (landlordPopupActive()) return true
+        // 错误提示弹窗展示期内需持续重绘，以便到期后自动消失（否则静止画面会永久残留）
+        if (hintActive(errorText, errorTimer)) return true
+        val sm = gameEngine.stateMachine
+        // 当前为 AI 回合：呼吸光晕 + 「思考中」省略号需逐帧刷新
+        if (sm.currentPlayerIndex != 0) return true
+        // 任一玩家桌面牌落桌入场动画进行中
+        if (playAnimActive()) return true
+        // 「不出」气泡淡入中
+        for (i in passSlotEpoch.indices) {
+            if (passSlotEpoch[i] >= 0 && System.currentTimeMillis() - passAnimStart[i] < PASS_BUBBLE_FADEIN_MS) return true
+        }
+        // 人类手牌选中上浮缓动尚未收敛
+        if (humanLiftAnimating()) return true
+        return false
     }
+
+    /** 桌面出牌落桌入场动画是否仍在进行（以动画结束时间为准，精准不误杀） */
+    private fun playAnimActive(): Boolean {
+        for (i in playAnimEnd.indices) {
+            if (playAnimEnd[i] > 0 && animTime < playAnimEnd[i]) return true
+        }
+        return false
+    }
+
+    /** 人类手牌选中上浮缓动是否仍在向目标值靠拢（未收敛则仍在动画） */
+    private fun humanLiftAnimating(): Boolean {
+        val hand = gameEngine.players[0].handCards
+        val sel = gameEngine.selectedCardIndices
+        for (i in hand.indices) {
+            val target = if (i in sel) 60f else 0f
+            if (kotlin.math.abs(liftValues[i] - target) >= 0.5f) return true
+        }
+        return false
+    }
+
 
     /** 提示弹窗是否仍在展示期内（供 shouldDraw 判断是否需要持续重绘以自动消失） */
     private fun hintActive(text: String, timer: Long): Boolean =
@@ -635,7 +723,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 结算横幅是否仍处于活动期（滑入 450ms + 停留 3 秒 + 淡出 400ms，共约 4.05 秒；结束后停止重绘省电）。
      *  必须用 currentTimeMillis：横幅静止后不再有 refresh，animTime 会冻结在最后一帧的旧值，
-     *  若用 animTime 判断则 elapsed 永远偏小 → shouldDraw 恒真 → 停帧逻辑失效、持续耗电。 */
+     *  若用 animTime 判断则 elapsed 永远偏小 → shouldKeepDrawing 恒真 → 停帧逻辑失效、持续耗电。 */
     private fun bannerActive(): Boolean =
         gameOverAnimStart > 0L && System.currentTimeMillis() - gameOverAnimStart < BANNER_TOTAL_MS
 
@@ -701,12 +789,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
      *  有人出牌即"新的一手开始"：清除其它玩家残留的「不出」气泡（气泡不自动消退，由此处显式清理） */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
         if (cards != null && cards.isNotEmpty()) {
-            playAnimStart[playerIndex] = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            playAnimStart[playerIndex] = now
+            playAnimEnd[playerIndex] = now + (cards.size - 1) * 75L + 400L + 80L
             for (i in passSlotEpoch.indices) {
                 if (i != playerIndex) passSlotEpoch[i] = -1
             }
+        } else {
+            playAnimEnd[playerIndex] = 0L
         }
         tablePlayedCards[playerIndex] = cards
+        refresh()
     }
 
     /** 清除所有桌面出牌展示（新一手开始/重开一局/返回主界面时；结算时不调用，保留最后一手牌）；
@@ -714,6 +807,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun clearAllPlayedCards() {
         for (i in tablePlayedCards.indices) {
             tablePlayedCards[i] = null
+            playAnimEnd[i] = 0L
             passSlotEpoch[i] = -1
         }
         // 开始发牌：叫分展示已改为按阶段驱动（仅 BIDDING 阶段绘制），阶段切走即自动消失，
@@ -1278,19 +1372,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             canvas.save()
             canvas.translate(centerX - panelW / 2f, topY)
             breathGlowPaint.shader = breathGlowShader
-            canvas.drawRoundRect(RectF(-glowR, -glowR, panelW + glowR, panelH + glowR),
-                30f, 30f, breathGlowPaint)
+            scratchRect.set(-glowR, -glowR, panelW + glowR, panelH + glowR)
+            canvas.drawRoundRect(scratchRect, 30f, 30f, breathGlowPaint)
             breathGlowPaint.shader = null
             canvas.restore()
         }
 
         // 信息面板：柔和投影 + 深色渐变玻璃底（缓存 shader） + 细描边
         aiInfoPaint.color = Color.argb(70, 0, 0, 0)
-        canvas.drawRoundRect(RectF(panelX + 3f, topY + 6f, panelX + panelW + 3f, topY + panelH + 6f),
-            18f, 18f, aiInfoPaint)
+        scratchRect.set(panelX + 3f, topY + 6f, panelX + panelW + 3f, topY + panelH + 6f)
+        canvas.drawRoundRect(scratchRect, 18f, 18f, aiInfoPaint)
         aiInfoPaint.shader = aiPanelShader
         aiInfoPaint.color = Color.WHITE
-        canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, aiInfoPaint)
+        scratchRect.set(panelX, topY, panelX + panelW, topY + panelH)
+        canvas.drawRoundRect(scratchRect, 18f, 18f, aiInfoPaint)
         aiInfoPaint.shader = null
         // 面板描边：该玩家本轮已「不出」时用中性灰（提示已行动），否则金色细边
         // 「不出」气泡不自动消退：只要槽位有气泡代号就持续显示，直到他人出牌/过牌或清桌时移除
@@ -1298,7 +1393,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         cardBorderPaint.color = if (showPassBubble) Color.argb(60, 176, 190, 197)
             else Color.argb(70, 255, 236, 179)
         cardBorderPaint.strokeWidth = 2f
-        canvas.drawRoundRect(RectF(panelX, topY, panelX + panelW, topY + panelH), 18f, 18f, cardBorderPaint)
+        scratchRect.set(panelX, topY, panelX + panelW, topY + panelH)
+        canvas.drawRoundRect(scratchRect, 18f, 18f, cardBorderPaint)
 
         // 角色（身份：地主/农民）移到顶部，字号用原名称的 50f，颜色保持不变
         val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
@@ -1355,7 +1451,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val bx = centerX - bw / 2f
             val by = topY + panelH + 16f + aiBackH + 26f - (1f - e) * 14f
             passBubblePaint.alpha = (200 * e).toInt().coerceIn(0, 255)
-            canvas.drawRoundRect(RectF(bx, by, bx + bw, by + bh), bh / 2f, bh / 2f, passBubblePaint)
+            scratchRect.set(bx, by, bx + bw, by + bh)
+            canvas.drawRoundRect(scratchRect, bh / 2f, bh / 2f, passBubblePaint)
             // 尾尖小三角（指向上方牌堆）：随气泡放大同比加宽加高，保持比例
             passTrianglePath.reset()
             passTrianglePath.moveTo(centerX - 18f, by + 2f)
@@ -1588,11 +1685,40 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         return 1f + c3 * x * x * x + c1 * x * x
     }
 
+    /** 选中金色光晕 shader 缓存：本地坐标（以牌中心为原点），按量化 alpha 重建，稳态选中（alpha=1）不重建 */
+    private fun updateSelectGlowShader(alpha: Float) {
+        val qa = (alpha * 20f).toInt().coerceIn(0, 20)
+        if (selectGlowKey != qa.toString()) {
+            val a110 = (110 * alpha).toInt().coerceIn(0, 255)
+            val a40 = (40 * alpha).toInt().coerceIn(0, 255)
+            selectGlowShader = RadialGradient(
+                cardW / 2f, cardH / 2f, max(cardW, cardH) * 0.75f,
+                intArrayOf(Color.argb(a110, 255, 214, 64),
+                           Color.argb(a40, 255, 214, 64), Color.TRANSPARENT),
+                floatArrayOf(0.62f, 0.8f, 1f),
+                Shader.TileMode.CLAMP
+            )
+            selectGlowKey = qa.toString()
+        }
+    }
+
     /** 绘制单张扑克牌（手牌，大尺寸）；alpha<1 时用于开局淡入，绘制后还原共享画笔的 alpha */
     private fun drawCard(canvas: Canvas, x: Float, y: Float, card: Card,
                          selected: Boolean, rotation: Float = 0f, alpha: Float = 1f) {
         val fade = alpha < 0.999f
         val a = if (fade) (alpha * 255f).toInt().coerceIn(0, 255) else 255
+        // 选中金色光晕（牌之下、未旋转；缓存本地坐标 shader + 平移到牌位，避免每帧 new RadialGradient）
+        if (selected) {
+            updateSelectGlowShader(alpha)
+            canvas.save()
+            canvas.translate(x, y)
+            selectGlowPaint.shader = selectGlowShader
+            scratchRect.set(-12f, -12f, cardW + 12f, cardH + 12f)
+            canvas.drawRoundRect(scratchRect, cardRadius + 10f, cardRadius + 10f, selectGlowPaint)
+            selectGlowPaint.shader = null
+            canvas.restore()
+        }
+
         canvas.save()
         canvas.rotate(rotation, x + cardW / 2, y + cardH / 2)
 
@@ -1604,19 +1730,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             cardRadius, cardRadius, shadowPaint)
         if (fade) shadowPaint.alpha = 255
 
-        // 选中金色光晕（径向渐变包裹整牌）
-        if (selected) {
-            selectGlowPaint.shader = RadialGradient(
-                x + cardW / 2, y + cardH / 2, max(cardW, cardH) * 0.75f,
-                intArrayOf(Color.argb((110 * alpha).toInt(), 255, 214, 64),
-                           Color.argb((40 * alpha).toInt(), 255, 214, 64), Color.TRANSPARENT),
-                floatArrayOf(0.62f, 0.8f, 1f),
-                Shader.TileMode.CLAMP
-            )
-            canvas.drawRoundRect(x - 12f, y - 12f, x + cardW + 12f, y + cardH + 12f,
-                cardRadius + 10f, cardRadius + 10f, selectGlowPaint)
-            selectGlowPaint.shader = null
-        }
 
         // 牌面：象牙白→冷白微渐变（更有纸质厚度感）
         cardPaint.shader = cardFaceShader
@@ -2070,10 +2183,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.translate(bx, by)
         bannerPaint.shader = if (won) bannerGradWin else bannerGradLose
         bannerPaint.alpha = (235 * appear).toInt().coerceIn(0, 255)
-        canvas.drawRoundRect(RectF(0f, 0f, bw, bh), 26f, 26f, bannerPaint)
+        scratchRect.set(0f, 0f, bw, bh)
+        canvas.drawRoundRect(scratchRect, 26f, 26f, bannerPaint)
         bannerPaint.shader = null
         bannerStrokePaint.alpha = (160 * appear).toInt().coerceIn(0, 255)
-        canvas.drawRoundRect(RectF(0f, 0f, bw, bh), 26f, 26f, bannerStrokePaint)
+        scratchRect.set(0f, 0f, bw, bh)
+        canvas.drawRoundRect(scratchRect, 26f, 26f, bannerStrokePaint)
         bannerPaint.alpha = 255
         canvas.restore()
 
@@ -2111,7 +2226,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 柔和投影：抬起悬浮、按下贴桌
         shadowPaint.color = Color.argb(if (isPressed) 60 else 100, 0, 0, 0)
         val shOff = if (isPressed) 3f else 7f
-        canvas.drawRoundRect(RectF(x + 3f, y + shOff, x + w + 3f, y + h + shOff), 22f, 22f, shadowPaint)
+        scratchRect.set(x + 3f, y + shOff, x + w + 3f, y + h + shOff)
+        canvas.drawRoundRect(scratchRect, 22f, 22f, shadowPaint)
         // 主体：纵向渐变（亮面→底色），比纯色更立体
         buttonPaint.shader = LinearGradient(
             0f, y, 0f, y + h,
@@ -2128,7 +2244,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
 
         // 按钮顶部高光弧带 + 细描边（玻璃边缘感）
-        canvas.drawRoundRect(RectF(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f), 22f, 22f, buttonHighlightPaint)
+        scratchRect.set(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f)
+        canvas.drawRoundRect(scratchRect, 22f, 22f, buttonHighlightPaint)
         canvas.drawRoundRect(rect, 22f, 22f, buttonStrokePaint)
 
         // 文字颜色固定白色：buttonTextPaint 被设置窗口等复用且会被改成灰色，
@@ -2182,7 +2299,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val isPressed = action == pressedAction
         shadowPaint.color = Color.argb(if (isPressed) 60 else 100, 0, 0, 0)
         val shOff = if (isPressed) 3f else 7f
-        canvas.drawRoundRect(RectF(x + 3f, y + shOff, x + w + 3f, y + h + shOff), 22f, 22f, shadowPaint)
+        scratchRect.set(x + 3f, y + shOff, x + w + 3f, y + h + shOff)
+        canvas.drawRoundRect(scratchRect, 22f, 22f, shadowPaint)
         buttonPaint.shader = LinearGradient(
             0f, y, 0f, y + h,
             lighten(color, 0.20f), if (isPressed) pressedColor else darken(color, 0.10f),
@@ -2192,7 +2310,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawRoundRect(rect, 22f, 22f, buttonPaint)
         buttonPaint.shader = null
         if (isPressed) canvas.drawRoundRect(rect, 22f, 22f, buttonOverlayPaint)
-        canvas.drawRoundRect(RectF(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f), 22f, 22f, buttonHighlightPaint)
+        scratchRect.set(x + 3f, y + 2f, x + w - 3f, y + h * 0.48f)
+        canvas.drawRoundRect(scratchRect, 22f, 22f, buttonHighlightPaint)
         canvas.drawRoundRect(rect, 22f, 22f, buttonStrokePaint)
 
         val stat = modeStats[mode] ?: ModeStat()
@@ -2245,7 +2364,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         for (i in 0 until teeth) {
             canvas.save()
             canvas.rotate(360f / teeth * i)
-            canvas.drawRoundRect(RectF(-toothW / 2, -r * 0.95f, toothW / 2, -r * 0.62f), 3f, 3f, gearPaint)
+            scratchRect.set(-toothW / 2, -r * 0.95f, toothW / 2, -r * 0.62f)
+            canvas.drawRoundRect(scratchRect, 3f, 3f, gearPaint)
             canvas.restore()
         }
         canvas.drawCircle(0f, 0f, r * 0.62f, gearPaint)
@@ -2523,31 +2643,4 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.textAlign = Paint.Align.CENTER
     }
 
-    /** 绘制线程 */
-    private class DrawThread(
-        private val holder: SurfaceHolder,
-        private val view: GameSurfaceView
-    ) : Thread("GameDrawThread") {
-        @Volatile var running = true
-        override fun run() {
-            while (running) {
-                // 空闲时（无变化、无动画）进入低频等待，节省 CPU/电量
-                if (!view.shouldDraw()) {
-                    try { sleep(50) } catch (_: InterruptedException) { break }
-                    continue
-                }
-                var canvas: Canvas? = null
-                try {
-                    canvas = holder.lockCanvas()
-                    if (canvas != null) {
-                        synchronized(holder) { view.drawGame(canvas) }
-                        view.onFrameDrawn()
-                    }
-                } catch (_: Exception) {} finally {
-                    canvas?.let { holder.unlockCanvasAndPost(it) }
-                }
-                try { sleep(33) } catch (_: InterruptedException) { break }
-            }
-        }
-    }
 }
