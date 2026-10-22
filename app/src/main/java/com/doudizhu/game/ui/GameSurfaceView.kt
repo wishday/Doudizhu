@@ -45,7 +45,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 有待重绘请求（refresh 置位，绘制后清除；多次 refresh 合并为一帧） */
     @Volatile private var pendingRedraw = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val frameCallback = Choreographer.FrameCallback { onFrame(it) }
+    private val frameCallback = Choreographer.FrameCallback { _ -> onFrame() }
 
     /** 屏幕尺寸 */
     private var screenWidth = 0
@@ -305,6 +305,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     @Volatile
     private var landlordPopupUntil = 0L
     private var onLandlordPopupDismiss: Runnable? = null
+    /** 弹窗自动关闭的待执行 Runnable：由主线程定时器驱动而非逐帧绘制，解除对前台帧渲染的依赖 */
+    private var landlordPopupCloseRunnable: Runnable? = null
     /** 地主弹窗展示时长（ms）：保持 1.5s 后关闭，随后进入正常出牌阶段 */
     private val LANDLORD_POPUP_MS = 1500L
 
@@ -314,7 +316,27 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun showCenterPopup(text: String, durationMs: Long, onDismiss: () -> Unit) {
         landlordPopupText = text
         landlordPopupUntil = System.currentTimeMillis() + durationMs
-        onLandlordPopupDismiss = Runnable { post(onDismiss) }
+        // onDismiss 经主线程 Handler 投递，避免 View.post 在窗口 detached 时不执行
+        onLandlordPopupDismiss = Runnable { mainHandler.post(onDismiss) }
+        // 取消上一次未触发的关闭任务，防止串场/重复关闭
+        landlordPopupCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable { closeLandlordPopup() }
+        landlordPopupCloseRunnable = runnable
+        // 关键修复：用主线程定时器在到期时主动关闭弹窗。该定时器不依赖 Choreographer 逐帧绘制，
+        // 即使窗口不可见（最小化/锁屏/被覆盖）也会照常触发，从而解除「卡在 xx开始叫地主」的根因。
+        mainHandler.postDelayed(runnable, durationMs)
+        refresh()
+    }
+
+    /** 统一关闭中央弹窗：清空文本、触发 onDismiss、请求重绘。幂等（已关闭则直接返回）。 */
+    private fun closeLandlordPopup() {
+        if (landlordPopupText.isEmpty()) return
+        landlordPopupText = ""
+        val cb = onLandlordPopupDismiss
+        onLandlordPopupDismiss = null
+        landlordPopupCloseRunnable = null
+        cb?.run()
+        // 非逐帧阶段若仅 return 不刷新，弹窗会残留在最后一帧画面上，必须再触发一次重绘
         refresh()
     }
 
@@ -334,13 +356,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawLandlordPopup(canvas: Canvas) {
         val text = landlordPopupText
         if (text.isEmpty()) return
+        // 兜底：若某帧已绘制且发现已超时（定时器偶发晚于绘制触发），交由统一关闭入口处理；
+        // 正常情况下由 closeLandlordPopup 定时器主动关闭，此处仅为双保险。
         if (System.currentTimeMillis() > landlordPopupUntil) {
-            landlordPopupText = ""
-            val cb = onLandlordPopupDismiss
-            onLandlordPopupDismiss = null
-            cb?.run()
-            // 必须再触发重绘：非逐帧阶段若仅 return 不刷新，弹窗会残留在最后一帧画面上
-            refresh()
+            closeLandlordPopup()
             return
         }
 
@@ -359,6 +378,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 错误提示（红色弹窗）：仅在非法操作时弹出，展示到期后自动清除 */
     private var errorText = ""
     private var errorTimer = 0L
+    /** 错误提示自动清除的待执行 Runnable：主线程定时器驱动，解除对帧渲染的依赖 */
+    private var errorCloseRunnable: Runnable? = null
 
     /** 滑动选牌状态 */
     private var isDragging = false
@@ -630,7 +651,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 每帧 vsync 回调：对齐系统刷新节奏，消除原 Thread.sleep 轮询的掉帧/抖动 */
-    private fun onFrame(frameTimeNanos: Long) {
+    private fun onFrame() {
         frameScheduled = false
         if (!surfaceAlive) { pendingRedraw = false; return }
         val need = pendingRedraw || shouldKeepDrawing()
@@ -757,6 +778,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         errorText = msg
         errorTimer = System.currentTimeMillis() + durationMs
         playErrorSound()
+        errorCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable { closeError() }
+        errorCloseRunnable = runnable
+        // 关键修复：错误提示的清除同样改用主线程定时器，不再依赖逐帧绘制检测超时，
+        // 避免窗口不可见时红色提示滞留，且恢复后仍能正确清除。
+        mainHandler.postDelayed(runnable, durationMs)
+        refresh()
+    }
+
+    /** 统一清除错误提示：清空文本并请求重绘。幂等。 */
+    private fun closeError() {
+        if (errorText.isEmpty()) return
+        errorText = ""
+        errorCloseRunnable = null
         refresh()
     }
 
@@ -1023,6 +1058,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 // 重开新局：立即作废在途的「xx成为地主」弹窗（若此刻正处于弹窗 1.5s 等待期）
                 landlordPopupText = ""
                 onLandlordPopupDismiss = null
+                // 同步取消弹窗关闭定时器，避免遗留的 pending Runnable 在后台仍触发（虽因 text 已空而 no-op）
+                landlordPopupCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+                landlordPopupCloseRunnable = null
+                // 一并清理可能残留的错误提示，避免重开局后旧红字短暂残留
+                errorCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+                errorCloseRunnable = null
+                errorText = ""
                 gameOverAnimStart = 0L   // 重置结算横幅时间轴，防止新一局 GAME_OVER 前误画残留横幅
                 hapticActionConfirm()
                 gameEngine.startNewGame()
@@ -1034,6 +1076,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 // 返回主界面：同样作废在途的地主弹窗，防止旧回调串场触发新对局状态切换
                 landlordPopupText = ""
                 onLandlordPopupDismiss = null
+                // 同步取消弹窗关闭定时器（同 restart）
+                landlordPopupCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+                landlordPopupCloseRunnable = null
+                // 一并清理可能残留的错误提示
+                errorCloseRunnable?.let { mainHandler.removeCallbacks(it) }
+                errorCloseRunnable = null
+                errorText = ""
                 hapticActionConfirm()
                 gameEngine.returnToMenu()
             }
@@ -2586,7 +2635,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
      *  （PLAYING 阶段本就逐帧重绘，此处多发的一次 refresh 会被立即消费，无额外开销） */
     private fun drawError(canvas: Canvas) {
         if (errorText.isEmpty()) return
-        if (System.currentTimeMillis() > errorTimer) { errorText = ""; refresh(); return }
+        // 兜底：超时由 closeError 定时器主动清除，此处仅在绘制帧先于定时器到达时做双保险
+        if (System.currentTimeMillis() > errorTimer) { closeError(); return }
 
         textPaint.textSize = 48f
         textPaint.color = Color.parseColor("#FF5252")
