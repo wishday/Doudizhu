@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- API 27+：windowLayoutInDisplayCutoutMode 属性从 Android 8.1 (API 27) 才存在，
+         放在 values-v27 避免低版本设备因未知属性产生告警；
+         ALWAYS 模式只能代码设置（见 MainActivity.applyImmersiveFullscreen） -->
+    <style name="Theme.DouDiZhu.Immersive" parent="Theme.DouDiZhu">
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

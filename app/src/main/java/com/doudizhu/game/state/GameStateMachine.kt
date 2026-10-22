@@ -34,6 +34,26 @@ class GameStateMachine {
     /** 叫分轮次计数 */
     var bidRoundCount: Int = 0
 
+    /**
+     * 本轮叫分是否已因「有人直接叫3分」而提前结束（阶段结束后仍保留，直到下轮 startBidding / startDealing 复位）。
+     * 引擎与 UI 据此走「叫3分」专属节拍：公布该玩家的「叫3分」后保持展示一段时间再弹「xx成为地主」，
+     * **不补发**其他未行动玩家的默认叫分（未行动者在屏幕上保持留白）。
+     */
+    var biddingEndedByThreeBid: Boolean = false
+        private set
+
+    /**
+     * 本轮中实际完成叫分动作的玩家索引集合（每次 processBid 记录一位）。
+     * 叫3分提前结束时 bidRoundCount 已被置满 3，不能再用于推断"谁已行动"；
+     * UI 改读本集合作为权威数据，精确标记已行动玩家、其余留白。
+     * CopyOnWrite：绘制/UI 线程读取快照与引擎线程写入并发安全。
+     */
+    val actedBidPlayers: java.util.concurrent.CopyOnWriteArraySet<Int> =
+        java.util.concurrent.CopyOnWriteArraySet()
+
+    /** 首位叫分玩家索引（叫分顺序为 firstBidderIndex → +1 → +2，UI 据此推断各人已行动状态） */
+    var firstBidderIndex: Int = 0
+
     /** 上一手出牌的牌组信息 */
     var lastPlayedGroup: com.doudizhu.game.model.CardGroup? = null
 
@@ -81,6 +101,9 @@ class GameStateMachine {
         currentMaxBid = 0
         maxBidPlayerIndex = -1
         bidRoundCount = 0
+        biddingEndedByThreeBid = false
+        actedBidPlayers.clear()
+        firstBidderIndex = 0
         hasLandlord = false
         playHistory.clear()
         bombCount = 0
@@ -108,6 +131,9 @@ class GameStateMachine {
     fun startBidding(firstBidPlayer: Int) {
         phase = GamePhase.BIDDING
         currentPlayerIndex = firstBidPlayer
+        firstBidderIndex = firstBidPlayer
+        biddingEndedByThreeBid = false
+        actedBidPlayers.clear()
     }
 
     /**
@@ -123,10 +149,15 @@ class GameStateMachine {
             currentMaxBid = realScore
             maxBidPlayerIndex = playerIndex
         }
-        bidRoundCount++
 
-        // 如果有人叫3分，直接结束
+        bidRoundCount++
+        actedBidPlayers.add(playerIndex)
+
+        // 如果有人叫3分，直接结束：其余玩家不再行动（屏幕上保持留白、不补发默认叫分），
+        // 引擎据 biddingEndedByThreeBid 把这位的「叫3分」结果保持展示一段时间后再弹「xx成为地主」
         if (realScore == 3) {
+            bidRoundCount = 3
+            biddingEndedByThreeBid = true
             return finalizeBidding()
         }
 

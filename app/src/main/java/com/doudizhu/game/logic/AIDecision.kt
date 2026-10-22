@@ -390,8 +390,8 @@ object AIDecision {
     ): CardGroup? {
         ctxRole = role
         ctxTeammateCardCount = teammateCardCount
-        ctxMinOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min()!! else 20
-        ctxMaxOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.max()!! else 20
+        ctxMinOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.min() else 20
+        ctxMaxOpponentCards = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.max() else 20
         ctxEnemyTotals = if (opponentCardCounts.isNotEmpty()) opponentCardCounts.copyOf() else intArrayOf()
         ctxUnseenCounts = unseenCounts
         ctxPerPlayerPlayed = perPlayerPlayed
@@ -404,7 +404,7 @@ object AIDecision {
         return when (difficulty) {
             Difficulty.NORMAL ->
                 if (isFreeLead) {
-                    normalFreeLead(hand, role, myIndex, landlordIndex)
+                    normalFreeLead(hand, role)
                 } else {
                     normalFollow(hand, lastPlay!!, role, lastPlayerIndex, myIndex, landlordIndex)
                 }
@@ -509,9 +509,7 @@ object AIDecision {
 
     private fun normalFreeLead(
         hand: List<Card>,
-        role: PlayerRole,
-        myIndex: Int,
-        landlordIndex: Int
+        role: PlayerRole
     ): CardGroup {
         val validPlays = CardRuleEngine.findAllValidPlays(hand, null)
 
@@ -800,7 +798,9 @@ object AIDecision {
                     val kickers = hand.filter { c -> c.rank == highPairKicker }.take(2)
                     candidates.add(CardGroup(CardType.TRIPLE_TWO, r, 1, three + kickers))
                 }
-                looseSingleKicker == null && cleanLowPairKicker == null && highPairKicker == null -> {
+                looseSingleKicker == null && highPairKicker == null -> {
+                    // 走到此分支时 cleanLowPairKicker 必为 null（上一分支已判 != null），
+                    // 即手中无任何可用补牌，只出三张裸牌
                     candidates.add(CardGroup(CardType.TRIPLE, r, 1, three))
                 }
             }

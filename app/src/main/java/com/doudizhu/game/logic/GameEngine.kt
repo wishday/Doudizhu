@@ -21,8 +21,10 @@ interface GameEngineCallback {
     fun onBiddingStart(playerIndex: Int)
     /** 玩家叫分 */
     fun onPlayerBid(playerIndex: Int, score: Int)
-    /** 叫地主结束，地主确定 */
+    /** 所有人叫分完成，地主确定（UI 先弹窗提示「xx成为地主」并停留 1.5s，再回调 onBiddingProceed 进入出牌） */
     fun onBiddingComplete(landlordIndex: Int, bottomCards: List<Card>)
+    /** 地主弹窗展示结束：正式进入出牌阶段（由 UI 在弹窗关闭后调用 gameEngine.proceedAfterLandlordPopup() 触发） */
+    fun onBiddingProceed(landlordIndex: Int)
     /** 轮到某玩家出牌 */
     fun onPlayerTurn(playerIndex: Int)
     /** 玩家出牌 */
@@ -40,6 +42,17 @@ interface GameEngineCallback {
  * 控制整体游戏流程，协调状态机、规则引擎和AI
  */
 class GameEngine {
+
+    companion object {
+        /** 「轮到电脑A/B → 公布其叫分结果」之间的反应间隔（毫秒）：
+         *  叫分阶段全程不显示「思考中」，此间隔仅避免结果在同一瞬间闪现，
+         *  让"轮到→出结果"有可感知的先后次序。 */
+        private const val aiBidRevealDelayMs = 500L
+
+        /** 「公布叫分结果 → 进入下一位叫分」之间的结果保留时长（毫秒）：
+         *  即每条「叫X分 / 不叫」在屏幕上保持 1.5s 后才推进下一位，与需求严格一致。 */
+        private const val AI_BID_RESULT_HOLD_MS = 1500L
+    }
 
     /** 三位玩家 */
     val players = listOf(
@@ -110,6 +123,10 @@ class GameEngine {
     fun startNewGame() {
         // 新局：使任何在途的后台搜索结果作废
         searchEpoch++
+        // 作废未完成的「地主弹窗 → 进入出牌」流程，防止重开/返回菜单后旧回调串场触发新对局状态切换
+        pendingLandlordProceedIndex = -1
+        // 递增叫分局代号：使在途的 AI 叫分延时任务立即作废，防止跨局串场
+        bidEpoch++
         // 重置所有玩家状态
         players.forEach {
             it.handCards.clear()
@@ -140,22 +157,48 @@ class GameEngine {
     fun returnToMenu() {
         // 退回主界面同样废弃在途后台搜索
         searchEpoch++
+        // 作废在途的「地主弹窗 → 进入出牌」流程与 AI 叫分延时任务，防止回菜单后旧回调串场
+        pendingLandlordProceedIndex = -1
+        bidEpoch++
         players.forEach { it.handCards.clear() }
         stateMachine.startMenu()
     }
 
     /**
-     * 进入叫地主阶段（在开局手牌展示动画结束后由 UI 回调）
-     * 随机选第一个叫分玩家，若 AI 先叫则自动处理
+     * 决定首个叫分玩家并进入 BIDDING 阶段（在开局手牌展示动画结束后由 UI 调用）。
+     * 本方法只做「随机选人 + 状态机置为叫分」，**不立即开始叫分**：由 UI 先用与
+     * 「xx成为地主」相同的中央提示框展示「xx开始叫地主」，保持 1s 关闭后再调用
+     * [beginBiddingAfterFirstBidderPopup] 正式进入叫分流程。
+     * @return 首个叫分玩家索引（0=人类 / 1=电脑A / 2=电脑B）
      */
-    fun startBiddingPhase() {
+    fun prepareFirstBidder(): Int {
         val firstBidder = (0..2).random()
         stateMachine.startBidding(firstBidder)
+        return firstBidder
+    }
+
+    /**
+     * 「xx开始叫地主」提示框关闭后正式进入叫分：通知首位玩家行动；
+     * 若 AI 先叫则自动处理。
+     */
+    fun beginBiddingAfterFirstBidderPopup(firstBidder: Int) {
+        // 跨局保护：提示框期间玩家可能已重开/退回菜单，此时不再推进叫分
+        if (stateMachine.phase != GamePhase.BIDDING ||
+            stateMachine.firstBidderIndex != firstBidder) return
+
         callback?.onBiddingStart(firstBidder)
 
-        // 如果是AI先叫，自动处理
+        // 如果是AI先叫：与后续各拍一致——结果保留期内完成推进（onBiddingStart 刷新画面）后，
+        // 再进入该 AI 的叫分节拍（公布其结果 → 保留 1.5s → 下一位）；人类首位则直接等待点按。
         if (!players[firstBidder].isHuman) {
-            scheduleAIBid(firstBidder)
+            val epoch = bidEpoch
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (epoch != bidEpoch) return@postDelayed
+                if (stateMachine.phase != GamePhase.BIDDING ||
+                    stateMachine.currentPlayerIndex != firstBidder) return@postDelayed
+                callback?.onRequestRefresh()
+                scheduleAIBid(firstBidder)
+            }, aiBidResultHoldMs())
         }
     }
 
@@ -186,23 +229,36 @@ class GameEngine {
     fun humanBid(score: Int) {
         if (stateMachine.phase != GamePhase.BIDDING) return
         if (stateMachine.currentPlayerIndex != 0) return
+        // 双保险：人类已在本轮叫过分（如刚叫 3 分、引擎保留 1.5s 才弹「xx成为地主」）时，
+        // 不再接受二次叫分，避免重复处理。
+        if (0 in stateMachine.actedBidPlayers) return
 
         processBid(0, score)
     }
 
     /**
-     * AI自动叫分
+     * AI自动叫分节奏：**全程不显示「思考中」**——轮到电脑A/B 时，引擎做一次极短的
+     * 反应间隔（[aiBidRevealDelayMs]）后立即公布其叫分结果
+     * （onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）；随后**保留展示
+     * [aiBidResultHoldMs]（1.5s）**，到期再进入下一位叫分。
      */
     private fun scheduleAIBid(playerIndex: Int) {
-        // 延迟模拟思考
         val player = players[playerIndex]
-        val score = calculateAIBid(player)
-
-        // 使用postDelayed模拟延迟（简化处理，直接执行）
+        val epoch = bidEpoch
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            processBid(playerIndex, score)
-        }, 1000)
+            // 跨局保护：重开/回菜单后在途的旧叫分任务直接丢弃
+            if (epoch != bidEpoch) return@postDelayed
+            if (stateMachine.phase != GamePhase.BIDDING ||
+                stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
+            processBid(playerIndex, calculateAIBid(player))
+        }, aiBidRevealDelayMs)
     }
+
+    /** 叫分局代号：每次开新局 / 退回主界面自增，用于作废在途的 AI 叫分延时任务 */
+    private var bidEpoch = 0
+
+    /** 供 beginBiddingAfterFirstBidderPopup / processBid 统一取用叫分结果保留时长 */
+    private fun aiBidResultHoldMs(): Long = AI_BID_RESULT_HOLD_MS
 
     /**
      * AI计算叫分值（使用智能决策）
@@ -219,7 +275,10 @@ class GameEngine {
     }
 
     /**
-     * 处理叫分逻辑
+     * 处理叫分逻辑：公布本位玩家的叫分结果（onPlayerBid → UI 在其牌背下方显示「叫X分 / 不叫」）后，
+     * **保留展示** [aiBidResultHoldMs]（1.5s）让所有人看清该结果，到期再进入下一位叫分；
+     * 若下一位是电脑，其轮到后仅经极短反应间隔即公布自己的结果，再同样保留 1.5s。
+     * 全程不显示「思考中」。最后一位叫完则直接进入地主弹窗流程。
      */
     private fun processBid(playerIndex: Int, score: Int) {
         // 有效叫分规则统一由状态机 computeRealBid 计算，避免两处不一致
@@ -230,19 +289,50 @@ class GameEngine {
         val biddingDone = stateMachine.processBid(playerIndex, realScore)
 
         if (biddingDone) {
-            finalizeBidding()
+            if (stateMachine.biddingEndedByThreeBid) {
+                // 有电脑直接叫3分提前结束：**不补发**其他玩家的默认叫分，
+                // 而是把这位电脑的「叫3分」结果在屏幕上保持展示 1.5s（与其他叫分节拍一致），
+                // 到期后再确定地主并弹出「xx成为地主」——避免刚显示3分就被弹窗打断。
+                // 跨局保护：重开/回菜单后作废本次延迟推进
+                val epoch = bidEpoch
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    if (epoch != bidEpoch) return@postDelayed
+                    if (stateMachine.phase != GamePhase.BIDDING ||
+                        !stateMachine.hasLandlord) return@postDelayed
+                    finalizeBidding()
+                }, aiBidResultHoldMs())
+            } else {
+                finalizeBidding()
+            }
         } else {
             val nextPlayer = stateMachine.currentPlayerIndex
-            callback?.onBiddingStart(nextPlayer)
-            if (!players[nextPlayer].isHuman) {
-                scheduleAIBid(nextPlayer)
-            }
+            // 先保持本位结果展示 1.5s，到期后再进入下一位叫分
+            val epoch = bidEpoch
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                // 跨局保护：重开/回菜单后在途的旧推进任务直接丢弃
+                if (epoch != bidEpoch) return@postDelayed
+                if (stateMachine.phase != GamePhase.BIDDING ||
+                    stateMachine.currentPlayerIndex != nextPlayer) return@postDelayed
+                if (!players[nextPlayer].isHuman) {
+                    // 下一位是电脑：不显示「思考中」，由 scheduleAIBid 短暂反应后即公布其结果
+                    scheduleAIBid(nextPlayer)
+                } else {
+                    // 下一位是人类：提示轮到自己叫分
+                    callback?.onBiddingStart(nextPlayer)
+                    callback?.onRequestRefresh()
+                }
+            }, aiBidResultHoldMs())
         }
         callback?.onRequestRefresh()
     }
 
+    /** 地主弹窗展示结束后进入出牌阶段的待执行索引（-1=无）；防止 UI 重复触发 */
+    private var pendingLandlordProceedIndex = -1
+
     /**
-     * 完成叫地主阶段
+     * 完成叫地主阶段：确定地主、分配底牌后**不再立即进入出牌阶段**，
+     * 而是通过 onBiddingComplete 通知 UI 在屏幕中央弹出「xx成为地主」提示并保持 1.5s；
+     * 弹窗关闭后由 UI 调用 [proceedAfterLandlordPopup] 清除叫分展示并正式进入出牌阶段。
      */
     private fun finalizeBidding() {
         if (stateMachine.hasLandlord) {
@@ -255,19 +345,31 @@ class GameEngine {
             // 记录底分
             stateMachine.currentBidScore = stateMachine.currentMaxBid
 
+            pendingLandlordProceedIndex = li
             callback?.onBiddingComplete(li, stateMachine.bottomCards.toList())
-
-            // 进入出牌阶段
-            stateMachine.startPlaying()
-            callback?.onPlayerTurn(li)
-
-            // 如果地主是AI
-            if (!players[li].isHuman) {
-                scheduleAIPlay(li)
-            }
         } else {
             // 没人叫地主，重新发牌
             startNewGame()
+        }
+    }
+
+    /**
+     * 「xx成为地主」弹窗展示结束（约 1.5s 后由 UI 调用）：
+     * 此时状态机切入出牌阶段（UI 借此机会清除所有电脑的叫分结果），然后进入正常出牌流程。
+     */
+    fun proceedAfterLandlordPopup() {
+        val li = pendingLandlordProceedIndex
+        if (li < 0) return
+        pendingLandlordProceedIndex = -1
+
+        // 进入出牌阶段
+        stateMachine.startPlaying()
+        callback?.onBiddingProceed(li)
+        callback?.onPlayerTurn(li)
+
+        // 如果地主是AI，由其先出牌
+        if (!players[li].isHuman) {
+            scheduleAIPlay(li)
         }
     }
 
@@ -404,7 +506,7 @@ class GameEngine {
                     primaryOpponentIndex = getPrimaryOpponentIndex(playerIndex),
                     teammateIndex = getTeammateIndex(playerIndex)
                 )
-                applyAIDecisionPaced(playerIndex, decision, lastPlay, turnStartMs, epoch)
+                applyAIDecisionPaced(playerIndex, decision, turnStartMs, epoch)
             }
         }, if (shouldUseMasterPlay(playerIndex)) MASTER_DELAY_MS else 1200L)
     }
@@ -415,19 +517,19 @@ class GameEngine {
      * 延时期间局面可能变化（新局 / 换人 / 阶段切换），触发时需重新校验。
      */
     private fun applyAIDecisionPaced(
-        playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?,
+        playerIndex: Int, decision: CardGroup?,
         turnStartMs: Long, epoch: Int
     ) {
         val remain = MIN_AI_TURN_MS - (System.currentTimeMillis() - turnStartMs)
         if (remain <= 0L) {
-            applyAIDecision(playerIndex, decision, lastPlay)
+            applyAIDecision(playerIndex, decision)
             return
         }
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             if (epoch != searchEpoch) return@postDelayed
             if (stateMachine.phase != GamePhase.PLAYING) return@postDelayed
             if (stateMachine.currentPlayerIndex != playerIndex) return@postDelayed
-            applyAIDecision(playerIndex, decision, lastPlay)
+            applyAIDecision(playerIndex, decision)
         }, remain)
     }
 
@@ -449,7 +551,7 @@ class GameEngine {
                 if (epoch != searchEpoch) return@post
                 if (stateMachine.phase != GamePhase.PLAYING) return@post
                 if (stateMachine.currentPlayerIndex != playerIndex) return@post
-                applyAIDecisionPaced(playerIndex, decision, stateMachine.lastPlayedGroup, turnStartMs, epoch)
+                applyAIDecisionPaced(playerIndex, decision, turnStartMs, epoch)
             }
         }
     }
@@ -461,7 +563,8 @@ class GameEngine {
      *  - 否则过牌。
      * 语义与改动前普通模式分支完全一致，大师模式复用同一套兜底。
      */
-    private fun applyAIDecision(playerIndex: Int, decision: CardGroup?, lastPlay: CardGroup?) {
+    private fun applyAIDecision(playerIndex: Int, decision: CardGroup?) {
+        // 上一手牌已由 decision 的生成过程隐式使用；此处只需应用决策结果，无需再传 lastPlay
         val player = players[playerIndex]
         val aiMustPlay = stateMachine.mustPlay()
         if (decision != null && decision.type != CardType.INVALID) {
