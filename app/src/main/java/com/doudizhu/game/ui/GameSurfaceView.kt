@@ -45,7 +45,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 有待重绘请求（refresh 置位，绘制后清除；多次 refresh 合并为一帧） */
     @Volatile private var pendingRedraw = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val frameCallback = Choreographer.FrameCallback { onFrame(it) }
+    private val frameCallback = Choreographer.FrameCallback { _ -> onFrame() }
 
     /** 屏幕尺寸 */
     private var screenWidth = 0
@@ -651,7 +651,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 每帧 vsync 回调：对齐系统刷新节奏，消除原 Thread.sleep 轮询的掉帧/抖动 */
-    private fun onFrame(frameTimeNanos: Long) {
+    private fun onFrame() {
         frameScheduled = false
         if (!surfaceAlive) { pendingRedraw = false; return }
         val need = pendingRedraw || shouldKeepDrawing()
