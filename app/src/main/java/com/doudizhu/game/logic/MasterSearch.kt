@@ -521,7 +521,7 @@ internal object MasterSearch {
                 var failed = false
 
                 for (a in actions) {
-                    val v: Int
+                    var v: Int
                     if (a == null) {
                         // 根玩家即我方(max)节点，过牌时施加惩罚：在「打与不打等价」时倾向自己接管，
                         // 补偿「人类队友未必按最优接管」的搜索假设偏差。
@@ -644,7 +644,7 @@ internal object MasterSearch {
             var best = if (maximizing) -INF else INF
 
             for (a in actions) {
-                val v: Int
+                var v: Int
                 if (a == null) {
                     // 过牌惩罚只在「我方(max)节点自己过牌」时施加，敌方(min)节点的过牌绝不施加：
                     // 敌方过牌减值等价于假设对手更想过大牌，会系统性污染博弈估值；
