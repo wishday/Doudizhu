@@ -140,7 +140,8 @@ object MasterAIDecision {
                 nodeLimit = nodeLimit,
                 passPenalty = passPenalty,
                 humanFarmer = if (useModeling) snapshot.humanFarmerIndex else -1,
-                pModel = modelW
+                pModel = modelW,
+                evalMode = 1
             )
             val result = solver.solve(snapshot.currentPlayerIndex, lastMove, snapshot.lastPlayerIndex)
 

@@ -73,7 +73,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private val strategyPrefs by lazy { getSharedPreferences("master_strategy", MODE_PRIVATE) }
     private var farmerTeammateStrategy = Difficulty.NORMAL
     private var playerHintStrategy = Difficulty.NORMAL
-    private var masterThinkSeconds = 3
+    private var masterThinkSeconds = 5
 
     private fun loadStrategy(key: String, default: Difficulty): Difficulty {
         val s = strategyPrefs.getString(key, default.name) ?: default.name
@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private fun loadMasterStrategy() {
         farmerTeammateStrategy = loadStrategy("farmer_teammate_strategy", Difficulty.NORMAL)
         playerHintStrategy = loadStrategy("player_hint_strategy", Difficulty.NORMAL)
-        masterThinkSeconds = strategyPrefs.getInt("master_think_seconds", 3)
+        masterThinkSeconds = strategyPrefs.getInt("master_think_seconds", 5)
     }
 
     private fun saveMasterStrategy() {
@@ -151,7 +151,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         val settings = root.getJSONObject("settings")
         val farmer = Difficulty.valueOf(settings.optString("farmer_teammate_strategy", Difficulty.NORMAL.name))
         val hint = Difficulty.valueOf(settings.optString("player_hint_strategy", Difficulty.NORMAL.name))
-        val sec = settings.optInt("masterThinkSeconds", 3).coerceIn(2, 60)
+        val sec = settings.optInt("masterThinkSeconds", 5).coerceIn(2, 60)
         val statsObj = root.optJSONObject("stats") ?: JSONObject()
         val imported = mutableMapOf<Difficulty, GameStats>()
         for (mode in listOf(Difficulty.NORMAL, Difficulty.MASTER)) {

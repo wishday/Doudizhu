@@ -410,8 +410,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 大师模式 AI 策略（本地显示状态，由 MainActivity 启动时初始化） */
     private var masterFarmerStrategy: Difficulty = Difficulty.NORMAL
     private var masterHintStrategy: Difficulty = Difficulty.NORMAL
-    /** 大师模式 AI 最大思考时间（秒），本地显示状态，2~60，默认 3；仅在关闭设置时落盘 */
-    private var masterThinkSeconds: Int = 3
+    /** 大师模式 AI 最大思考时间（秒），本地显示状态，2~60，默认 5；仅在关闭设置时落盘 */
+    private var masterThinkSeconds: Int = 5
     /** 大师模式 AI 策略变更回调（由 MainActivity 注入，负责持久化保存） */
     var onMasterStrategyChange: ((Difficulty, Difficulty) -> Unit)? = null
     /** 大师模式 AI 思考时间变更回调（关闭设置时由 MainActivity 注入，负责落盘并写入引擎） */
