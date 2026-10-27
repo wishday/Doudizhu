@@ -390,6 +390,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val tapSlop = 24f
     /** 本次拖拽中最近处理过的牌索引（防止手指停留同一张牌时反复切换） */
     private var lastDragCardIndex = -1
+    /** 上次 MOVE 触点坐标（用于线段覆盖补选，解决快速滑动跳牌漏选） */
+    private var lastDragX = 0f
+    private var lastDragY = 0f
+    /** 本次连续滑动中已切换过的牌索引（去重：每张牌在一次滑动内只切换一次） */
+    private val dragHandled = mutableSetOf<Int>()
 
     /** 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立） */
     private data class ModeStat(var score: Int = 0, var games: Int = 0, var wins: Int = 0)
@@ -860,6 +865,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 downX = x
                 downY = y
                 lastDragCardIndex = -1
+                lastDragX = x
+                lastDragY = y
+                dragHandled.clear()
                 // 检查按钮点击（记录动作而非索引，防止绘制线程重建按钮导致错位）
                 for (btn in currentButtons) {
                     if (btn.rect.contains(x, y)) {
@@ -883,7 +891,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 if (isDragging && gameEngine.stateMachine.phase == GamePhase.PLAYING
                     && gameEngine.stateMachine.currentPlayerIndex == 0
                     && movedBeyondSlop(x, y)) {
-                    toggleCardFromTouch(x, y)
+                    dragToggleSegment(x, y)
                 }
                 return true
             }
@@ -910,6 +918,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     }
                     isDragging = false
                     lastDragCardIndex = -1
+                    dragHandled.clear()
                     refresh()
                 }
                 return true
@@ -917,6 +926,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             MotionEvent.ACTION_CANCEL -> {
                 isDragging = false
                 lastDragCardIndex = -1
+                dragHandled.clear()
                 pressedAction = null
                 refresh()
                 return true
@@ -960,6 +970,76 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             sfx { it.tapSelect() }
         }
         refresh()
+    }
+
+    /**
+     * 滑动选牌（优化版）：把从上一触点 (lastDragX,lastDragY) 到当前触点 (x,y) 的线段
+     * 穿过的所有手牌都切换一次（每张在本次连续滑动内只切换一次，由 dragHandled 去重）。
+     * 解决此前「仅对离散 MOVE 触点做命中、手指快速滑动时跨过中间牌导致漏选/漏取消」的问题；
+     * 同时由于线段起点即按下点，起点牌也会被覆盖，避免「按下后小幅滑动导致起点牌漏选」。
+     */
+    private fun dragToggleSegment(x: Float, y: Float) {
+        val hand = gameEngine.players[0].handCards
+        val n = hand.size
+        if (n == 0) { lastDragX = x; lastDragY = y; return }
+        val totalWidth = handSpacing * (n - 1) + cardW
+        val startX = (screenWidth - totalWidth) / 2
+        val baseY = screenHeight - cardH - 40f
+        val minY = baseY - 70f - 24f
+        val maxY = baseY + cardH + 24f
+        for (i in 0 until n) {
+            val cx = startX + i * handSpacing
+            var leftBound = Float.NEGATIVE_INFINITY
+            var rightBound = Float.POSITIVE_INFINITY
+            if (i > 0) leftBound = (startX + (i - 1) * handSpacing + cx) / 2f
+            if (i < n - 1) rightBound = (cx + startX + (i + 1) * handSpacing) / 2f
+            if (segmentCrossesBand(lastDragX, lastDragY, x, y, leftBound, rightBound, minY, maxY)
+                && i !in dragHandled) {
+                dragHandled.add(i)
+                lastDragCardIndex = i
+                if (i in gameEngine.selectedCardIndices) {
+                    gameEngine.selectedCardIndices.remove(i)
+                    sfx { it.tapDeselect() }
+                } else {
+                    gameEngine.selectedCardIndices.add(i)
+                    sfx { it.tapSelect() }
+                }
+            }
+        }
+        lastDragX = x
+        lastDragY = y
+        refresh()
+    }
+
+    /**
+     * 线段 (x0,y0)-(x1,y1) 是否与轴对齐矩形 [bx0,bx1]×[by0,by1] 相交（Liang-Barsky 裁剪）。
+     * 用于判断滑动轨迹是否「扫过」某张手牌。
+     */
+    private fun segmentCrossesBand(
+        x0: Float, y0: Float, x1: Float, y1: Float,
+        bx0: Float, bx1: Float, by0: Float, by1: Float
+    ): Boolean {
+        var t0 = 0f
+        var t1 = 1f
+        val dx = x1 - x0
+        val dy = y1 - y0
+        val p = floatArrayOf(-dx, dx, -dy, dy)
+        val q = floatArrayOf(x0 - bx0, bx1 - x0, y0 - by0, by1 - y0)
+        for (k in 0..3) {
+            if (p[k] == 0f) {
+                if (q[k] < 0f) return false
+            } else {
+                val r = q[k] / p[k]
+                if (p[k] < 0f) {
+                    if (r > t1) return false
+                    if (r > t0) t0 = r
+                } else {
+                    if (r < t0) return false
+                    if (r < t1) t1 = r
+                }
+            }
+        }
+        return t0 <= t1
     }
 
     /**
@@ -1573,7 +1653,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             label = "不叫"
             color = Color.parseColor("#B0BEC5")
         }
-        textPaint.textSize = AI_BID_TIP_TEXT_SIZE
+        textPaint.textSize = AI_BID_TIP_TEXT_SIZE * 1.5f
         textPaint.color = color
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, label, centerX,
