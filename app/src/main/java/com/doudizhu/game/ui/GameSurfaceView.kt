@@ -72,8 +72,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var aiBackH = 98f
 
     /** 根据屏幕尺寸动态计算所有UI尺寸 */
+    private var uiScale = 1f
+    private var topBarH = 84f
+
     private fun recalcSizes() {
         val scale = (screenWidth.toFloat() / 1920f).coerceIn(0.85f, 1.5f)
+        uiScale = scale
         cardW = (160f * scale).coerceAtLeast(120f)
         cardH = (230f * scale).coerceAtLeast(170f)
         cardRadius = (16f * scale).coerceAtLeast(12f)
@@ -90,6 +94,39 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tableSpacing = (72f * scale).coerceAtLeast(52f)
         aiBackW = (70f * scale).coerceAtLeast(50f)
         aiBackH = (98f * scale).coerceAtLeast(70f)
+    }
+
+    // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
+    private object Palette {
+        // 文本与点数字色（用 0xRRGGBB 整型字面量，避免被下方"统一替换硬编码色"的 replace_all 命中自身）
+        val rankRed = 0xFFD32F2F
+        val rankBlack = 0xFF212121
+        val textLightGray = 0xFFD9D9D9
+        val textGreen = 0xFFA5D6A7
+        val gold = 0xFFFFD600
+        val bubbleText = 0xFFECEFF1
+        val modeRed = 0xFFEF5350
+        val errText = 0xFFFF5252
+        // 卡牌/面板描边
+        val cardBorder = 0xFFC9CFD6
+        val cardBorderSelected = 0xFFFFC107
+        val passBorder = Color.argb(60, 176, 190, 197)
+        // 浮层玻璃（统一：带微暖/微绿偏移的半透明 + 暖金高光描边）
+        val glassFill = Color.argb(150, 12, 34, 22)
+        val glassDrop = Color.argb(70, 0, 0, 0)
+        val glassBorder = Color.argb(90, 255, 236, 179)
+        val dimFill = Color.argb(170, 0, 0, 0)
+        val bubbleFill = 0xFF37474F
+        val errFill = Color.argb(221, 0, 0, 0)
+        val tableOvalStroke = Color.argb(40, 255, 236, 179)
+        // 强调色
+        val highlightYellow = 0xFFFFEB3B
+        val highlightGlow = 0x30FFEB3B
+        val aiHighlight = Color.argb(120, 255, 152, 0)
+        // 装饰
+        val ovalDecor = 0xFF15491A
+        val highlightWhite = Color.argb(32, 255, 255, 255)
+        val bannerStroke = Color.argb(120, 255, 214, 90)
     }
 
     // ====== 画笔 ======
@@ -119,19 +156,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 高亮画笔（当前回合玩家） */
     private val highlightPaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.STROKE; strokeWidth = 8f
-        color = Color.parseColor("#FFEB3B")
+        color = Palette.highlightYellow
     }
     /** 高亮发光效果 */
     private val glowPaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.FILL
-        color = Color.parseColor("#30FFEB3B")
+        color = Palette.highlightGlow
     }
 
     // ====== 缓存的装饰画笔（避免每帧分配 Paint 对象） ======
     private val ovalPaint = Paint().apply {
         // 不加 isDither：此画笔兼画纯色椭圆装饰（见 drawBackground），抖动会产生网点纹理；
         // 桌心柔光的渐变抖动已由 bgPaint / vignettePaint 覆盖
-        color = Color.parseColor("#15491A"); style = Paint.Style.FILL; isAntiAlias = true
+        color = Palette.ovalDecor; style = Paint.Style.FILL; isAntiAlias = true
     }
     private val topBarPaint = Paint().apply { color = Color.parseColor("#80000000"); style = Paint.Style.FILL }
     private val aiInfoPaint = Paint().apply { color = Color.parseColor("#60000000"); style = Paint.Style.FILL }
@@ -139,7 +176,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         color = Color.parseColor("#30000000"); style = Paint.Style.FILL
     }
     private val buttonHighlightPaint = Paint().apply {
-        color = Color.parseColor("#20FFFFFF"); style = Paint.Style.FILL
+        color = Palette.highlightWhite; style = Paint.Style.FILL
     }
     /** 主界面难度按钮：模式名（大/加粗，白色）；字号整体放大2号 */
     private val modeNamePaint = Paint().apply {
@@ -152,14 +189,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
     /** 错误提示弹窗背景（深红半透明圆角底） */
-    private val errBgPaint = Paint().apply { color = Color.parseColor("#DD000000"); style = Paint.Style.FILL }
+    private val errBgPaint = Paint().apply { color = Palette.errFill; style = Paint.Style.FILL }
     private val aiHighlightPaint = Paint().apply {
-        color = Color.argb(120, 255, 152, 0); style = Paint.Style.FILL
+        color = Palette.aiHighlight; style = Paint.Style.FILL
     }
-    private val modalDimPaint = Paint().apply { color = Color.argb(170, 0, 0, 0); style = Paint.Style.FILL }
-    private val panelPaint = Paint().apply { color = Color.parseColor("#263238"); style = Paint.Style.FILL }
+    private val modalDimPaint = Paint().apply { color = Palette.dimFill; style = Paint.Style.FILL }
+    private val panelPaint = Paint().apply { color = Palette.glassFill; style = Paint.Style.FILL }
     private val panelBorderPaint = Paint().apply {
-        color = Color.parseColor("#546E7A"); style = Paint.Style.STROKE; strokeWidth = 3f
+        color = Palette.glassBorder; style = Paint.Style.STROKE; strokeWidth = 3f
     }
     private val gearPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#B0BEC5") }
     private val gearHolePaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#0D3B0D") }
@@ -198,7 +235,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val bannerPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL; color = Color.WHITE }
     private val bannerStrokePaint = Paint().apply {
         isAntiAlias = true; style = Paint.Style.STROKE; strokeWidth = 3f
-        color = Color.argb(120, 255, 214, 90)
+        color = Palette.bannerStroke
     }
     /** 面板头部条带 */
     private val panelHeaderPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.FILL }
@@ -207,9 +244,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var bgGradientW = 0f
     private var bgGradientH = 0f
     /** 顶栏渐变缓存（尺寸不变不重建，避免每帧 new LinearGradient） */
-    private val topBarShader = LinearGradient(
+    private var topBarShader = LinearGradient(
         0f, 0f, 0f, 84f * 1.6f,
-        Color.argb(160, 0, 0, 0), Color.TRANSPARENT,
+        Palette.glassFill, Color.TRANSPARENT,
         Shader.TileMode.CLAMP
     )
     /** AI 信息面板玻璃底渐变缓存（面板纵向位置固定） */
@@ -239,7 +276,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var selectGlowKey = ""
     /** 「不出」气泡底漆（胶囊 + 尾尖共用，随动画淡入调整 alpha） */
     private val passBubblePaint = Paint().apply {
-        isAntiAlias = true; style = Paint.Style.FILL; color = Color.parseColor("#37474F")
+        isAntiAlias = true; style = Paint.Style.FILL; color = Palette.bubbleFill
     }
     /** 「不出」气泡尾尖路径（复用，避免每帧 new Path） */
     private val passTrianglePath = Path()
@@ -257,6 +294,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
+    /** 旧牌退场动画：被新牌替换时暂存上一手牌与其起始时间，用于下移 + 淡出 */
+    private val prevPlayedCards = arrayOfNulls<List<Card>>(3)
+    private val outAnimStart = LongArray(3)
 
     /** 电脑「思考中」提示字号（出牌阶段与叫分阶段统一使用 44f，不再放大） */
     private val AI_THINKING_TIP_TEXT_SIZE = 44f
@@ -275,6 +315,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private var passEpochCounter = 0
     /** 「不出」气泡淡入动画时长（ms）：仅用于驱动淡入期间的持续重绘；气泡本身不自动消退 */
     private val PASS_BUBBLE_FADEIN_MS = 450L
+    /** 旧牌退场动画时长（ms）：与逐张落桌入场(~400ms)同步，略短以留出"完全消失"的余量 */
+    private val OUT_ANIM_DUR = 380L
 
     /** 注册一次「不出」气泡动画（由 MainActivity 在玩家过牌时调用）。
      *  过牌即"行动完毕"：同时清除该玩家槽位的桌面出牌展示，避免旧牌与其「不出」同屏矛盾；
@@ -364,7 +406,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
 
         textPaint.textSize = 56f
-        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
 
         val tw = textPaint.measureText(text)
@@ -828,8 +870,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 设置任意玩家的桌面出牌展示（新牌入手时记录动画起始时间，用于入场动效）；
      *  有人出牌即"新的一手开始"：清除其它玩家残留的「不出」气泡（气泡不自动消退，由此处显式清理） */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
+        val old = tablePlayedCards[playerIndex]
         if (cards != null && cards.isNotEmpty()) {
             val now = System.currentTimeMillis()
+            // 旧牌退场：同一槽位被新牌替换时，暂存上一手牌并启动下移+淡出动画
+            if (old != null && old != cards) {
+                prevPlayedCards[playerIndex] = old
+                outAnimStart[playerIndex] = now
+            }
             playAnimStart[playerIndex] = now
             playAnimEnd[playerIndex] = now + (cards.size - 1) * 75L + 400L + 80L
             for (i in passSlotEpoch.indices) {
@@ -837,6 +885,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
         } else {
             playAnimEnd[playerIndex] = 0L
+            prevPlayedCards[playerIndex] = null
+            outAnimStart[playerIndex] = 0L
         }
         tablePlayedCards[playerIndex] = cards
         refresh()
@@ -847,7 +897,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     fun clearAllPlayedCards() {
         for (i in tablePlayedCards.indices) {
             tablePlayedCards[i] = null
+            prevPlayedCards[i] = null
             playAnimEnd[i] = 0L
+            outAnimStart[i] = 0L
             passSlotEpoch[i] = -1
         }
         // 开始发牌：叫分展示已改为按阶段驱动（仅 BIDDING 阶段绘制），阶段切走即自动消失，
@@ -1268,8 +1320,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 横屏布局：AI在左右两侧（主界面不显示电脑A/电脑B信息框）
         if (gameEngine.stateMachine.phase != GamePhase.MENU) {
-            drawAIPlayer(canvas, 1, screenWidth - 260f, 100f)   // 右侧AI
-            drawAIPlayer(canvas, 2, 260f, 100f)                  // 左侧AI
+            drawAIPlayer(canvas, 1, screenWidth - 260f * uiScale, 100f)   // 右侧AI
+            drawAIPlayer(canvas, 2, 260f * uiScale, 100f)                  // 左侧AI
         }
 
         // 桌面中央展示所有玩家出的牌
@@ -1277,8 +1329,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 电脑思考中提示（画在出牌区之后，避免被中央牌面遮挡）
         if (gameEngine.stateMachine.phase != GamePhase.MENU) {
-            drawAiTurnTip(canvas, 1, screenWidth - 260f, 100f)
-            drawAiTurnTip(canvas, 2, 260f, 100f)
+            drawAiTurnTip(canvas, 1, screenWidth - 260f * uiScale, 100f)
+            drawAiTurnTip(canvas, 2, 260f * uiScale, 100f)
         }
 
         // 叫分阶段：在两台电脑玩家下方分别显示其叫分情况（开始发牌时清除）
@@ -1382,7 +1434,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                          cx + screenWidth * 0.30f, cy + screenHeight * 0.20f)
         ovalPaint.color = Color.argb(16, 255, 236, 179)
         canvas.drawOval(oval, ovalPaint)
-        cardBorderPaint.color = Color.argb(40, 255, 236, 179)
+        cardBorderPaint.color = Palette.tableOvalStroke
         cardBorderPaint.strokeWidth = 3f
         canvas.drawOval(oval, cardBorderPaint)
 
@@ -1440,8 +1492,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun hypot(a: Float, b: Float): Float = sqrt(a * a + b * b)
 
     private fun drawTopBar(canvas: Canvas) {
-        val barH = 84f
-        // 顶栏：黑→透明渐变收底（使用缓存 shader，避免每帧新建 LinearGradient）
+        val barH = 84f * uiScale
+        // 顶栏渐变随高度响应式重建（仅尺寸变化时，避免每帧 new LinearGradient）
+        if (topBarH != barH) {
+            topBarH = barH
+            topBarShader = LinearGradient(0f, 0f, 0f, barH * 1.6f, Palette.glassFill, Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        }
         topBarPaint.shader = topBarShader
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), barH * 1.6f, topBarPaint)
         topBarPaint.shader = null
@@ -1508,7 +1564,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
 
         // 信息面板：柔和投影 + 深色渐变玻璃底（缓存 shader） + 细描边
-        aiInfoPaint.color = Color.argb(70, 0, 0, 0)
+        aiInfoPaint.color = Palette.glassDrop
         scratchRect.set(panelX + 3f, topY + 6f, panelX + panelW + 3f, topY + panelH + 6f)
         canvas.drawRoundRect(scratchRect, 18f, 18f, aiInfoPaint)
         aiInfoPaint.shader = aiPanelShader
@@ -1519,8 +1575,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 面板描边：该玩家本轮已「不出」时用中性灰（提示已行动），否则金色细边
         // 「不出」气泡不自动消退：只要槽位有气泡代号就持续显示，直到他人出牌/过牌或清桌时移除
         val showPassBubble = passSlotEpoch[playerIndex] >= 0
-        cardBorderPaint.color = if (showPassBubble) Color.argb(60, 176, 190, 197)
-            else Color.argb(70, 255, 236, 179)
+        cardBorderPaint.color = if (showPassBubble) Palette.passBorder
+            else Palette.glassBorder
         cardBorderPaint.strokeWidth = 2f
         scratchRect.set(panelX, topY, panelX + panelW, topY + panelH)
         canvas.drawRoundRect(scratchRect, 18f, 18f, cardBorderPaint)
@@ -1529,17 +1585,17 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
         textPaint.textSize = 50f
         textPaint.color = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD)
-            Color.parseColor("#FFD600") else Color.parseColor("#A5D6A7")
+            Palette.gold else Palette.textGreen
         canvas.drawText(roleText, centerX, topY + 55f, textPaint)
 
         // 剩余张数（放大2.5倍: 30*2.5=75 -> 用50f）
         textPaint.textSize = 46f
-        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.color = Palette.gold
         canvas.drawText("${player.cardCount}张", centerX, topY + 110f, textPaint)
 
         // 名称（电脑A/电脑B）移到底部，字号用原角色的 38f，颜色改为灰白色
         textPaint.textSize = 38f
-        textPaint.color = Color.parseColor("#D9D9D9")
+        textPaint.color = Palette.textLightGray
         canvas.drawText(player.name, centerX, topY + 160f, textPaint)
 
         // 牌背扇形（放大2倍）：结算/结束时由正面剩余牌占据该位置，不再画牌背
@@ -1590,7 +1646,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             passTrianglePath.close()
             canvas.drawPath(passTrianglePath, passBubblePaint)
             passBubblePaint.alpha = 255
-            textPaint.color = Color.parseColor("#ECEFF1")
+            textPaint.color = Palette.bubbleText
             textPaint.textAlign = Paint.Align.CENTER
             // 文字垂直居中偏移随字号等比缩放（原 40f 字号对应 +14f，即 0.35×字号）
             val textBaselineY = by + bh / 2f + PASS_BUBBLE_TEXT_SIZE * 0.35f
@@ -1599,7 +1655,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 val ta = (236 * e).toInt().coerceIn(0, 255)   // 基色 #ECEFF1 各通道约 236+，取整体 alpha
                 textPaint.color = Color.argb(ta, 236, 239, 241)
                 canvas.drawText(label, centerX, textBaselineY, textPaint)
-                textPaint.color = Color.parseColor("#ECEFF1")
+                textPaint.color = Palette.bubbleText
             } else {
                 canvas.drawText(label, centerX, textBaselineY, textPaint)
             }
@@ -1618,7 +1674,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE
         // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制（如中央出牌的绿色玩家名）
         // 会残留其颜色；不显式设色时提示文字会偶发变成绿色/白色（bug 修复）
-        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, thinkingTip(playerIndex), centerX,
             topY + 180f + 16f + aiBackH + 52f, textPaint)
@@ -1636,8 +1692,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (!::gameEngine.isInitialized) return
         if (gameEngine.stateMachine.phase != GamePhase.BIDDING) return
         // 与 drawAIPlayer / drawAiTurnTip 的槽位坐标保持一致
-        drawAiBidTip(canvas, 1, screenWidth - 260f, 100f)
-        drawAiBidTip(canvas, 2, 260f, 100f)
+        drawAiBidTip(canvas, 1, screenWidth - 260f * uiScale, 100f)
+        drawAiBidTip(canvas, 2, 260f * uiScale, 100f)
     }
 
     private fun drawAiBidTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
@@ -1648,7 +1704,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val color: Int
         if (score > 0) {
             label = "叫" + score + "分"
-            color = Color.parseColor("#FFD600")
+            color = Palette.gold
         } else {
             label = "不叫"
             color = Color.parseColor("#B0BEC5")
@@ -1665,7 +1721,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != 0) return
         textPaint.textSize = 44f
-        textPaint.color = Color.parseColor("#FFD600")
+        textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
         canvas.drawText("轮到你出牌", screenWidth / 2f, screenHeight - cardH - 165f, textPaint)
     }
@@ -1679,7 +1735,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (cards.isNotEmpty()) {
                 drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY, slot = 2)
                 textPaint.textSize = 36f
-                textPaint.color = Color.parseColor("#A5D6A7")
+                textPaint.color = Palette.textGreen
                 canvas.drawText("电脑B", screenWidth * 0.30f, centerY - tableCardH / 2 - 20f, textPaint)
             }
         }
@@ -1699,7 +1755,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (cards.isNotEmpty()) {
                 drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY, slot = 1)
                 textPaint.textSize = 36f
-                textPaint.color = Color.parseColor("#A5D6A7")
+                textPaint.color = Palette.textGreen
                 canvas.drawText("电脑A", screenWidth * 0.70f, centerY - tableCardH / 2 - 20f, textPaint)
             }
         }
@@ -1724,6 +1780,27 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val alpha = 0.35f + 0.65f * e
             drawMiniCard(canvas, startX + i * tableSpacing, dropY, tableCardW, tableCardH,
                 card, faceUp = true, alpha = alpha)
+        }
+
+        // 旧牌退场：新牌落桌的同时，被替换的旧牌整体下移并同步淡出（与入场动画同周期）
+        if (slot >= 0) {
+            val prev = prevPlayedCards[slot]
+            if (prev != null) {
+                val op = ((animTime - outAnimStart[slot]).toFloat() / OUT_ANIM_DUR).coerceIn(0f, 1f)
+                if (op < 1f) {
+                    val oe = easeOutCubic(op)
+                    val pTotalW = tableSpacing * (prev.size - 1) + tableCardW
+                    val pStartX = centerX - pTotalW / 2f
+                    val pStartY = startY + oe * 46f   // 整体下移
+                    val pAlpha = (1f - oe) * 0.9f     // 同步淡出
+                    for ((i, card) in prev.withIndex()) {
+                        drawMiniCard(canvas, pStartX + i * tableSpacing, pStartY, tableCardW, tableCardH,
+                            card, faceUp = true, alpha = pAlpha)
+                    }
+                } else {
+                    prevPlayedCards[slot] = null
+                }
+            }
         }
     }
 
@@ -1869,13 +1946,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (fade) cardPaint.alpha = 255
 
         // 边框：选中金框，普通浅灰细框
-        cardBorderPaint.color = if (selected) Color.parseColor("#FFC107") else Color.parseColor("#C9CFD6")
+        cardBorderPaint.color = if (selected) Palette.cardBorderSelected else Palette.cardBorder
         cardBorderPaint.strokeWidth = if (selected) 5f else 2.5f
         if (fade) cardBorderPaint.alpha = a
         canvas.drawRoundRect(x, y, x + cardW, y + cardH, cardRadius, cardRadius, cardBorderPaint)
         if (fade) cardBorderPaint.alpha = 255
 
-        val textColor = if (card.isRed) Color.parseColor("#D32F2F") else Color.parseColor("#212121")
+        val textColor = if (card.isRed) Palette.rankRed else Palette.rankBlack
 
         // 左上角花色+点数（花色用普通字体画笔：粗体字库缺 ♠♥♣♦ 字形时会渲染成空白）
         suitSymbolPaint.textSize = cardW * 0.15f
@@ -1938,13 +2015,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (fade) cardPaint.alpha = a
         canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardPaint)
         cardPaint.shader = null
-        cardBorderPaint.color = Color.parseColor("#C9CFD6")
+        cardBorderPaint.color = Palette.cardBorder
         cardBorderPaint.strokeWidth = 2f
         if (fade) cardBorderPaint.alpha = a
         canvas.drawRoundRect(x, y, x + w, y + h, r, r, cardBorderPaint)
         if (fade) { cardPaint.alpha = 255; cardBorderPaint.alpha = 255 }
 
-        val textColor = if (card.isRed) Color.parseColor("#D32F2F") else Color.parseColor("#212121")
+        val textColor = if (card.isRed) Palette.rankRed else Palette.rankBlack
 
         // 左上角：花色 + 点数（与手牌 drawCard 布局风格一致）
         // 花色必须用普通字体画笔 suitSymbolPaint：粗体字库常缺 ♠♥♣♦ 字形，用 smallTextPaint(粗体) 会渲染成空白
@@ -2059,7 +2136,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val startX = if (leftAlign) bandLeft else bandRight - rowW
 
         textPaint.textSize = 28f
-        textPaint.color = Color.parseColor("#A5D6A7")
+        textPaint.color = Palette.textGreen
         textPaint.textAlign = if (leftAlign) Paint.Align.LEFT else Paint.Align.RIGHT
         canvas.drawText(label, if (leftAlign) bandLeft else bandRight, backY - 10f, textPaint)
         textPaint.textAlign = Paint.Align.CENTER   // 还原默认对齐，避免影响其它绘制
@@ -2147,7 +2224,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     val dGap = gap * 2f
                     val normalColor = Color.parseColor("#388E3C")
                     val normalPressed = Color.parseColor("#1B5E20")
-                    val masterColor = Color.parseColor("#D32F2F")
+                    val masterColor = Palette.rankRed
                     val masterPressed = Color.parseColor("#B71C1C")
                     val horizTotal = dW * 2f + dGap
                     val blockTop = if (horizTotal <= screenWidth) {
@@ -2196,7 +2273,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     val labels = mapOf(0 to "不叫", 1 to "1分", 2 to "2分", 3 to "3分")
                     val colors = mapOf(
                         0 to Color.parseColor("#616161"), 1 to Color.parseColor("#1976D2"),
-                        2 to Color.parseColor("#F57C00"), 3 to Color.parseColor("#D32F2F")
+                        2 to Color.parseColor("#F57C00"), 3 to Palette.rankRed
                     )
                     val pressedColors = mapOf(
                         0 to Color.parseColor("#424242"), 1 to Color.parseColor("#0D47A1"),
@@ -2323,19 +2400,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         textPaint.textAlign = Paint.Align.CENTER   // 共享画笔默认 CENTER，显式声明防上游残留 LEFT
         textPaint.textSize = BANNER_TITLE_TEXT
-        textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Color.parseColor("#ECEFF1"), textAlpha)
+        textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Palette.bubbleText, textAlpha)
         drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y, textPaint)
         // hasScore=false（未提供积分）时不画得分行，副题上移补位，避免横幅中部留大片空白
         if (hasScore) {
             textPaint.textSize = BANNER_SCORE_TEXT
-            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
+            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Palette.bubbleText, textAlpha)
             canvas.drawText(scoreLine, screenWidth / 2f, by + BANNER_SCORE_BASE_Y, textPaint)
             textPaint.textSize = BANNER_SUB_TEXT
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC"), textAlpha)
             canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_BASE_Y, textPaint)
         } else {
             textPaint.textSize = BANNER_SUB_TEXT
-            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Color.parseColor("#ECEFF1"), textAlpha)
+            textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Palette.bubbleText, textAlpha)
             canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_ONLY_BASE_Y, textPaint)
         }
         // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawStats 等下游绘制
@@ -2554,7 +2631,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "reset_normal")
         by += bh + 40f
         addButton(canvas, target, "大师模式", bx, by, bw, bh,
-            Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "reset_master")
+            Palette.rankRed, Color.parseColor("#B71C1C"), "reset_master")
     }
 
     /** 右面板：备份与还原（导出/导入备份，使用 SAF 系统选择器，无需存储权限） */
@@ -2624,9 +2701,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val sbx = px + 40f
         val sby = py + 520f
         addButton(canvas, target, "−", sbx, sby, sbw, 80f,
-            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_dec")
+            Color.parseColor("#546E7A"), Palette.bubbleFill, "master_think_dec")
         addButton(canvas, target, "+", sbx + sbw + stepGap, sby, sbw, 80f,
-            Color.parseColor("#546E7A"), Color.parseColor("#37474F"), "master_think_inc")
+            Color.parseColor("#546E7A"), Palette.bubbleFill, "master_think_inc")
         buttonTextPaint.textSize = 36f
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
         canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, sby + 80f / 2f + 18f, buttonTextPaint)
@@ -2647,9 +2724,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val leftSelected = current == Difficulty.NORMAL
         val rightSelected = current == Difficulty.MASTER
         val leftColor = if (leftSelected) Color.parseColor("#388E3C") else Color.parseColor("#546E7A")
-        val leftPressed = if (leftSelected) Color.parseColor("#1B5E20") else Color.parseColor("#37474F")
+        val leftPressed = if (leftSelected) Color.parseColor("#1B5E20") else Palette.bubbleFill
         val rightColor = if (rightSelected) Color.parseColor("#388E3C") else Color.parseColor("#546E7A")
-        val rightPressed = if (rightSelected) Color.parseColor("#1B5E20") else Color.parseColor("#37474F")
+        val rightPressed = if (rightSelected) Color.parseColor("#1B5E20") else Palette.bubbleFill
         addButton(canvas, target, leftLabel, x, y, w, h, leftColor, leftPressed, leftAction)
         addButton(canvas, target, rightLabel, x + w + gap, y, w, h, rightColor, rightPressed, rightAction)
     }
@@ -2677,7 +2754,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val confirmX = cx0 + 60f
         val cancelX = confirmX + bw + 40f
         addButton(canvas, target, "确认", confirmX, by, bw, bh,
-            Color.parseColor("#D32F2F"), Color.parseColor("#B71C1C"), "confirm_reset")
+            Palette.rankRed, Color.parseColor("#B71C1C"), "confirm_reset")
         addButton(canvas, target, "取消", cancelX, by, bw, bh,
             Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_reset")
     }
@@ -2719,7 +2796,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (System.currentTimeMillis() > errorTimer) { closeError(); return }
 
         textPaint.textSize = 48f
-        textPaint.color = Color.parseColor("#FF5252")
+        textPaint.color = Palette.errText
         textPaint.textAlign = Paint.Align.CENTER
 
         val tw = textPaint.measureText(errorText)
@@ -2760,7 +2837,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val startX = (screenWidth - totalW) / 2f
 
         // 模式（最左）
-        textPaint.color = Color.parseColor("#EF5350")      // 红字
+        textPaint.color = Palette.modeRed      // 红字
         canvas.drawText(modeText, startX, y, textPaint)
         // 胜率（模式右侧）
         val rateLeft = startX + sMode + charSpace
