@@ -2172,6 +2172,31 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     // ==================== 当前回合高亮提示 ====================
 
+    /** 某 AI 玩家信息区真实包围盒（信息面板 + 牌背扇形 + 可能的「不出」气泡），
+     *  用于让「轮到出牌」高亮框精确包住并略大于该信息区域。
+     *  坐标与 drawAIPlayer 严格一致：中心 x 在左右边缘各内缩 260f*uiScale、顶 y=100f、
+     *  面板固定 320x180；牌背宽随 uiScale(aiBackW/aiBackH) 变化，故框也随之缩放。 */
+    private fun aiInfoBounds(playerIndex: Int): RectF {
+        val centerX = if (playerIndex == 1) screenWidth - 260f * uiScale else 260f * uiScale
+        val topY = 100f
+        val panelW = 320f
+        val panelH = 180f
+        val p = gameEngine.players[playerIndex]
+        val count = maxOf(minOf(p.cardCount, 12), 1)
+        val backSpacing = aiBackW * 0.55f
+        val totalBackW = backSpacing * (count - 1) + aiBackW
+        val halfW = max(panelW / 2f, totalBackW / 2f)
+        // 「不出」气泡仅在该玩家已（在本轮）过牌时显示，按需把框下沿一并包住
+        val passBh = if (passSlotEpoch[playerIndex] >= 0) PASS_BUBBLE_TEXT_SIZE * 2.35f else 0f
+        val padX = 18f
+        val padY = 16f
+        val left = centerX - halfW - padX
+        val right = centerX + halfW + padX
+        val top = topY - padY
+        val bottom = topY + panelH + 16f + aiBackH + 26f + passBh + padY
+        return RectF(left, top, right, bottom)
+    }
+
     private fun drawTurnHighlight(canvas: Canvas) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         val current = gameEngine.stateMachine.currentPlayerIndex
@@ -2195,24 +2220,18 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 )
             }
             1 -> {
-                // 右侧AI高亮
+                // 右侧AI高亮：框严格包裹其信息区（随 uiScale 缩放）
                 val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 120 + 60).toInt()
                 highlightPaint.color = Color.argb(pulseAlpha, 255, 152, 0)
                 highlightPaint.strokeWidth = 6f
-                canvas.drawRoundRect(
-                    RectF(screenWidth - 430f, 80f, screenWidth - 90f, 310f),
-                    20f, 20f, highlightPaint
-                )
+                canvas.drawRoundRect(aiInfoBounds(1), 20f, 20f, highlightPaint)
             }
             2 -> {
-                // 左侧AI高亮
+                // 左侧AI高亮：框严格包裹其信息区（随 uiScale 缩放）
                 val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 120 + 60).toInt()
                 highlightPaint.color = Color.argb(pulseAlpha, 255, 152, 0)
                 highlightPaint.strokeWidth = 6f
-                canvas.drawRoundRect(
-                    RectF(90f, 80f, 430f, 310f),
-                    20f, 20f, highlightPaint
-                )
+                canvas.drawRoundRect(aiInfoBounds(2), 20f, 20f, highlightPaint)
             }
         }
     }
