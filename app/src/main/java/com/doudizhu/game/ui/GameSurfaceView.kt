@@ -74,9 +74,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 根据屏幕尺寸动态计算所有UI尺寸 */
     private var uiScale = 1f
     private var topBarH = 84f
+    /** AI 信息面板尺寸（随 uiScale 缩放，与牌背统一） */
+    private var aiPanelW = 320f
+    private var aiPanelH = 180f
 
     private fun recalcSizes() {
-        val scale = (screenWidth.toFloat() / 1920f).coerceIn(0.85f, 1.5f)
+        // 双维自适应：取「宽归一化比」与「高归一化比」的较小值，避免任一维度溢出；
+        // 上限放宽到 1.8，让大屏(Pad)更充分利用空间而非被钳在 1.5
+        val scale = minOf(screenWidth.toFloat() / 1920f, screenHeight.toFloat() / 1080f)
+            .coerceIn(0.85f, 1.8f)
         uiScale = scale
         cardW = (160f * scale).coerceAtLeast(120f)
         cardH = (230f * scale).coerceAtLeast(170f)
@@ -94,6 +100,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tableSpacing = (72f * scale).coerceAtLeast(52f)
         aiBackW = (70f * scale).coerceAtLeast(50f)
         aiBackH = (98f * scale).coerceAtLeast(70f)
+        // AI 信息面板尺寸随 uiScale 缩放（与牌背/手牌统一），让 Pad 上面板不再偏小
+        aiPanelW = 320f * scale
+        aiPanelH = 180f * scale
     }
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
@@ -250,9 +259,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         Palette.glassFill, Color.TRANSPARENT,
         Shader.TileMode.CLAMP
     )
-    /** AI 信息面板玻璃底渐变缓存（面板纵向位置固定） */
-    private val aiPanelShader = LinearGradient(
-        0f, 100f, 0f, 100f + 180f,
+    /** AI 信息面板玻璃底渐变缓存（随面板高度缩放，在 drawAIPlayer 内重建） */
+    private var aiPanelShader = LinearGradient(
+        0f, 100f, 0f, 100f + aiPanelH,
         Color.argb(120, 18, 44, 26), Color.argb(96, 8, 24, 14),
         Shader.TileMode.CLAMP
     )
@@ -408,7 +417,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             return
         }
 
-        textPaint.textSize = 56f
+        textPaint.textSize = 56f * uiScale
         textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
 
@@ -1545,9 +1554,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val sm = gameEngine.stateMachine
         val isCurrentTurn = sm.currentPlayerIndex == playerIndex && sm.phase == GamePhase.PLAYING
 
-        // 信息面板（放大）
-        val panelW = 320f
-        val panelH = 180f
+        // 信息面板（尺寸随 uiScale 缩放）
+        val panelW = aiPanelW
+        val panelH = aiPanelH
         val panelX = centerX - panelW / 2
 
         // 当前回合：呼吸光晕（正弦波；颜色/透明度每帧变化无法缓存 shader，
@@ -1581,6 +1590,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             canvas.restore()
         }
 
+        // 信息面板玻璃底渐变随面板高度缩放重建（镜像 topBarShader 的响应式处理）
+        aiPanelShader = LinearGradient(
+            0f, 100f, 0f, 100f + aiPanelH,
+            Color.argb(120, 18, 44, 26), Color.argb(96, 8, 24, 14),
+            Shader.TileMode.CLAMP
+        )
+
         // 信息面板：柔和投影 + 深色渐变玻璃底（缓存 shader） + 细描边
         aiInfoPaint.color = Palette.glassDrop
         scratchRect.set(panelX + 3f, topY + 6f, panelX + panelW + 3f, topY + panelH + 6f)
@@ -1601,20 +1617,20 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 角色（身份：地主/农民）移到顶部，字号用原名称的 50f，颜色保持不变
         val roleText = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD) "地主" else "农民"
-        textPaint.textSize = 50f
+        textPaint.textSize = 50f * uiScale
         textPaint.color = if (player.role == com.doudizhu.game.model.PlayerRole.LANDLORD)
             Palette.gold else Palette.textGreen
-        canvas.drawText(roleText, centerX, topY + 55f, textPaint)
+        canvas.drawText(roleText, centerX, topY + 55f * uiScale, textPaint)
 
         // 剩余张数（放大2.5倍: 30*2.5=75 -> 用50f）
-        textPaint.textSize = 46f
+        textPaint.textSize = 46f * uiScale
         textPaint.color = Palette.gold
-        canvas.drawText("${player.cardCount}张", centerX, topY + 110f, textPaint)
+        canvas.drawText("${player.cardCount}张", centerX, topY + 110f * uiScale, textPaint)
 
         // 名称（电脑A/电脑B）移到底部，字号用原角色的 38f，颜色改为灰白色
-        textPaint.textSize = 38f
+        textPaint.textSize = 38f * uiScale
         textPaint.color = Palette.textLightGray
-        canvas.drawText(player.name, centerX, topY + 160f, textPaint)
+        canvas.drawText(player.name, centerX, topY + 160f * uiScale, textPaint)
 
         // 牌背扇形（放大2倍）：结算/结束时由正面剩余牌占据该位置，不再画牌背
         if (sm.phase != GamePhase.SETTLING && sm.phase != GamePhase.GAME_OVER) {
@@ -1646,7 +1662,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val appear = (elapsed.toFloat() / PASS_BUBBLE_FADEIN_MS).coerceIn(0f, 1f)
             val e = easeOutCubic(appear)
             val label = "不出"
-            textPaint.textSize = PASS_BUBBLE_TEXT_SIZE
+            textPaint.textSize = PASS_BUBBLE_TEXT_SIZE * uiScale
             val tw = textPaint.measureText(label)
             // 胶囊内边距按字号比例（原 40f 字号：横向 ±28f、纵向 ±13f）等比放大
             val bw = tw + PASS_BUBBLE_TEXT_SIZE * 1.8f
@@ -1683,19 +1699,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /**
      * 电脑「思考中」提示：绘制在该电脑玩家牌堆下方。
      * 单独成函数并在桌面出牌之后绘制，避免被中央出牌区遮挡。
-     * 坐标与 drawAIPlayer 的牌背区保持一致（panelH = 180f）。
+     * 坐标与 drawAIPlayer 的牌背区保持一致（panelH = aiPanelH）。
      */
     private fun drawAiTurnTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != playerIndex) return
         // 字号统一为 44f（与「不出」气泡文字一致）
-        textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE
+        textPaint.textSize = AI_THINKING_TIP_TEXT_SIZE * uiScale
         // 必须显式设置颜色：textPaint 为共享画笔，上一帧其它绘制（如中央出牌的绿色玩家名）
         // 会残留其颜色；不显式设色时提示文字会偶发变成绿色/白色（bug 修复）
         textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, thinkingTip(playerIndex), centerX,
-            topY + 180f + 16f + aiBackH + 52f, textPaint)
+            topY + aiPanelH + 16f + aiBackH + 52f * uiScale, textPaint)
     }
 
     /**
@@ -1727,18 +1743,18 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             label = "不叫"
             color = Color.parseColor("#B0BEC5")
         }
-        textPaint.textSize = AI_BID_TIP_TEXT_SIZE * 1.5f
+        textPaint.textSize = AI_BID_TIP_TEXT_SIZE * 1.5f * uiScale
         textPaint.color = color
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, label, centerX,
-            topY + 180f + 16f + aiBackH + 52f, textPaint)
+            topY + aiPanelH + 16f + aiBackH + 52f * uiScale, textPaint)
     }
 
 
     private fun drawHumanTurnTip(canvas: Canvas) {
         if (gameEngine.stateMachine.phase != GamePhase.PLAYING) return
         if (gameEngine.stateMachine.currentPlayerIndex != 0) return
-        textPaint.textSize = 44f
+        textPaint.textSize = 44f * uiScale
         textPaint.color = Palette.gold
         textPaint.textAlign = Paint.Align.CENTER
         canvas.drawText("轮到你出牌", screenWidth / 2f, screenHeight - cardH - 165f, textPaint)
@@ -1755,7 +1771,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tablePlayedCards[2]?.let { cards ->
             if (cards.isNotEmpty()) {
                 drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY, slot = 2)
-                textPaint.textSize = 36f
+                textPaint.textSize = 36f * uiScale
                 textPaint.color = Palette.textGreen
                 canvas.drawText("电脑B", screenWidth * 0.30f, centerY - tableCardH / 2 - 20f, textPaint)
             }
@@ -1765,7 +1781,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tablePlayedCards[0]?.let { cards ->
             if (cards.isNotEmpty()) {
                 drawPlayedCardsAt(canvas, cards, screenWidth * 0.50f, centerY + 50f, slot = 0)
-                textPaint.textSize = 36f
+                textPaint.textSize = 36f * uiScale
                 textPaint.color = Color.parseColor("#FFFFFF")
                 canvas.drawText("你", screenWidth * 0.50f, centerY + 50f - tableCardH / 2 - 20f, textPaint)
             }
@@ -1775,7 +1791,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         tablePlayedCards[1]?.let { cards ->
             if (cards.isNotEmpty()) {
                 drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY, slot = 1)
-                textPaint.textSize = 36f
+                textPaint.textSize = 36f * uiScale
                 textPaint.color = Palette.textGreen
                 canvas.drawText("电脑A", screenWidth * 0.70f, centerY - tableCardH / 2 - 20f, textPaint)
             }
@@ -2107,7 +2123,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     private fun drawAllRemainingCards(canvas: Canvas) {
         // 结算/结束时，把两个电脑的剩余牌显示到它们原本显示手牌的位置（左/右上角）
-        val backY = 100f + 180f + 16f   // 与 drawAIPlayer 中牌背位置一致：topY + panelH + 16f
+        val backY = 100f + aiPanelH + 16f   // 与 drawAIPlayer 中牌背位置一致：topY + panelH + 16f
         val miniW = 90f
         val miniH = 126f
         val miniGap = 12f
@@ -2159,7 +2175,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val rowW = (n - 1) * pitch + miniW
         val startX = if (leftAlign) bandLeft else bandRight - rowW
 
-        textPaint.textSize = 28f
+        textPaint.textSize = 28f * uiScale
         textPaint.color = Palette.textGreen
         textPaint.textAlign = if (leftAlign) Paint.Align.LEFT else Paint.Align.RIGHT
         canvas.drawText(label, if (leftAlign) bandLeft else bandRight, backY - 10f, textPaint)
@@ -2179,21 +2195,25 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun aiInfoBounds(playerIndex: Int): RectF {
         val centerX = if (playerIndex == 1) screenWidth - 260f * uiScale else 260f * uiScale
         val topY = 100f
-        val panelW = 320f
-        val panelH = 180f
+        val panelW = aiPanelW
+        val panelH = aiPanelH
         val p = gameEngine.players[playerIndex]
         val count = maxOf(minOf(p.cardCount, 12), 1)
         val backSpacing = aiBackW * 0.55f
         val totalBackW = backSpacing * (count - 1) + aiBackW
         val halfW = max(panelW / 2f, totalBackW / 2f)
-        // 「不出」气泡仅在该玩家已（在本轮）过牌时显示，按需把框下沿一并包住
+        // 框下沿需同时覆盖「不出」气泡与「思考中」提示——两者不会同时出现，取较大下探量：
+        // 不出气泡：牌背底 +26f 起、高 passBh；思考中提示：牌背底 +52f 起、文字再下探约 0.7×字号
         val passBh = if (passSlotEpoch[playerIndex] >= 0) PASS_BUBBLE_TEXT_SIZE * 2.35f else 0f
+        val passDrop = 26f + passBh
+        val thinkDrop = 52f * uiScale + AI_THINKING_TIP_TEXT_SIZE * 0.7f
+        val drop = if (passDrop >= thinkDrop) passDrop else thinkDrop
         val padX = 18f
         val padY = 16f
         val left = centerX - halfW - padX
         val right = centerX + halfW + padX
         val top = topY - padY
-        val bottom = topY + panelH + 16f + aiBackH + 26f + passBh + padY
+        val bottom = topY + panelH + 16f + aiBackH + drop + padY
         return RectF(left, top, right, bottom)
     }
 
@@ -2423,7 +2443,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 字号放大后横幅加宽：保证「本局 +N 分（倍数说明）」一行在最小屏上也能容纳
         val bw = min(screenWidth * 0.78f, 1040f)
-        val bh = BANNER_HEIGHT
+        val bh = BANNER_HEIGHT * uiScale
         val bx = (screenWidth - bw) / 2f
         val by = screenHeight * 0.16f - (1f - e) * 60f
 
@@ -2442,21 +2462,21 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.restore()
 
         textPaint.textAlign = Paint.Align.CENTER   // 共享画笔默认 CENTER，显式声明防上游残留 LEFT
-        textPaint.textSize = BANNER_TITLE_TEXT
+        textPaint.textSize = BANNER_TITLE_TEXT * uiScale
         textPaint.color = withAlpha(if (won) Color.parseColor("#FFFFFF") else Palette.bubbleText, textAlpha)
-        drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y, textPaint)
+        drawTextWithShadow(canvas, title, screenWidth / 2f, by + BANNER_TITLE_BASE_Y * uiScale, textPaint)
         // hasScore=false（未提供积分）时不画得分行，副题上移补位，避免横幅中部留大片空白
         if (hasScore) {
-            textPaint.textSize = BANNER_SCORE_TEXT
+            textPaint.textSize = BANNER_SCORE_TEXT * uiScale
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Palette.bubbleText, textAlpha)
-            canvas.drawText(scoreLine, screenWidth / 2f, by + BANNER_SCORE_BASE_Y, textPaint)
-            textPaint.textSize = BANNER_SUB_TEXT
+            canvas.drawText(scoreLine, screenWidth / 2f, by + BANNER_SCORE_BASE_Y * uiScale, textPaint)
+            textPaint.textSize = BANNER_SUB_TEXT * uiScale
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFECB3") else Color.parseColor("#CFD8DC"), textAlpha)
-            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_BASE_Y, textPaint)
+            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_BASE_Y * uiScale, textPaint)
         } else {
-            textPaint.textSize = BANNER_SUB_TEXT
+            textPaint.textSize = BANNER_SUB_TEXT * uiScale
             textPaint.color = withAlpha(if (won) Color.parseColor("#FFF8E1") else Palette.bubbleText, textAlpha)
-            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_ONLY_BASE_Y, textPaint)
+            canvas.drawText(sub, screenWidth / 2f, by + BANNER_SUB_ONLY_BASE_Y * uiScale, textPaint)
         }
         // textPaint 为共享画笔且默认 CENTER：保持 CENTER，避免影响 drawStats 等下游绘制
     }
@@ -2500,7 +2520,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 文字颜色固定白色：buttonTextPaint 被设置窗口等复用且会被改成灰色，
         // 若此处不显式复位，退出设置后游戏内按钮会继承灰色（叫分/提示/出牌变灰）。
         buttonTextPaint.color = Color.WHITE
-        buttonTextPaint.textSize = 56f
+        buttonTextPaint.textSize = 56f * uiScale
         drawTextWithShadow(canvas, text, x + w / 2, y + h / 2 + 18f, buttonTextPaint)
     }
 
@@ -2624,30 +2644,39 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 设置窗口（三个面板：大师模式设置 / 重置胜率数据 / 备份与还原，并排且居中对称；
      * 关闭按钮独立置于三框下方居中）；showButtons=false 时只画面板不注册按钮（供确认弹窗叠加） */
+    /** 模态框统一缩放因子：跟随 uiScale，并用视口高度兜底，保证整块（含「关闭」按钮）永远落在屏内。
+     *  整块高度约 836*ms，居中后要求 ms ≤ H/972；用 H/1000 留约 3% 余量确保不溢出。
+     *  模态框不像牌面那样需要保底字号，故下限取 0.55（仅极矮屏才会触及，正常设备不会到）。 */
+    private fun modalScale(): Float {
+        return minOf(uiScale, screenHeight.toFloat() / 1000f).coerceIn(0.55f, 1.8f)
+    }
+
     private fun drawSettingsWindow(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
 
-        val panelH = 700f
-        val gap = 40f
-        // 三面板：宽度按屏宽均分（含两侧边距），并限制上限 520，保证整体居中且对称
-        val panelW = minOf((screenWidth - gap * 2f - 40f * 2f) / 3f, 520f)
+        val ms = modalScale()
+        val gap = 40f * ms
+        val sideMargin = 40f * ms
+        // 三面板：宽度按屏宽均分（含两侧边距），并随 ms 缩放上限 520，保证整体居中且对称
+        val panelW = minOf((screenWidth - gap * 2f - sideMargin * 2f) / 3f, 520f * ms)
+        val panelH = 700f * ms
         val totalW = panelW * 3f + gap * 2f
         val startX = (screenWidth - totalW) / 2f
         val py = (screenHeight - panelH) / 2f
 
         // 左面板：大师模式设置
-        drawMasterStrategyPanel(canvas, target, showButtons, startX, py, panelW, panelH)
+        drawMasterStrategyPanel(canvas, target, showButtons, startX, py, panelW, panelH, ms)
         // 中面板：数据设置（重置胜率数据）
-        drawDataPanel(canvas, target, showButtons, startX + (panelW + gap), py, panelW, panelH)
+        drawDataPanel(canvas, target, showButtons, startX + (panelW + gap), py, panelW, panelH, ms)
         // 右面板：备份与还原（导出/导入）
-        drawBackupPanel(canvas, target, showButtons, startX + 2f * (panelW + gap), py, panelW, panelH)
+        drawBackupPanel(canvas, target, showButtons, startX + 2f * (panelW + gap), py, panelW, panelH, ms)
 
         // 关闭按钮独立出来，置于三个框下方居中
         if (showButtons) {
-            val cw = 320f
-            val ch = 96f
+            val cw = 320f * ms
+            val ch = 96f * ms
             val cx = (screenWidth - cw) / 2f
-            val cy = py + panelH + 40f
+            val cy = py + panelH + 40f * ms
             addButton(canvas, target, "关闭", cx, cy, cw, ch,
                 Color.parseColor("#616161"), Color.parseColor("#424242"), "close_settings")
         }
@@ -2655,108 +2684,108 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     /** 右面板：数据设置（标题「重置胜率数据」+ 两个简化重置按钮：普通模式 / 大师模式） */
     private fun drawDataPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
-                               px: Float, py: Float, pw: Float, ph: Float) {
+                               px: Float, py: Float, pw: Float, ph: Float, ms: Float) {
         val panel = RectF(px, py, px + pw, py + ph)
         canvas.drawRoundRect(panel, 28f, 28f, panelPaint)
         canvas.drawRoundRect(panel, 28f, 28f, panelBorderPaint)
 
-        buttonTextPaint.textSize = 48f
+        buttonTextPaint.textSize = 48f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("重置胜率数据", px + pw / 2f, py + 64f, buttonTextPaint)
+        canvas.drawText("重置胜率数据", px + pw / 2f, py + 64f * ms, buttonTextPaint)
 
         if (!showButtons) return
 
-        val bw = pw - 80f
-        val bh = 110f
-        val bx = px + 40f
-        var by = py + 150f
+        val bw = pw - 80f * ms
+        val bh = 110f * ms
+        val bx = px + 40f * ms
+        var by = py + 150f * ms
         addButton(canvas, target, "普通模式", bx, by, bw, bh,
             Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "reset_normal")
-        by += bh + 40f
+        by += bh + 40f * ms
         addButton(canvas, target, "大师模式", bx, by, bw, bh,
             Palette.rankRed, Color.parseColor("#B71C1C"), "reset_master")
     }
 
     /** 右面板：备份与还原（导出/导入备份，使用 SAF 系统选择器，无需存储权限） */
     private fun drawBackupPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
-                                px: Float, py: Float, pw: Float, ph: Float) {
+                                px: Float, py: Float, pw: Float, ph: Float, ms: Float) {
         val panel = RectF(px, py, px + pw, py + ph)
         canvas.drawRoundRect(panel, 28f, 28f, panelPaint)
         canvas.drawRoundRect(panel, 28f, 28f, panelBorderPaint)
 
-        buttonTextPaint.textSize = 48f
+        buttonTextPaint.textSize = 48f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("备份与还原", px + pw / 2f, py + 64f, buttonTextPaint)
+        canvas.drawText("备份与还原", px + pw / 2f, py + 64f * ms, buttonTextPaint)
 
         if (!showButtons) return
 
-        val bw = pw - 80f
-        val bh = 110f
-        val bx = px + 40f
-        var by = py + 150f
+        val bw = pw - 80f * ms
+        val bh = 110f * ms
+        val bx = px + 40f * ms
+        var by = py + 150f * ms
         addButton(canvas, target, "导出备份", bx, by, bw, bh,
             Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "export_backup")
-        by += bh + 40f
+        by += bh + 40f * ms
         addButton(canvas, target, "导入备份", bx, by, bw, bh,
             Color.parseColor("#1976D2"), Color.parseColor("#0D47A1"), "import_backup")
     }
 
     /** 左面板：大师模式设置（两个策略开关，普通/大师二选一；去掉“策略”二字，底部仅保留一行说明） */
     private fun drawMasterStrategyPanel(canvas: Canvas, target: MutableList<ButtonRect>, showButtons: Boolean,
-                                         px: Float, py: Float, pw: Float, ph: Float) {
+                                         px: Float, py: Float, pw: Float, ph: Float, ms: Float) {
         val panel = RectF(px, py, px + pw, py + ph)
         canvas.drawRoundRect(panel, 28f, 28f, panelPaint)
         canvas.drawRoundRect(panel, 28f, 28f, panelBorderPaint)
 
-        buttonTextPaint.textSize = 48f
+        buttonTextPaint.textSize = 48f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("大师模式设置", px + pw / 2f, py + 64f, buttonTextPaint)
+        canvas.drawText("大师模式设置", px + pw / 2f, py + 64f * ms, buttonTextPaint)
 
         if (!showButtons) return
 
-        val bw = (pw - 80f - 24f) / 2f
-        val bh = 80f
-        val bx = px + 40f
-        val optGap = 24f
+        val bw = (pw - 80f * ms - 24f * ms) / 2f
+        val bh = 80f * ms
+        val bx = px + 40f * ms
+        val optGap = 24f * ms
 
         // 第一行：农民队友ai
-        buttonTextPaint.textSize = 34f
+        buttonTextPaint.textSize = 34f * ms
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("农民队友ai", px + pw / 2f, py + 150f, buttonTextPaint)
-        drawStrategyToggle(canvas, target, bx, py + 170f, bw, bh, optGap,
+        canvas.drawText("农民队友ai", px + pw / 2f, py + 150f * ms, buttonTextPaint)
+        drawStrategyToggle(canvas, target, bx, py + 170f * ms, bw, bh, optGap,
             "普通", "大师", masterFarmerStrategy, "master_farmer_normal", "master_farmer_master")
 
         // 第二行：玩家提示ai
-        buttonTextPaint.textSize = 34f
+        buttonTextPaint.textSize = 34f * ms
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("玩家提示ai", px + pw / 2f, py + 320f, buttonTextPaint)
-        drawStrategyToggle(canvas, target, bx, py + 340f, bw, bh, optGap,
+        canvas.drawText("玩家提示ai", px + pw / 2f, py + 320f * ms, buttonTextPaint)
+        drawStrategyToggle(canvas, target, bx, py + 340f * ms, bw, bh, optGap,
             "普通", "大师", masterHintStrategy, "master_hint_normal", "master_hint_master")
 
         // 第三行：ai最大思考时间(秒)，步进器 − [数值] +（2~60，默认3，关闭时落盘）
         // 数值显示在中间单元格，确保“X 秒”位于 − 与 + 之间
-        buttonTextPaint.textSize = 34f
+        buttonTextPaint.textSize = 34f * ms
         buttonTextPaint.color = Color.parseColor("#E0E0E0")
-        canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 500f, buttonTextPaint)
+        canvas.drawText("ai最大思考时间(秒)", px + pw / 2f, py + 500f * ms, buttonTextPaint)
 
-        val stepGap = 120f                       // 中间数值单元格宽度，容纳“X 秒”文本
-        val sbw = (pw - 80f - stepGap) / 2f      // 两端 −/+ 按钮宽度（与面板内边距一致）
-        val sbx = px + 40f
-        val sby = py + 520f
-        addButton(canvas, target, "−", sbx, sby, sbw, 80f,
+        val stepGap = 120f * ms                    // 中间数值单元格宽度，容纳“X 秒”文本
+        val sbw = (pw - 80f * ms - stepGap) / 2f   // 两端 −/+ 按钮宽度（与面板内边距一致）
+        val sbx = px + 40f * ms
+        val sby = py + 520f * ms
+        addButton(canvas, target, "−", sbx, sby, sbw, 80f * ms,
             Color.parseColor("#546E7A"), Palette.bubbleFill, "master_think_dec")
-        addButton(canvas, target, "+", sbx + sbw + stepGap, sby, sbw, 80f,
+        addButton(canvas, target, "+", sbx + sbw + stepGap, sby, sbw, 80f * ms,
             Color.parseColor("#546E7A"), Palette.bubbleFill, "master_think_inc")
-        buttonTextPaint.textSize = 36f
+        buttonTextPaint.textSize = 36f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, sby + 80f / 2f + 18f, buttonTextPaint)
+        canvas.drawText("${masterThinkSeconds} 秒", px + pw / 2f, sby + 80f * ms / 2f + 18f * ms, buttonTextPaint)
 
         // 底部说明（仅保留该段文字，分两行以免超出面板宽度）
         // 下移并放大字号：避免第一行字顶侵入上方步进按钮（步进按钮底在 py+600）
-        buttonTextPaint.textSize = 28f
+        buttonTextPaint.textSize = 28f * ms
         buttonTextPaint.color = Color.parseColor("#9E9E9E")
-        canvas.drawText("（农民队友ai设为普通，", px + pw / 2f, py + ph - 60f, buttonTextPaint)
-        canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 22f, buttonTextPaint)
+        canvas.drawText("（农民队友ai设为普通，", px + pw / 2f, py + ph - 60f * ms, buttonTextPaint)
+        canvas.drawText("玩家难度更高）", px + pw / 2f, py + ph - 22f * ms, buttonTextPaint)
     }
 
     /** 策略二选一开关：选中项高亮（绿），未选中灰 */
@@ -2774,11 +2803,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         addButton(canvas, target, rightLabel, x + w + gap, y, w, h, rightColor, rightPressed, rightAction)
     }
 
-    /** 二次确认弹窗：确认/取消重置某模式统计 */
+    /** 二次确认弹窗：确认/取消重置某模式统计（整体随 modalScale 缩放，与设置窗口一致） */
     private fun drawConfirmDialog(canvas: Canvas, target: MutableList<ButtonRect>, mode: Difficulty) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
-        val cw = minOf(screenWidth * 0.62f, 600f)
-        val ch = 300f
+        val ms = modalScale()
+        val cw = minOf(screenWidth * 0.62f, 600f * ms)
+        val ch = 300f * ms
         val cx0 = (screenWidth - cw) / 2f
         val cy0 = (screenHeight - ch) / 2f
         val panel = RectF(cx0, cy0, cx0 + cw, cy0 + ch)
@@ -2786,43 +2816,44 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawRoundRect(panel, 24f, 24f, panelBorderPaint)
 
         val label = if (mode == Difficulty.MASTER) "大师" else "普通"
-        buttonTextPaint.textSize = 40f
+        buttonTextPaint.textSize = 40f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("确认重置${label}模式", cx0 + cw / 2f, cy0 + 70f, buttonTextPaint)
-        canvas.drawText("统计数据？", cx0 + cw / 2f, cy0 + 120f, buttonTextPaint)
+        canvas.drawText("确认重置${label}模式", cx0 + cw / 2f, cy0 + 70f * ms, buttonTextPaint)
+        canvas.drawText("统计数据？", cx0 + cw / 2f, cy0 + 120f * ms, buttonTextPaint)
 
-        val bw = (cw - 120f - 40f) / 2f
-        val bh = 84f
-        val by = cy0 + ch - bh - 36f
-        val confirmX = cx0 + 60f
-        val cancelX = confirmX + bw + 40f
+        val bw = (cw - 120f * ms - 40f * ms) / 2f
+        val bh = 84f * ms
+        val by = cy0 + ch - bh - 36f * ms
+        val confirmX = cx0 + 60f * ms
+        val cancelX = confirmX + bw + 40f * ms
         addButton(canvas, target, "确认", confirmX, by, bw, bh,
             Palette.rankRed, Color.parseColor("#B71C1C"), "confirm_reset")
         addButton(canvas, target, "取消", cancelX, by, bw, bh,
             Color.parseColor("#616161"), Color.parseColor("#424242"), "cancel_reset")
     }
 
-    /** 二次确认弹窗：确认/取消导入备份（覆盖当前设置与统计） */
+    /** 二次确认弹窗：确认/取消导入备份（覆盖当前设置与统计，整体随 modalScale 缩放） */
     private fun drawImportConfirmDialog(canvas: Canvas, target: MutableList<ButtonRect>) {
         canvas.drawRect(0f, 0f, screenWidth.toFloat(), screenHeight.toFloat(), modalDimPaint)
-        val cw = minOf(screenWidth * 0.62f, 600f)
-        val ch = 300f
+        val ms = modalScale()
+        val cw = minOf(screenWidth * 0.62f, 600f * ms)
+        val ch = 300f * ms
         val cx0 = (screenWidth - cw) / 2f
         val cy0 = (screenHeight - ch) / 2f
         val panel = RectF(cx0, cy0, cx0 + cw, cy0 + ch)
         canvas.drawRoundRect(panel, 24f, 24f, panelPaint)
         canvas.drawRoundRect(panel, 24f, 24f, panelBorderPaint)
 
-        buttonTextPaint.textSize = 40f
+        buttonTextPaint.textSize = 40f * ms
         buttonTextPaint.color = Color.parseColor("#FFFFFF")
-        canvas.drawText("确认导入备份？", cx0 + cw / 2f, cy0 + 70f, buttonTextPaint)
-        canvas.drawText("将覆盖当前设置与统计", cx0 + cw / 2f, cy0 + 120f, buttonTextPaint)
+        canvas.drawText("确认导入备份？", cx0 + cw / 2f, cy0 + 70f * ms, buttonTextPaint)
+        canvas.drawText("将覆盖当前设置与统计", cx0 + cw / 2f, cy0 + 120f * ms, buttonTextPaint)
 
-        val bw = (cw - 120f - 40f) / 2f
-        val bh = 84f
-        val by = cy0 + ch - bh - 36f
-        val confirmX = cx0 + 60f
-        val cancelX = confirmX + bw + 40f
+        val bw = (cw - 120f * ms - 40f * ms) / 2f
+        val bh = 84f * ms
+        val by = cy0 + ch - bh - 36f * ms
+        val confirmX = cx0 + 60f * ms
+        val cancelX = confirmX + bw + 40f * ms
         addButton(canvas, target, "确认", confirmX, by, bw, bh,
             Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), "confirm_import")
         addButton(canvas, target, "取消", cancelX, by, bw, bh,
@@ -2858,7 +2889,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         val stat = modeStats[displayMode] ?: ModeStat()
         textPaint.textAlign = Paint.Align.LEFT
-        textPaint.textSize = 36f                            // 模式与胜率/积分统一字号
+        textPaint.textSize = 36f * uiScale                            // 模式与胜率/积分统一字号
         textPaint.color = Color.parseColor("#FFFFFF")
 
         val y = 56f
