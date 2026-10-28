@@ -475,8 +475,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onPlayerPlay(playerIndex: Int, cards: List<Card>, group: CardGroup) {
         runOnUiThread {
-            // 新一手开始：清空桌面后展示本手出牌（结算时不清空，最后一手牌留在桌上）
-            gameSurfaceView.clearAllPlayedCards()
+            // 直接展示本手出牌：setTablePlayedCards 内部会捕获桌上正在展示的上一手牌作为退场动画，
+            // 故此处不再预先 clearAllPlayedCards（否则退场动画失效）；结算时不清空，最后一手牌留在桌上
             gameSurfaceView.setTablePlayedCards(playerIndex, cards)
             // 炸弹/火箭用爆炸轰鸣音效，普通牌型用甩牌声
             gameSurfaceView.playCardSound(

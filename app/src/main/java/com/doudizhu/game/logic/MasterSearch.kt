@@ -525,8 +525,9 @@ internal object MasterSearch {
                     if (a == null) {
                         // 根玩家即我方(max)节点，过牌时施加惩罚：在「打与不打等价」时倾向自己接管，
                         // 补偿「人类队友未必按最优接管」的搜索假设偏差。
-                        // 注意：敌方(min)节点的过牌【不】施加此惩罚（见 search() 内部实现），
-                        // 否则会错误地假设对手更想过大牌、污染整条博弈估值。
+                        // 该惩罚【仅】作用于根玩家的这一次决策（即此处）；深层节点（含农民局里的
+                        // 队友节点）一律不施加——搜索树中的队友按最优建模，对其过牌减分会注入
+                        // 「队友更积极接管」的错误假设，污染博弈估值。深层不加分见 search()。
                         v = search(next, effLast, effLastPlayer, depth - 1, alpha, INF, 1) - passPenalty
                     } else {
                         apply(turn, a)
@@ -646,11 +647,13 @@ internal object MasterSearch {
             for (a in actions) {
                 var v: Int
                 if (a == null) {
-                    // 过牌惩罚只在「我方(max)节点自己过牌」时施加，敌方(min)节点的过牌绝不施加：
-                    // 敌方过牌减值等价于假设对手更想过大牌，会系统性污染博弈估值；
-                    // 我方节点减分只是「打与不打等价时倾向自己接管」的风险规避，方向正确。
+                    // 深层节点的过牌【不】施加 passPenalty：
+                    // ① search() 的 turnIn 永远不是根玩家（solve 只把 next=(root+1)%3 传进来），
+                    //    根玩家自身的过牌惩罚已在 solve() 内单独处理，此处无需重复；
+                    // ② 农民局里根与队友同属「我方(max)」，若在此按 isRootSide 减分，会把惩罚
+                    //    误施加到「队友节点」——而搜索树中的队友是按最优建模的，对其过牌减分等价于
+                    //    假设队友会更积极接管，反而注入本要消除的偏差。故深层一律不减分。
                     v = search(next, last, lastPlayer, depth - 1, alpha, beta, ply + 1)
-                    if (isRootSide(turnIn)) v -= passPenalty
                 } else {
                     apply(turnIn, a)
                     v = search(next, a, turnIn, depth - 1, alpha, beta, ply + 1)
@@ -914,17 +917,33 @@ internal object MasterSearch {
         /**
          * 等效手数 = 拆解手数 + 可被对手压制的散单/对子尾巴数(每处 +1 tempo)。
          * enemyB 传 0 表示"只有 enemyA 一个敌人"(农民视角，队友不压制自己)。
+         * 结构拆牌采用与 minTurns 一致的「两种拆法取优」(先三张/先结构)，
+         * 避免只走「三张优先」导致「三张本应拆进顺子」的牌被系统性高估手数
+         * （例如 333+4,5,6,7,8：三重优先会算成 5 手，真实最优是 3-8 顺 + 33 共 2 手）。
          */
         private fun effTurns(hand: Long, enemyA: Long, enemyB: Long): Int {
+            val a = effTurnsOrdered(hand, enemyA, enemyB, true)
+            val b = effTurnsOrdered(hand, enemyA, enemyB, false)
+            return if (a < b) a else b
+        }
+
+        private fun effTurnsOrdered(hand: Long, enemyA: Long, enemyB: Long, triplesFirst: Boolean): Int {
             val c = IntArray(18)
             for (r in 3..17) c[r] = cnt(hand, r)
             var t = 0
             if (c[16] > 0 && c[17] > 0) { t++; c[16] = 0; c[17] = 0 }
             for (r in 3..15) if (c[r] == 4) { t++; c[r] = 0 }
-            t += consumeTriples(c, 0)
-            t += consumeRuns(c, 0, 3, 2)
-            t += consumeRuns(c, 0, 2, 3)
-            t += consumeRuns(c, 0, 1, 5)
+            if (triplesFirst) {
+                t += consumeTriples(c, 0)
+                t += consumeRuns(c, 0, 3, 2)
+                t += consumeRuns(c, 0, 2, 3)
+                t += consumeRuns(c, 0, 1, 5)
+            } else {
+                t += consumeRuns(c, 0, 3, 2)
+                t += consumeRuns(c, 0, 2, 3)
+                t += consumeRuns(c, 0, 1, 5)
+                t += consumeTriples(c, 0)
+            }
             var beat = 0
             for (r in 3..17) {
                 val n = c[r]

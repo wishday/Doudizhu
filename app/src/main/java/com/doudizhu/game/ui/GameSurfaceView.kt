@@ -292,11 +292,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
     private var pressedAction: String? = null
 
-    /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI） */
+    /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI）；同一时刻仅展示最新一手 */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
-    /** 旧牌退场动画：被新牌替换时暂存上一手牌与其起始时间，用于下移 + 淡出 */
-    private val prevPlayedCards = arrayOfNulls<List<Card>>(3)
-    private val outAnimStart = LongArray(3)
+    /** 退场动画：出牌瞬间捕获"桌上正在展示的那一手"（无论属于哪个槽位）作为退场对象，
+     *  在其自身槽位坐标处下移 + 淡出，与新牌入场同步（覆盖"下家出牌、上家旧牌退出"的常见场景） */
+    private var outCards: List<Card>? = null
+    private var outSlot = -1
+    private var outAnimStartMs = 0L
 
     /** 电脑「思考中」提示字号（出牌阶段与叫分阶段统一使用 44f，不再放大） */
     private val AI_THINKING_TIP_TEXT_SIZE = 44f
@@ -756,6 +758,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (sm.currentPlayerIndex != 0) return true
         // 任一玩家桌面牌落桌入场动画进行中
         if (playAnimActive()) return true
+        // 上一手退场动画进行中（下移 + 淡出），需持续重绘直至完成
+        if (outCards != null) return true
         // 「不出」气泡淡入中
         for (i in passSlotEpoch.indices) {
             if (passSlotEpoch[i] >= 0 && System.currentTimeMillis() - passAnimStart[i] < PASS_BUBBLE_FADEIN_MS) return true
@@ -868,42 +872,55 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     }
 
     /** 设置任意玩家的桌面出牌展示（新牌入手时记录动画起始时间，用于入场动效）；
-     *  有人出牌即"新的一手开始"：清除其它玩家残留的「不出」气泡（气泡不自动消退，由此处显式清理） */
+     *  出牌瞬间捕获当前桌上正在展示的那一手牌作为退场对象（无论属于哪个槽位），
+     *  清掉所有槽位后展示新手牌——从而覆盖"下家出牌、上家旧牌退出"的常见过渡场景；
+     *  同时清除其它玩家残留的「不出」气泡（气泡不自动消退，由此处显式清理）。
+     *  注意：调用方（onPlayerPlay / 人类出牌）不应再预先 clearAllPlayedCards，
+     *  否则此处无法捕获到上一手牌，退场动画会失效。 */
     fun setTablePlayedCards(playerIndex: Int, cards: List<Card>?) {
-        val old = tablePlayedCards[playerIndex]
+        val now = System.currentTimeMillis()
         if (cards != null && cards.isNotEmpty()) {
-            val now = System.currentTimeMillis()
-            // 旧牌退场：同一槽位被新牌替换时，暂存上一手牌并启动下移+淡出动画
-            if (old != null && old != cards) {
-                prevPlayedCards[playerIndex] = old
-                outAnimStart[playerIndex] = now
+            // 捕获当前桌上正在展示的那一手牌（来自任意槽位）作为退场动画对象
+            val curSlot = tablePlayedCards.indexOfFirst { it != null }
+            if (curSlot >= 0 && curSlot != playerIndex) {
+                outCards = tablePlayedCards[curSlot]
+                outSlot = curSlot
+                outAnimStartMs = now
+            } else if (curSlot == playerIndex && tablePlayedCards[playerIndex] != cards) {
+                // 同一玩家连续两手（如赢墩后再领出）：同槽位退场
+                outCards = tablePlayedCards[playerIndex]
+                outSlot = playerIndex
+                outAnimStartMs = now
             }
+            for (i in tablePlayedCards.indices) tablePlayedCards[i] = null
+            tablePlayedCards[playerIndex] = cards
             playAnimStart[playerIndex] = now
             playAnimEnd[playerIndex] = now + (cards.size - 1) * 75L + 400L + 80L
             for (i in passSlotEpoch.indices) {
                 if (i != playerIndex) passSlotEpoch[i] = -1
             }
         } else {
+            for (i in tablePlayedCards.indices) tablePlayedCards[i] = null
             playAnimEnd[playerIndex] = 0L
-            prevPlayedCards[playerIndex] = null
-            outAnimStart[playerIndex] = 0L
+            outCards = null
+            outSlot = -1
+            outAnimStartMs = 0L
         }
-        tablePlayedCards[playerIndex] = cards
         refresh()
     }
 
-    /** 清除所有桌面出牌展示（新一手开始/重开一局/返回主界面时；结算时不调用，保留最后一手牌）；
-     *  同时清空全部「不出」气泡与叫分阶段的电脑叫分展示（下一局开始发牌即清除上一局残留） */
+    /** 清除所有桌面出牌展示（重开一局/返回主界面/开局发牌时；结算时不调用，保留最后一手牌）；
+     *  同时清空退场动画对象、全部「不出」气泡。此处为即时清空（无退场动画），
+     *  用于新一局或退出等对局状态切换场景。 */
     fun clearAllPlayedCards() {
         for (i in tablePlayedCards.indices) {
             tablePlayedCards[i] = null
-            prevPlayedCards[i] = null
             playAnimEnd[i] = 0L
-            outAnimStart[i] = 0L
             passSlotEpoch[i] = -1
         }
-        // 开始发牌：叫分展示已改为按阶段驱动（仅 BIDDING 阶段绘制），阶段切走即自动消失，
-        // 无需在此显式清除；此处仅复位出牌桌面与「不出」气泡。
+        outCards = null
+        outSlot = -1
+        outAnimStartMs = 0L
     }
 
     // ==================== 触摸事件（支持滑动选牌 + 按钮按压反馈） ====================
@@ -1146,8 +1163,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                             return
                         }
                     }
-                    // 合法出牌，清空桌面并出牌
-                    clearAllPlayedCards()
+                    // 合法出牌：不再预先清空桌面——setTablePlayedCards 会捕获上一手牌做退场动画，
+                    // 随后 humanPlay 触发的 onPlayerPlay 回调再展示本手出牌
                     playCardSound()
                     hapticActionConfirm()
                     gameEngine.humanPlay(selectedCards)
@@ -1730,6 +1747,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun drawTablePlayedCards(canvas: Canvas) {
         val centerY = screenHeight * 0.38f
 
+        // 退场旧牌：先于新手牌绘制（不同槽位，互不遮挡），在其自身坐标处下移 + 淡出
+        drawOutgoingCards(canvas)
+
         // 左侧AI出的牌
         tablePlayedCards[2]?.let { cards ->
             if (cards.isNotEmpty()) {
@@ -1761,6 +1781,30 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         }
     }
 
+    /** 绘制正在退场的上一手牌：在其自身槽位坐标处整体下移并同步淡出（与新手牌入场同周期 380ms）。
+     *  由 setTablePlayedCards 在出牌瞬间捕获"桌上正在展示的那一手"触发，覆盖跨槽位的常见过渡场景。 */
+    private fun drawOutgoingCards(canvas: Canvas) {
+        val cards = outCards
+        if (cards == null || outSlot < 0) return
+        val op = ((animTime - outAnimStartMs).toFloat() / OUT_ANIM_DUR).coerceIn(0f, 1f)
+        if (op >= 1f) { outCards = null; return }   // 动画结束：释放，避免每帧空绘
+        val oe = easeOutCubic(op)
+        // 退场牌沿用其原槽位的屏幕坐标（与 drawTablePlayedCards 各槽位一致）
+        val (cx, cyBase) = when (outSlot) {
+            0 -> screenWidth * 0.50f to screenHeight * 0.38f + 50f
+            1 -> screenWidth * 0.70f to screenHeight * 0.38f
+            else -> screenWidth * 0.30f to screenHeight * 0.38f
+        }
+        val pTotalW = tableSpacing * (cards.size - 1) + tableCardW
+        val pStartX = cx - pTotalW / 2f
+        val pStartY = cyBase - tableCardH / 2f + oe * 46f   // 整体下移
+        val pAlpha = (1f - oe) * 0.9f                       // 同步淡出
+        for ((i, card) in cards.withIndex()) {
+            drawMiniCard(canvas, pStartX + i * tableSpacing, pStartY, tableCardW, tableCardH,
+                card, faceUp = true, alpha = pAlpha)
+        }
+    }
+
     /** 在指定位置绘制一组出牌（带逐张落桌入场动画：从上方轻落 + 淡入） */
     private fun drawPlayedCardsAt(canvas: Canvas, cards: List<Card>, centerX: Float, centerY: Float,
                                   slot: Int = -1) {
@@ -1780,27 +1824,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             val alpha = 0.35f + 0.65f * e
             drawMiniCard(canvas, startX + i * tableSpacing, dropY, tableCardW, tableCardH,
                 card, faceUp = true, alpha = alpha)
-        }
-
-        // 旧牌退场：新牌落桌的同时，被替换的旧牌整体下移并同步淡出（与入场动画同周期）
-        if (slot >= 0) {
-            val prev = prevPlayedCards[slot]
-            if (prev != null) {
-                val op = ((animTime - outAnimStart[slot]).toFloat() / OUT_ANIM_DUR).coerceIn(0f, 1f)
-                if (op < 1f) {
-                    val oe = easeOutCubic(op)
-                    val pTotalW = tableSpacing * (prev.size - 1) + tableCardW
-                    val pStartX = centerX - pTotalW / 2f
-                    val pStartY = startY + oe * 46f   // 整体下移
-                    val pAlpha = (1f - oe) * 0.9f     // 同步淡出
-                    for ((i, card) in prev.withIndex()) {
-                        drawMiniCard(canvas, pStartX + i * tableSpacing, pStartY, tableCardW, tableCardH,
-                            card, faceUp = true, alpha = pAlpha)
-                    }
-                } else {
-                    prevPlayedCards[slot] = null
-                }
-            }
         }
     }
 
