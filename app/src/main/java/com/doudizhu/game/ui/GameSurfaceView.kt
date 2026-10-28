@@ -103,6 +103,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // AI 信息面板尺寸随 uiScale 缩放（与牌背/手牌统一），让 Pad 上面板不再偏小
         aiPanelW = 320f * scale
         aiPanelH = 180f * scale
+        // 启动页难度按钮文字字号随 uiScale 缩放；这两个画笔仅用于主菜单页（标题 + 难度按钮），
+        // 故在此统一赋值，既随屏缩放又不会污染游戏内 HUD 的共享字号
+        modeNamePaint.textSize = 66f * scale
+        modeStatPaint.textSize = 34f * scale
     }
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
@@ -319,9 +323,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 「不出」气泡状态：各玩家槽位最近一次过牌的时间戳与代号（-1 表示无气泡；新一轮由 clearAllPlayedCards 清除） */
     private val passAnimStart = LongArray(3)
     private val passSlotEpoch = IntArray(3) { -1 }
-
-    /** 叫分阶段提示字号：与「不出」气泡、「电脑A/B思考中」文字一致（44f） */
-    private val AI_BID_TIP_TEXT_SIZE = PASS_BUBBLE_TEXT_SIZE
 
     /** 过牌代号计数器：每次任意玩家过牌自增，用于区分"连续两次不出"与新的一手 */
     private var passEpochCounter = 0
@@ -1743,7 +1744,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             label = "不叫"
             color = Color.parseColor("#B0BEC5")
         }
-        textPaint.textSize = AI_BID_TIP_TEXT_SIZE * 1.5f * uiScale
+        // 字号与电脑「不出」气泡、「电脑A/B思考中」一致（44f*uiScale），统一观感
+        textPaint.textSize = PASS_BUBBLE_TEXT_SIZE * uiScale
         textPaint.color = color
         textPaint.textAlign = Paint.Align.CENTER
         drawTextWithShadow(canvas, label, centerX,
@@ -2282,9 +2284,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
                     // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
-                    val dW = (btnW * 2f + 40f) / 2f
-                    val dH = btnH * 2f + 24f
-                    val dGap = gap * 2f
+                    // 按钮尺寸随 uiScale 缩放，与游戏内牌面/字体统一（Pad 不再偏小）
+                    val dW = ((btnW * 2f + 40f) / 2f) * uiScale
+                    val dH = (btnH * 2f + 24f) * uiScale
+                    val dGap = gap * 2f * uiScale
                     val normalColor = Color.parseColor("#388E3C")
                     val normalPressed = Color.parseColor("#1B5E20")
                     val masterColor = Palette.rankRed
@@ -2295,8 +2298,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     } else {
                         (screenHeight - (dH * 2f + dGap)) / 2f
                     }
-                    // 标题字号与「普通/大师」一致（复用 modeNamePaint：加粗白字、居中）
-                    canvas.drawText("请选择难度", screenWidth / 2f, blockTop - 60f, modeNamePaint)
+                    // 标题字号与「普通/大师」一致（复用 modeNamePaint：加粗白字、居中），上移距离随 uiScale
+                    canvas.drawText("请选择难度", screenWidth / 2f, blockTop - 60f * uiScale, modeNamePaint)
                     if (horizTotal <= screenWidth) {
                         // 横屏：两个按钮左右居中
                         val startX = (screenWidth - horizTotal) / 2f
@@ -2588,9 +2591,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val rateLine = "胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
         val scoreLine = "积分:${stat.score}"
 
-        val nameH = 64f
-        val statH = 32f
-        val lineGap = 14f
+        // 内部文字行高布局随 uiScale 等比（否则按钮框放大后上下留白失衡、字相对框偏小）
+        val nameH = 64f * uiScale
+        val statH = 32f * uiScale
+        val lineGap = 14f * uiScale
         val totalH = nameH + statH * 2 + lineGap * 2
         val blockTop = y + (h - totalH) / 2f
         val c0 = blockTop + nameH / 2f
@@ -2604,11 +2608,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
     }
 
-    /** 主界面右下角设置图标（齿轮），位置向左上偏移便于点击 */
+    /** 主界面右下角设置图标（齿轮），位置向左上偏移便于点击；尺寸/边距随 uiScale 缩放 */
     private fun addSettingsButton(canvas: Canvas, target: MutableList<ButtonRect>) {
-        val size = 96f
-        val margin = 36f
-        val offset = 60f   // 向「左上」移动：x 左移、y 上移
+        val size = 96f * uiScale
+        val margin = 36f * uiScale
+        val offset = 60f * uiScale   // 向「左上」移动：x 左移、y 上移
         val x = screenWidth - margin - size - offset
         val y = screenHeight - margin - size - offset
         val rect = RectF(x, y, x + size, y + size)
@@ -2869,17 +2873,22 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 兜底：超时由 closeError 定时器主动清除，此处仅在绘制帧先于定时器到达时做双保险
         if (System.currentTimeMillis() > errorTimer) { closeError(); return }
 
-        textPaint.textSize = 48f
+        // 字号与「轮到你出牌」保持一致（44f*uiScale）；框高/内边距/圆角/基线同步缩放，避免大屏溢出红框
+        textPaint.textSize = 44f * uiScale
         textPaint.color = Palette.errText
         textPaint.textAlign = Paint.Align.CENTER
 
+        val padX = 40f * uiScale
+        val errH = 72f * uiScale
         val tw = textPaint.measureText(errorText)
+        val top = screenHeight * 0.26f
         val errRect = RectF(
-            screenWidth / 2 - tw / 2 - 40f, screenHeight * 0.26f,
-            screenWidth / 2 + tw / 2 + 40f, screenHeight * 0.26f + 72f
+            screenWidth / 2 - tw / 2 - padX, top,
+            screenWidth / 2 + tw / 2 + padX, top + errH
         )
-        canvas.drawRoundRect(errRect, 16f, 16f, errBgPaint)
-        canvas.drawText(errorText, screenWidth / 2f, screenHeight * 0.26f + 54f, textPaint)
+        canvas.drawRoundRect(errRect, 16f * uiScale, 16f * uiScale, errBgPaint)
+        // 文字在框内垂直居中（baseline = 框中心 + 约 0.35 倍字号偏移）
+        canvas.drawText(errorText, screenWidth / 2f, top + errH * 0.5f + textPaint.textSize * 0.35f, textPaint)
     }
 
     /** 右上角统计面板：模式(普通/大师) + 胜率 + 积分，按模式分开统计；主界面不显示，进入游戏后显示 */
