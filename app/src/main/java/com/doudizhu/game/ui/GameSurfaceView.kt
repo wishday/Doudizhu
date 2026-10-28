@@ -98,33 +98,34 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
     private object Palette {
-        // 文本与点数字色（用 0xRRGGBB 整型字面量，避免被下方"统一替换硬编码色"的 replace_all 命中自身）
-        val rankRed = 0xFFD32F2F
-        val rankBlack = 0xFF212121
-        val textLightGray = 0xFFD9D9D9
-        val textGreen = 0xFFA5D6A7
-        val gold = 0xFFFFD600
-        val bubbleText = 0xFFECEFF1
-        val modeRed = 0xFFEF5350
-        val errText = 0xFFFF5252
+        // 文本与点数字色（用 0xRRGGBB 整型字面量；注意 Kotlin 中 0xFFxxxxxx 超过 Int.MAX_VALUE
+        // 会被推断为 Long，故统一 .toInt() 取回与 Color.parseColor 相同的 32 位 ARGB Int）
+        val rankRed = 0xFFD32F2F.toInt()
+        val rankBlack = 0xFF212121.toInt()
+        val textLightGray = 0xFFD9D9D9.toInt()
+        val textGreen = 0xFFA5D6A7.toInt()
+        val gold = 0xFFFFD600.toInt()
+        val bubbleText = 0xFFECEFF1.toInt()
+        val modeRed = 0xFFEF5350.toInt()
+        val errText = 0xFFFF5252.toInt()
         // 卡牌/面板描边
-        val cardBorder = 0xFFC9CFD6
-        val cardBorderSelected = 0xFFFFC107
+        val cardBorder = 0xFFC9CFD6.toInt()
+        val cardBorderSelected = 0xFFFFC107.toInt()
         val passBorder = Color.argb(60, 176, 190, 197)
         // 浮层玻璃（统一：带微暖/微绿偏移的半透明 + 暖金高光描边）
         val glassFill = Color.argb(150, 12, 34, 22)
         val glassDrop = Color.argb(70, 0, 0, 0)
         val glassBorder = Color.argb(90, 255, 236, 179)
         val dimFill = Color.argb(170, 0, 0, 0)
-        val bubbleFill = 0xFF37474F
+        val bubbleFill = 0xFF37474F.toInt()
         val errFill = Color.argb(221, 0, 0, 0)
         val tableOvalStroke = Color.argb(40, 255, 236, 179)
         // 强调色
-        val highlightYellow = 0xFFFFEB3B
-        val highlightGlow = 0x30FFEB3B
+        val highlightYellow = 0xFFFFEB3B.toInt()
+        val highlightGlow = 0x30FFEB3B.toInt()
         val aiHighlight = Color.argb(120, 255, 152, 0)
         // 装饰
-        val ovalDecor = 0xFF15491A
+        val ovalDecor = 0xFF15491A.toInt()
         val highlightWhite = Color.argb(32, 255, 255, 255)
         val bannerStroke = Color.argb(120, 255, 214, 90)
     }
