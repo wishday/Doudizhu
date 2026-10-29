@@ -120,6 +120,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 故在此统一赋值，既随屏缩放又不会污染游戏内 HUD 的共享字号
         modeNamePaint.textSize = 66f * scale
         modeStatPaint.textSize = 34f * scale
+        modeStatBoldPaint.textSize = 34f * scale
     }
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
@@ -224,6 +225,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 主界面难度按钮：统计信息（小/不加粗，浅灰）；字号整体放大2号 */
     private val modeStatPaint = Paint().apply {
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
+        color = Color.parseColor("#E0E0E0"); textSize = 34f
+    }
+    /** 同上，但加粗：专用于「总胜率 / 总积分」两行，与分角色行形成层级区分 */
+    private val modeStatBoldPaint = Paint().apply {
+        isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
         color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
     /** 错误提示弹窗背景（深红半透明圆角底） */
@@ -2677,8 +2683,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (mode == Difficulty.MASTER) "大师" else "普通",
             x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
         )
-        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatPaint)
-        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
+        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
+        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
         // 总积分与地主胜率之间的空白行（c2 与 c3 之间）不绘制任何文字
         canvas.drawText(landlordLine, x + w / 2f, c3 + statH * 0.32f, modeStatPaint)
         canvas.drawText(farmerLine, x + w / 2f, c4 + statH * 0.32f, modeStatPaint)
