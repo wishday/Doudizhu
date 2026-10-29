@@ -3,6 +3,12 @@ name: Build & Release APK
 on:
   push:
     branches: [main]
+    # 仿真 harness、编译预检脚本、文档、截图等不影响 APK 产物，push 这些不触发构建
+    paths-ignore:
+      - 'sim/**'
+      - 'check-kotlin.sh'
+      - '**.md'
+      - 'screenshoot/**'
   workflow_dispatch:
     inputs:
       version_name:

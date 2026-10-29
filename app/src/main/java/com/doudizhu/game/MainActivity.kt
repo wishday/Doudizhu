@@ -73,7 +73,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private val strategyPrefs by lazy { getSharedPreferences("master_strategy", MODE_PRIVATE) }
     private var farmerTeammateStrategy = Difficulty.NORMAL
     private var playerHintStrategy = Difficulty.NORMAL
-    private var masterThinkSeconds = 3
+    private var masterThinkSeconds = 5
 
     private fun loadStrategy(key: String, default: Difficulty): Difficulty {
         val s = strategyPrefs.getString(key, default.name) ?: default.name
@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     private fun loadMasterStrategy() {
         farmerTeammateStrategy = loadStrategy("farmer_teammate_strategy", Difficulty.NORMAL)
         playerHintStrategy = loadStrategy("player_hint_strategy", Difficulty.NORMAL)
-        masterThinkSeconds = strategyPrefs.getInt("master_think_seconds", 3)
+        masterThinkSeconds = strategyPrefs.getInt("master_think_seconds", 5)
     }
 
     private fun saveMasterStrategy() {
@@ -151,7 +151,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         val settings = root.getJSONObject("settings")
         val farmer = Difficulty.valueOf(settings.optString("farmer_teammate_strategy", Difficulty.NORMAL.name))
         val hint = Difficulty.valueOf(settings.optString("player_hint_strategy", Difficulty.NORMAL.name))
-        val sec = settings.optInt("masterThinkSeconds", 3).coerceIn(2, 60)
+        val sec = settings.optInt("masterThinkSeconds", 5).coerceIn(2, 60)
         val statsObj = root.optJSONObject("stats") ?: JSONObject()
         val imported = mutableMapOf<Difficulty, GameStats>()
         for (mode in listOf(Difficulty.NORMAL, Difficulty.MASTER)) {
@@ -475,8 +475,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     override fun onPlayerPlay(playerIndex: Int, cards: List<Card>, group: CardGroup) {
         runOnUiThread {
-            // 新一手开始：清空桌面后展示本手出牌（结算时不清空，最后一手牌留在桌上）
-            gameSurfaceView.clearAllPlayedCards()
+            // 直接展示本手出牌：setTablePlayedCards 内部会捕获桌上正在展示的上一手牌作为退场动画，
+            // 故此处不再预先 clearAllPlayedCards（否则退场动画失效）；结算时不清空，最后一手牌留在桌上
             gameSurfaceView.setTablePlayedCards(playerIndex, cards)
             // 炸弹/火箭用爆炸轰鸣音效，普通牌型用甩牌声
             gameSurfaceView.playCardSound(

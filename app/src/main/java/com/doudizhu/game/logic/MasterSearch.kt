@@ -399,14 +399,37 @@ internal object MasterSearch {
 
     // ===================== 搜索 =====================
 
+    /** 门板位顶大牌的触发阈值：地主手牌数不超过该值时，地主上家的人类农民改用小牌放行→大牌封堵 */
+    private const val HUMAN_DOOR_PRESS_MAX_LD_SIZE = 10
+
+    /**
+     * 残局恐慌开炸的默认触发阈值（地主手牌数），仿真可通过 [humanPolicy] 参数覆盖以做对比实验。
+     * 取值 5：仿真显示阈值 2/5 对人类强度几乎无差（地主胜率 31.9%/32.2%），
+     * 而真人农民见地主 ≤5 张（一手顺子/三带即走完）普遍提前开炸，取更贴近真人的 5。
+     */
+    private const val HUMAN_PANIC_BOMB_LD_SIZE = 5
+
     /**
      * 近似「典型人类农民」的确定性出牌策略，仅供地主搜索做对手建模使用
      * （[Solver.humanNodeValue] 调用，仿真也可用同一策略当「真实人类」），本身不参与任何真实决策、
      * 不影响农民方搜索与普通模式。特征：可预测、偏次优 ——
      *  - 自由出牌：优先领最小的单张（人类常先打小牌）；无单张再领最小对子，再其他非炸弹。
-     *  - 跟牌：出能压住的最小非炸弹走法；压不住则过牌（不轻易动炸弹）。
+     *  - 跟队友的牌：不压队友 —— 除非能一手走完直接获胜，否则过牌让队友继续。
+     *  - 跟地主的牌：出能压住的最小非炸弹走法；压不住则过牌（不轻易动炸弹）。
+     *    例外一（门板意识）：自己是地主上家且地主手牌不多（≤[HUMAN_DOOR_PRESS_MAX_LD_SIZE]）时，
+     *    单张/对子改为「能压住的最大牌」，顶大牌封堵地主顺走小牌 —— 这是真人农民最典型的行为。
+     *    例外二（残局恐慌开炸）：地主手牌 ≤[HUMAN_PANIC_BOMB_LD_SIZE] 且非炸弹压不住时，
+     *    直接用最小炸弹拦截 —— 真人见地主报单/报对很少再放行。
      */
-    fun humanPolicy(hand: Long, last: Move?, lastPlayer: Int, turn: Int): Move? {
+    fun humanPolicy(
+        hand: Long,
+        last: Move?,
+        lastPlayer: Int,
+        turn: Int,
+        landlord: Int,
+        landlordSize: Int,
+        panicBombLdSize: Int = HUMAN_PANIC_BOMB_LD_SIZE
+    ): Move? {
         val free = last == null || lastPlayer == turn || lastPlayer < 0 || lastPlayer > 2
         val effLast = if (free) null else last
         val moves = generate(hand, effLast)
@@ -419,10 +442,29 @@ internal object MasterSearch {
             val pairs = pool.filter { it.type == CardType.PAIR }
             if (pairs.isNotEmpty()) return minByRank(pairs)
             return minByRank(pool)
-        } else {
-            val beats = moves.filter { !it.isBomb }.sortedBy { it.mainRank }
-            return if (beats.isNotEmpty()) beats.first() else null
         }
+        // 队友的牌不压：能一手走完才接手，否则过牌（队友走得越顺越不该拦）
+        if (lastPlayer != landlord) {
+            return moves.firstOrNull { it.isExactFinish(sizeOf(hand)) }
+        }
+        val beats = moves.filter { !it.isBomb }.sortedBy { it.mainRank }
+        if (beats.isEmpty()) {
+            // 残局恐慌开炸：地主逼近一手走完且非炸弹压不住时，真人多半直接甩最小炸弹拦截
+            if (landlordSize <= panicBombLdSize) {
+                val bombs = moves.filter { it.isBomb }
+                if (bombs.isNotEmpty()) return minByRank(bombs)
+            }
+            return null
+        }
+        // 门板位：地主上家且地主手牌不多时，单张/对子顶最大牌封堵，不让地主顺小牌
+        val isDoor = (turn + 1) % 3 == landlord
+        if (isDoor && landlordSize <= HUMAN_DOOR_PRESS_MAX_LD_SIZE) {
+            val headType = effLast?.type
+            if (headType == CardType.SINGLE || headType == CardType.PAIR) {
+                return beats.last()
+            }
+        }
+        return beats.first()
     }
 
     private fun minByRank(list: List<Move>): Move {
@@ -442,10 +484,14 @@ internal object MasterSearch {
      * @param initialHands 三家位压缩手牌（下标即玩家 index）
      * @param landlord 地主索引
      * @param rootIsLandlord 根玩家是否为地主（决定评价视角属于哪一阵营）
-     * @param deadlineMs 绝对截止时刻（毫秒），到点立刻中止并回退到上一轮迭代结果
+     * @param deadlineMs 绝对截止时刻（毫秒），到点立刻中止并回退到上一轮迭代结果；
+     *        传 [Long.MAX_VALUE] 进入确定性模式（纯 nodeLimit 收口、不读墙钟），供仿真复现实验使用
      * @param nodeLimit 节点上限，防止极端局面耗尽预算
      * @param passPenalty 过牌惩罚。队友是人类时给一点点惩罚：搜索假设所有人都最优，
      *        但人类队友未必会按最优接管，因此在「打与不打等价」时倾向自己接管。
+     *        注意：该惩罚**只在我方(max)节点的「自己过牌」上施加**，绝不在敌方(min)
+     *        节点的过牌上施加——敌方过牌减分等价于「假设对手更想过大牌」，会系统性污染
+     *        整条博弈估值（典型症状：该收不收、把出牌权白白让回对手）。
      */
     class Solver(
         initialHands: LongArray,
@@ -455,7 +501,8 @@ internal object MasterSearch {
         private val nodeLimit: Int,
         private val passPenalty: Int,
         private val humanFarmer: Int = -1,
-        private val pModel: Int = 0
+        private val pModel: Int = 0,
+        private val evalMode: Int = 0
     ) {
         private val hands = initialHands.copyOf()
         private val sizes = IntArray(3) { sizeOf(hands[it]) }
@@ -517,12 +564,13 @@ internal object MasterSearch {
                 var failed = false
 
                 for (a in actions) {
-                    val v: Int
+                    var v: Int
                     if (a == null) {
-                        // PASS 惩罚与主搜索内部口径一致：敌方节点取 min、我方节点取 max，
-                        // 统一在递归值上施加（见 search() 中对跟牌过牌的处理）。
-                        // 修复点①：旧版只在根节点减一次惩罚、子节点不减，导致同一「过牌」
-                        // 在不同深度被重复计价不一致，AI 为规避惩罚而错误优先甩大牌。
+                        // 根玩家即我方(max)节点，过牌时施加惩罚：在「打与不打等价」时倾向自己接管，
+                        // 补偿「人类队友未必按最优接管」的搜索假设偏差。
+                        // 该惩罚【仅】作用于根玩家的这一次决策（即此处）；深层节点（含农民局里的
+                        // 队友节点）一律不施加——搜索树中的队友按最优建模，对其过牌减分会注入
+                        // 「队友更积极接管」的错误假设，污染博弈估值。深层不加分见 search()。
                         v = search(next, effLast, effLastPlayer, depth - 1, alpha, INF, 1) - passPenalty
                     } else {
                         apply(turn, a)
@@ -585,7 +633,8 @@ internal object MasterSearch {
                 aborted = true
                 return 0
             }
-            if ((nodes and 0x1FF) == 0 && System.currentTimeMillis() >= deadlineMs) {
+            // deadlineMs == Long.MAX_VALUE：确定性模式（纯节点数收口，不读墙钟），供仿真复现实验使用
+            if (deadlineMs != Long.MAX_VALUE && (nodes and 0x1FF) == 0 && System.currentTimeMillis() >= deadlineMs) {
                 aborted = true
                 return 0
             }
@@ -612,12 +661,15 @@ internal object MasterSearch {
             val key = stateKey(turnIn, last, lastPlayer)
             val hit = tt[key]
             if (hit != null && hit.depth >= depth) {
+                // 终局分含 ply（WIN - ply / -WIN + ply），而置换表键不含 ply；
+                // 读取时按当前 ply 还原，避免不同路径长度复用同一条目造成分数污染
+                val hv = fromTT(hit.value, ply)
                 when (hit.flag) {
-                    FLAG_EXACT -> return hit.value
-                    FLAG_LOWER -> if (hit.value > alpha) alpha = hit.value
-                    else -> if (hit.value < beta) beta = hit.value
+                    FLAG_EXACT -> return hv
+                    FLAG_LOWER -> if (hv > alpha) alpha = hv
+                    else -> if (hv < beta) beta = hv
                 }
-                if (alpha >= beta) return hit.value
+                if (alpha >= beta) return hv
             }
 
             val hand = hands[turnIn]
@@ -640,13 +692,15 @@ internal object MasterSearch {
             var best = if (maximizing) -INF else INF
 
             for (a in actions) {
-                val v: Int
+                var v: Int
                 if (a == null) {
-                    // 修复点①：过牌惩罚必须在所有「跟牌过牌」节点统一施加（与根节点同口径）。
-                    // 旧版只在根节点减一次、子节点不减，同一「过牌」在不同深度计价不一致，
-                    // 且我方 max 节点会主动避开被惩罚的 PASS 而提前甩大牌 —— 这正是
-                    // 「大师 AI 开局白送大牌」的核心成因之一。
-                    v = search(next, last, lastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+                    // 深层节点的过牌【不】施加 passPenalty：
+                    // ① search() 的 turnIn 永远不是根玩家（solve 只把 next=(root+1)%3 传进来），
+                    //    根玩家自身的过牌惩罚已在 solve() 内单独处理，此处无需重复；
+                    // ② 农民局里根与队友同属「我方(max)」，若在此按 isRootSide 减分，会把惩罚
+                    //    误施加到「队友节点」——而搜索树中的队友是按最优建模的，对其过牌减分等价于
+                    //    假设队友会更积极接管，反而注入本要消除的偏差。故深层一律不减分。
+                    v = search(next, last, lastPlayer, depth - 1, alpha, beta, ply + 1)
                 } else {
                     apply(turnIn, a)
                     v = search(next, a, turnIn, depth - 1, alpha, beta, ply + 1)
@@ -669,7 +723,8 @@ internal object MasterSearch {
                     best >= betaIn -> FLAG_LOWER
                     else -> FLAG_EXACT
                 }
-                tt[key] = TTEntry(best, depth, flag)
+                // 终局分含 ply，存储时折算成与 ply 无关的形式（见 fromTT）
+                tt[key] = TTEntry(toTT(best, ply), depth, flag)
             }
             return best
         }
@@ -697,28 +752,35 @@ internal object MasterSearch {
             val moves = generate(hands[turnIn], effLast)
             val next = (turnIn + 1) % 3
             if (moves.isEmpty()) {
-                // 跟牌压不上只能过：与主搜索同口径施加过牌惩罚（修复点①）
-                return search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+                // 人类农民（敌方节点）压不上只能过：敌方过牌【不】施加过牌惩罚，
+                // 否则会错误地假设对手更想过大牌、污染地主的博弈估值。
+                return search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1)
             }
             if (pModel <= 0) {
                 // 纯最优 min 节点（与正常农民节点行为一致），最稳健。
                 // 修复点⑤：人类策略分支是确定性单一走法，必须【先于】全量 min 枚举计算，
                 // 否则当 min 枚举触发 fail-low 剪枝提前 break 时，optBest 只是「≤真实min」的上界，
                 // 再与确定性的 hv 做期望混合会系统性低估局面、污染地主决策（典型症状：无谓抢权甩大牌）。
-                val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+                // hv 用全开窗口（-INF, INF）求【精确值】：它要在下方 min 循环里当作该走法的真实值
+                // 被复用（packed 相等即跳过重复展开），若带窗口 fail-low 得到上界，会把上界当精确值
+                // 参与 min 比较，同样造成系统性高估该节点、污染地主估值。
+                val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn, landlord, sizes[landlord])
                 val hv = if (hm == null) {
-                    search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+                    // 人类农民（敌方节点）压不上只能过：敌方过牌不施加惩罚
+                    search(next, effLast, effLastPlayer, depth - 1, -INF, INF, ply + 1)
                 } else {
                     apply(turnIn, hm)
-                    val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                    val v = search(next, hm, turnIn, depth - 1, -INF, INF, ply + 1)
                     undo(turnIn, hm)
                     v
                 }
                 var best = INF
                 var b = beta
                 for (a in moves) {
-                    if (a === hm) {
-                        // 确定性复用，避免重复展开整棵子树
+                    // 确定性人类走法复用：用 packed 相等识别（注意不能再用引用相等 `a === hm`，
+                    // moves 与 humanPolicy 各自 generate 出不同对象实例，引用相等永远为假，
+                    // 会导致本可复用的子树被重复展开、浪费搜索深度）。
+                    if (hm != null && a.packed == hm.packed) {
                         if (hv < best) best = hv
                         if (best < b) b = best
                         continue
@@ -733,35 +795,36 @@ internal object MasterSearch {
                 }
                 return best
             }
-            // —— pModel > 0：expectimax 混合。确定性人类分支必须先精确算出，min 分支允许剪枝 ——
-            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+            // —— pModel > 0：expectimax 混合。两个分支都必须是【精确值】才能混合 ——
+            // 旧实现有两处把「界」当「值」用：
+            //  ① hv 带 (alpha, beta) 窗口计算，fail-low 时只是上界，却被当作确定性人类走法的真实值；
+            //  ② min 分支带 (a0, b0) 窗口且允许 fail-low 提前 break，optBest 只是「≤真实min」的上界，
+            //     与 hv 加权混合会系统性低估局面（修复点⑤只修了 pModel==0 分支的同类问题）。
+            // 因此这里两个分支都用全开窗口（-INF, INF）求精确值。人类节点仅存在于地主根，
+            // 数量有限，放弃此处剪枝换来的精确性是值得的。
+            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn, landlord, sizes[landlord])
             val hv = if (hm == null) {
-                search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1) - passPenalty
+                // 人类农民（敌方节点）压不上只能过：敌方过牌不施加惩罚
+                search(next, effLast, effLastPlayer, depth - 1, -INF, INF, ply + 1)
             } else {
                 apply(turnIn, hm)
-                val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                val v = search(next, hm, turnIn, depth - 1, -INF, INF, ply + 1)
                 undo(turnIn, hm)
                 v
             }
             if (aborted) return 0
             // 最优分支：人类农民尽力压低地主胜率（min）。对确定性走法直接复用 hv，不再重复展开。
             var optBest = INF
-            val a0 = alpha
-            var b0 = beta
             for (a in moves) {
-                if (a === hm) {
+                if (hm != null && a.packed == hm.packed) {
                     if (hv < optBest) optBest = hv
-                    if (optBest < b0) b0 = optBest
-                    if (a0 >= b0) break
                     continue
                 }
                 apply(turnIn, a)
-                val v = search(next, a, turnIn, depth - 1, a0, b0, ply + 1)
+                val v = search(next, a, turnIn, depth - 1, -INF, INF, ply + 1)
                 undo(turnIn, a)
                 if (aborted) return 0
                 if (v < optBest) optBest = v
-                if (optBest < b0) b0 = optBest
-                if (a0 >= b0) break
             }
             // 期望混合（整数权重，避免浮点）
             return (hv * pModel + optBest * (1000 - pModel)) / 1000
@@ -830,6 +893,7 @@ internal object MasterSearch {
          * 再叠加控牌资源（看较强那家农民与地主对比）与当前主动权。
          */
         private fun evaluate(turn: Int, last: Move?, lastPlayer: Int): Int {
+            if (evalMode == 1) return evaluateV2(turn, last, lastPlayer)
             var f0 = -1
             var f1 = -1
             for (p in 0..2) {
@@ -863,6 +927,137 @@ internal object MasterSearch {
             v += if (holder == landlord) initW else -initW
 
             return if (rootIsLandlord) v else -v
+        }
+
+        /**
+         * 候选评估 V2（evalMode=1）：在基线"手数竞速"之上，加入"牌质惩罚"——
+         * 一手牌若被拆成若干"散单/对子"尾巴，其中"会被对手压住"的等效于额外多花 tempo
+         * （出完还要被抢回出牌权）。这补上基线只数手数、不区分"大牌尾巴 vs 小牌尾巴"的缺陷：
+         * 同是 5 手牌，全是高张(2/王)的 5 手远强于全是 3/4/5 小单的 5 手。
+         * 利用完美信息：地主的敌人是两家农民(合计)，农民的敌人只有地主(队友不压制自己)。
+         */
+        private fun evaluateV2(turn: Int, last: Move?, lastPlayer: Int): Int {
+            var f0 = -1
+            var f1 = -1
+            for (p in 0..2) {
+                if (p == landlord) continue
+                if (f0 < 0) f0 = p else f1 = p
+            }
+            val ldT = effTurns(hands[landlord], hands[f0], hands[f1])   // 地主敌人=两家农民
+            val a = effTurns(hands[f0], hands[landlord], 0L)            // 农民敌人=仅地主
+            val b = effTurns(hands[f1], hands[landlord], 0L)
+            val minF = if (a < b) a else b
+            val maxF = if (a < b) b else a
+
+            var v = (minF - ldT) * 20
+            v += (maxF - minF) * 3
+            v += (control(hands[landlord]) - maxOf(control(hands[f0]), control(hands[f1]))) * 6
+            val holder = if (last == null) turn else lastPlayer
+            val holderSize = sizes[holder]
+            val initW = when {
+                holderSize <= 6 -> 25
+                holderSize >= 16 -> 2
+                holderSize >= 12 -> 8
+                else -> 8 + (25 - 8) * (12 - holderSize) / 6
+            }
+            v += if (holder == landlord) initW else -initW
+
+            return if (rootIsLandlord) v else -v
+        }
+
+        /**
+         * 等效手数 = 拆解手数 + 可被对手压制的散单/对子尾巴数(每处 +1 tempo)。
+         * enemyB 传 0 表示"只有 enemyA 一个敌人"(农民视角，队友不压制自己)。
+         * 结构拆牌采用与 minTurns 一致的「两种拆法取优」(先三张/先结构)，
+         * 避免只走「三张优先」导致「三张本应拆进顺子」的牌被系统性高估手数
+         * （例如 333+4,5,6,7,8：三重优先会算成 5 手，真实最优是 3-8 顺 + 33 共 2 手）。
+         */
+        private fun effTurns(hand: Long, enemyA: Long, enemyB: Long): Int {
+            val a = effTurnsOrdered(hand, enemyA, enemyB, true)
+            val b = effTurnsOrdered(hand, enemyA, enemyB, false)
+            return if (a < b) a else b
+        }
+
+        private fun effTurnsOrdered(hand: Long, enemyA: Long, enemyB: Long, triplesFirst: Boolean): Int {
+            val c = IntArray(18)
+            for (r in 3..17) c[r] = cnt(hand, r)
+            var t = 0
+            if (c[16] > 0 && c[17] > 0) { t++; c[16] = 0; c[17] = 0 }
+            for (r in 3..15) if (c[r] == 4) { t++; c[r] = 0 }
+            // 记录拆出的顺子/连对/飞机段，之后逐段判断「是否会被对手压住」，
+            // 补上基线只惩罚散单/对子尾巴、不区分「大顺子 vs 小顺子」的缺陷
+            val runs = ArrayList<Int>(4)
+            if (triplesFirst) {
+                t += consumeTriples(c, 0)
+                t += consumeRuns(c, 0, 3, 2, runs)
+                t += consumeRuns(c, 0, 2, 3, runs)
+                t += consumeRuns(c, 0, 1, 5, runs)
+            } else {
+                t += consumeRuns(c, 0, 3, 2, runs)
+                t += consumeRuns(c, 0, 2, 3, runs)
+                t += consumeRuns(c, 0, 1, 5, runs)
+                t += consumeTriples(c, 0)
+            }
+            var beat = 0
+            for (packed in runs) {
+                val m = packed ushr 16
+                val s = (packed ushr 8) and 0xFF
+                val len = packed and 0xFF
+                if (oppBeatsRun(m, s, len, enemyA, enemyB)) beat++
+            }
+            for (r in 3..17) {
+                val n = c[r]
+                if (n <= 0) continue
+                val pairs = n / 2
+                val singles = n % 2
+                if (pairs > 0 && oppBeatsPair(r, enemyA, enemyB)) beat += pairs
+                if (singles > 0 && oppBeatsSingle(r, enemyA, enemyB)) beat += 1
+                t += pairs + singles
+            }
+            return t + beat
+        }
+
+        /**
+         * 对手是否能压住一段顺子/连对/飞机（m=每点张数，s=起始点数，len=段长）。
+         * 压法：同型同长、最小点数更大（整体平移 1 位起），或对手握有炸弹/王炸。
+         * 注意顺子/连对/飞机必须出自【同一家】手牌 —— 地主的敌人是两家农民时，
+         * 必须分别在 enemyA、enemyB 各自手牌里检查，不能把两家牌拼起来算。
+         */
+        private fun oppBeatsRun(m: Int, s: Int, len: Int, a: Long, b: Long): Boolean {
+            var start = s + 1
+            while (start + len - 1 <= 14) {   // 2 和王不进顺子，最高到 A(14)
+                var okA = true
+                var okB = true
+                for (r in start until start + len) {
+                    if (cnt(a, r) < m) okA = false
+                    if (cnt(b, r) < m) okB = false
+                    if (!okA && !okB) break
+                }
+                if (okA || okB) return true
+                start++
+            }
+            return oppHasBomb(a) || oppHasBomb(b)
+        }
+
+        private fun oppHasBomb(h: Long): Boolean {
+            if (cnt(h, 16) > 0 && cnt(h, 17) > 0) return true
+            for (r in 3..15) if (cnt(h, r) == 4) return true
+            return false
+        }
+
+        private fun oppBeatsSingle(r: Int, a: Long, b: Long): Boolean {
+            for (k in (r + 1)..17) if (cnt(a, k) > 0 || cnt(b, k) > 0) return true
+            if (cnt(a, 16) > 0 && cnt(a, 17) > 0) return true
+            if (cnt(b, 16) > 0 && cnt(b, 17) > 0) return true
+            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return true
+            return false
+        }
+        private fun oppBeatsPair(r: Int, a: Long, b: Long): Boolean {
+            for (k in (r + 1)..15) if (cnt(a, k) >= 2 || cnt(b, k) >= 2) return true
+            if (cnt(a, 16) > 0 && cnt(a, 17) > 0) return true
+            if (cnt(b, 16) > 0 && cnt(b, 17) > 0) return true
+            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return true
+            return false
         }
 
         /**
@@ -912,8 +1107,9 @@ internal object MasterSearch {
             return t
         }
 
-        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长；[off]=scratch 基址 */
-        private fun consumeRuns(c: IntArray, off: Int, m: Int, minLen: Int): Int {
+        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长；[off]=scratch 基址。
+         *  [rec] 非空时把拆出的每段记录为 (m shl 16) or (start shl 8) or len，供评估判断「可被对手压住」 */
+        private fun consumeRuns(c: IntArray, off: Int, m: Int, minLen: Int, rec: MutableList<Int>? = null): Int {
             var plays = 0
             var r = 3
             while (r <= 14) {
@@ -925,6 +1121,7 @@ internal object MasterSearch {
                 while (e <= 14 && c[off + e] >= m) e++
                 if (e - r >= minLen) {
                     for (k in r until e) c[off + k] -= m
+                    rec?.add((m shl 16) or (r shl 8) or (e - r))
                     plays++
                 }
                 r = e
@@ -967,6 +1164,24 @@ internal object MasterSearch {
             if (cnt(hand, 16) > 0 && cnt(hand, 17) > 0) s += 5
             for (r in 3..15) if (cnt(hand, r) == 4) s += 8
             return s
+        }
+
+        /**
+         * 终局胜负分带层数（WIN - ply / -WIN + ply），而置换表键（[stateKey]）不含 ply。
+         * 存储时把分折算成「相对本节点的胜负距离」（与 ply 无关），读取时再按当前 ply 还原，
+         * 避免不同路径长度复用同一条目时把别处的 ply 带进来污染估值。
+         * 以 WIN/2 为阈值区分终局分与静态评估分（评估分量级远小于 WIN/2）。
+         */
+        private fun toTT(v: Int, ply: Int): Int = when {
+            v > WIN / 2 -> v + ply
+            v < -WIN / 2 -> v - ply
+            else -> v
+        }
+
+        private fun fromTT(v: Int, ply: Int): Int = when {
+            v > WIN / 2 -> v - ply
+            v < -WIN / 2 -> v + ply
+            else -> v
         }
 
         private fun stateKey(turn: Int, last: Move?, lastPlayer: Int): Long {

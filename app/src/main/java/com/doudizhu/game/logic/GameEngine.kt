@@ -103,9 +103,9 @@ class GameEngine {
     private val MASTER_DELAY_MS = 500L
     /** 大师 AI 后台搜索时长预算（毫秒），可由设置项「ai最大思考时间(秒)」覆盖（秒×1000） */
     @Volatile
-    var masterDeadlineMs: Long = 3000L
+    var masterDeadlineMs: Long = 5000L
     /** 大师 AI 后台搜索节点预算 */
-    private val MASTER_NODE_LIMIT = 6_000_000
+    private val MASTER_NODE_LIMIT = 60_000_000
     /**
      * 电脑玩家单回合最短耗时（毫秒）：从轮到自己起算，若「思考 + 决策」不足此时长，
      * 则补足延时后再出牌，避免电脑出牌过快导致玩家看不清节奏。

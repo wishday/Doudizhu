@@ -11,6 +11,25 @@ SRC_DIR="app/src/main/java/com/doudizhu/game"
 CHECK_DIR="/tmp/kotlin-check-$$"
 mkdir -p "$CHECK_DIR"
 
+# kotlinc 缺失时回退到 Gradle 自带的 kotlin-compiler-embeddable（避免「假阳性通过」）。
+# 注意：kotlin 2.0.x 编译器无法解析 JDK 21+ 的版本号，需用 JDK 17 调编译器。
+GRADLE_LIB=$(ls -d /root/.local/share/mise/installs/gradle/*/gradle-*/lib 2>/dev/null | head -1)
+JDK17=$(ls -d /root/.local/share/mise/installs/java/17 2>/dev/null | head -1)
+[ -n "$JDK17" ] && export JAVA_HOME="$JDK17" PATH="$JDK17/bin:$PATH"
+if ! command -v "$KOTLINC" >/dev/null 2>&1; then
+    if [ -n "$GRADLE_LIB" ] && [ -f "$GRADLE_LIB/kotlin-compiler-embeddable-2.0.21.jar" ]; then
+        KOTLINC() {
+            java -cp "$GRADLE_LIB/*" \
+                org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
+                -cp "$GRADLE_LIB/kotlin-stdlib-2.0.21.jar" "$@"
+        }
+    else
+        echo "❌ 找不到 kotlinc 或 kotlin-compiler-embeddable，无法执行编译预检"
+        rm -rf "$CHECK_DIR"
+        exit 1
+    fi
+fi
+
 # 收集所有纯逻辑的 kt 文件（排除 Android UI 文件，避免引入 SDK 依赖）
 FILES=$(find "$SRC_DIR" -name "*.kt" \
     | grep -v "MainActivity.kt" \
@@ -21,7 +40,8 @@ echo "$FILES" | sed 's/^/  /'
 echo ""
 
 # 编译所有文件（跨文件引用可被解析，类型推断完整）
-ERRORS=$(echo "$FILES" | xargs $KOTLINC -d "$CHECK_DIR" 2>&1) || true
+# shellcheck disable=SC2086
+ERRORS=$($KOTLINC $FILES -d "$CHECK_DIR" 2>&1) || true
 
 # 过滤无关噪音：仅保留项目代码文件的真实错误行
 REAL_ERRORS=$(echo "$ERRORS" | grep -E "^.*\.kt:[0-9]+:" \
