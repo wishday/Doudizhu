@@ -399,14 +399,37 @@ internal object MasterSearch {
 
     // ===================== 搜索 =====================
 
+    /** 门板位顶大牌的触发阈值：地主手牌数不超过该值时，地主上家的人类农民改用小牌放行→大牌封堵 */
+    private const val HUMAN_DOOR_PRESS_MAX_LD_SIZE = 10
+
+    /**
+     * 残局恐慌开炸的默认触发阈值（地主手牌数），仿真可通过 [humanPolicy] 参数覆盖以做对比实验。
+     * 取值 5：仿真显示阈值 2/5 对人类强度几乎无差（地主胜率 31.9%/32.2%），
+     * 而真人农民见地主 ≤5 张（一手顺子/三带即走完）普遍提前开炸，取更贴近真人的 5。
+     */
+    private const val HUMAN_PANIC_BOMB_LD_SIZE = 5
+
     /**
      * 近似「典型人类农民」的确定性出牌策略，仅供地主搜索做对手建模使用
      * （[Solver.humanNodeValue] 调用，仿真也可用同一策略当「真实人类」），本身不参与任何真实决策、
      * 不影响农民方搜索与普通模式。特征：可预测、偏次优 ——
      *  - 自由出牌：优先领最小的单张（人类常先打小牌）；无单张再领最小对子，再其他非炸弹。
-     *  - 跟牌：出能压住的最小非炸弹走法；压不住则过牌（不轻易动炸弹）。
+     *  - 跟队友的牌：不压队友 —— 除非能一手走完直接获胜，否则过牌让队友继续。
+     *  - 跟地主的牌：出能压住的最小非炸弹走法；压不住则过牌（不轻易动炸弹）。
+     *    例外一（门板意识）：自己是地主上家且地主手牌不多（≤[HUMAN_DOOR_PRESS_MAX_LD_SIZE]）时，
+     *    单张/对子改为「能压住的最大牌」，顶大牌封堵地主顺走小牌 —— 这是真人农民最典型的行为。
+     *    例外二（残局恐慌开炸）：地主手牌 ≤[HUMAN_PANIC_BOMB_LD_SIZE] 且非炸弹压不住时，
+     *    直接用最小炸弹拦截 —— 真人见地主报单/报对很少再放行。
      */
-    fun humanPolicy(hand: Long, last: Move?, lastPlayer: Int, turn: Int): Move? {
+    fun humanPolicy(
+        hand: Long,
+        last: Move?,
+        lastPlayer: Int,
+        turn: Int,
+        landlord: Int,
+        landlordSize: Int,
+        panicBombLdSize: Int = HUMAN_PANIC_BOMB_LD_SIZE
+    ): Move? {
         val free = last == null || lastPlayer == turn || lastPlayer < 0 || lastPlayer > 2
         val effLast = if (free) null else last
         val moves = generate(hand, effLast)
@@ -419,10 +442,29 @@ internal object MasterSearch {
             val pairs = pool.filter { it.type == CardType.PAIR }
             if (pairs.isNotEmpty()) return minByRank(pairs)
             return minByRank(pool)
-        } else {
-            val beats = moves.filter { !it.isBomb }.sortedBy { it.mainRank }
-            return if (beats.isNotEmpty()) beats.first() else null
         }
+        // 队友的牌不压：能一手走完才接手，否则过牌（队友走得越顺越不该拦）
+        if (lastPlayer != landlord) {
+            return moves.firstOrNull { it.isExactFinish(sizeOf(hand)) }
+        }
+        val beats = moves.filter { !it.isBomb }.sortedBy { it.mainRank }
+        if (beats.isEmpty()) {
+            // 残局恐慌开炸：地主逼近一手走完且非炸弹压不住时，真人多半直接甩最小炸弹拦截
+            if (landlordSize <= panicBombLdSize) {
+                val bombs = moves.filter { it.isBomb }
+                if (bombs.isNotEmpty()) return minByRank(bombs)
+            }
+            return null
+        }
+        // 门板位：地主上家且地主手牌不多时，单张/对子顶最大牌封堵，不让地主顺小牌
+        val isDoor = (turn + 1) % 3 == landlord
+        if (isDoor && landlordSize <= HUMAN_DOOR_PRESS_MAX_LD_SIZE) {
+            val headType = effLast?.type
+            if (headType == CardType.SINGLE || headType == CardType.PAIR) {
+                return beats.last()
+            }
+        }
+        return beats.first()
     }
 
     private fun minByRank(list: List<Move>): Move {
@@ -442,7 +484,8 @@ internal object MasterSearch {
      * @param initialHands 三家位压缩手牌（下标即玩家 index）
      * @param landlord 地主索引
      * @param rootIsLandlord 根玩家是否为地主（决定评价视角属于哪一阵营）
-     * @param deadlineMs 绝对截止时刻（毫秒），到点立刻中止并回退到上一轮迭代结果
+     * @param deadlineMs 绝对截止时刻（毫秒），到点立刻中止并回退到上一轮迭代结果；
+     *        传 [Long.MAX_VALUE] 进入确定性模式（纯 nodeLimit 收口、不读墙钟），供仿真复现实验使用
      * @param nodeLimit 节点上限，防止极端局面耗尽预算
      * @param passPenalty 过牌惩罚。队友是人类时给一点点惩罚：搜索假设所有人都最优，
      *        但人类队友未必会按最优接管，因此在「打与不打等价」时倾向自己接管。
@@ -590,7 +633,8 @@ internal object MasterSearch {
                 aborted = true
                 return 0
             }
-            if ((nodes and 0x1FF) == 0 && System.currentTimeMillis() >= deadlineMs) {
+            // deadlineMs == Long.MAX_VALUE：确定性模式（纯节点数收口，不读墙钟），供仿真复现实验使用
+            if (deadlineMs != Long.MAX_VALUE && (nodes and 0x1FF) == 0 && System.currentTimeMillis() >= deadlineMs) {
                 aborted = true
                 return 0
             }
@@ -617,12 +661,15 @@ internal object MasterSearch {
             val key = stateKey(turnIn, last, lastPlayer)
             val hit = tt[key]
             if (hit != null && hit.depth >= depth) {
+                // 终局分含 ply（WIN - ply / -WIN + ply），而置换表键不含 ply；
+                // 读取时按当前 ply 还原，避免不同路径长度复用同一条目造成分数污染
+                val hv = fromTT(hit.value, ply)
                 when (hit.flag) {
-                    FLAG_EXACT -> return hit.value
-                    FLAG_LOWER -> if (hit.value > alpha) alpha = hit.value
-                    else -> if (hit.value < beta) beta = hit.value
+                    FLAG_EXACT -> return hv
+                    FLAG_LOWER -> if (hv > alpha) alpha = hv
+                    else -> if (hv < beta) beta = hv
                 }
-                if (alpha >= beta) return hit.value
+                if (alpha >= beta) return hv
             }
 
             val hand = hands[turnIn]
@@ -676,7 +723,8 @@ internal object MasterSearch {
                     best >= betaIn -> FLAG_LOWER
                     else -> FLAG_EXACT
                 }
-                tt[key] = TTEntry(best, depth, flag)
+                // 终局分含 ply，存储时折算成与 ply 无关的形式（见 fromTT）
+                tt[key] = TTEntry(toTT(best, ply), depth, flag)
             }
             return best
         }
@@ -713,13 +761,16 @@ internal object MasterSearch {
                 // 修复点⑤：人类策略分支是确定性单一走法，必须【先于】全量 min 枚举计算，
                 // 否则当 min 枚举触发 fail-low 剪枝提前 break 时，optBest 只是「≤真实min」的上界，
                 // 再与确定性的 hv 做期望混合会系统性低估局面、污染地主决策（典型症状：无谓抢权甩大牌）。
-                val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+                // hv 用全开窗口（-INF, INF）求【精确值】：它要在下方 min 循环里当作该走法的真实值
+                // 被复用（packed 相等即跳过重复展开），若带窗口 fail-low 得到上界，会把上界当精确值
+                // 参与 min 比较，同样造成系统性高估该节点、污染地主估值。
+                val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn, landlord, sizes[landlord])
                 val hv = if (hm == null) {
                     // 人类农民（敌方节点）压不上只能过：敌方过牌不施加惩罚
-                    search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1)
+                    search(next, effLast, effLastPlayer, depth - 1, -INF, INF, ply + 1)
                 } else {
                     apply(turnIn, hm)
-                    val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                    val v = search(next, hm, turnIn, depth - 1, -INF, INF, ply + 1)
                     undo(turnIn, hm)
                     v
                 }
@@ -744,36 +795,36 @@ internal object MasterSearch {
                 }
                 return best
             }
-            // —— pModel > 0：expectimax 混合。确定性人类分支必须先精确算出，min 分支允许剪枝 ——
-            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn)
+            // —— pModel > 0：expectimax 混合。两个分支都必须是【精确值】才能混合 ——
+            // 旧实现有两处把「界」当「值」用：
+            //  ① hv 带 (alpha, beta) 窗口计算，fail-low 时只是上界，却被当作确定性人类走法的真实值；
+            //  ② min 分支带 (a0, b0) 窗口且允许 fail-low 提前 break，optBest 只是「≤真实min」的上界，
+            //     与 hv 加权混合会系统性低估局面（修复点⑤只修了 pModel==0 分支的同类问题）。
+            // 因此这里两个分支都用全开窗口（-INF, INF）求精确值。人类节点仅存在于地主根，
+            // 数量有限，放弃此处剪枝换来的精确性是值得的。
+            val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn, landlord, sizes[landlord])
             val hv = if (hm == null) {
                 // 人类农民（敌方节点）压不上只能过：敌方过牌不施加惩罚
-                search(next, effLast, effLastPlayer, depth - 1, alpha, beta, ply + 1)
+                search(next, effLast, effLastPlayer, depth - 1, -INF, INF, ply + 1)
             } else {
                 apply(turnIn, hm)
-                val v = search(next, hm, turnIn, depth - 1, alpha, beta, ply + 1)
+                val v = search(next, hm, turnIn, depth - 1, -INF, INF, ply + 1)
                 undo(turnIn, hm)
                 v
             }
             if (aborted) return 0
             // 最优分支：人类农民尽力压低地主胜率（min）。对确定性走法直接复用 hv，不再重复展开。
             var optBest = INF
-            val a0 = alpha
-            var b0 = beta
             for (a in moves) {
                 if (hm != null && a.packed == hm.packed) {
                     if (hv < optBest) optBest = hv
-                    if (optBest < b0) b0 = optBest
-                    if (a0 >= b0) break
                     continue
                 }
                 apply(turnIn, a)
-                val v = search(next, a, turnIn, depth - 1, a0, b0, ply + 1)
+                val v = search(next, a, turnIn, depth - 1, -INF, INF, ply + 1)
                 undo(turnIn, a)
                 if (aborted) return 0
                 if (v < optBest) optBest = v
-                if (optBest < b0) b0 = optBest
-                if (a0 >= b0) break
             }
             // 期望混合（整数权重，避免浮点）
             return (hv * pModel + optBest * (1000 - pModel)) / 1000
@@ -933,18 +984,27 @@ internal object MasterSearch {
             var t = 0
             if (c[16] > 0 && c[17] > 0) { t++; c[16] = 0; c[17] = 0 }
             for (r in 3..15) if (c[r] == 4) { t++; c[r] = 0 }
+            // 记录拆出的顺子/连对/飞机段，之后逐段判断「是否会被对手压住」，
+            // 补上基线只惩罚散单/对子尾巴、不区分「大顺子 vs 小顺子」的缺陷
+            val runs = ArrayList<Int>(4)
             if (triplesFirst) {
                 t += consumeTriples(c, 0)
-                t += consumeRuns(c, 0, 3, 2)
-                t += consumeRuns(c, 0, 2, 3)
-                t += consumeRuns(c, 0, 1, 5)
+                t += consumeRuns(c, 0, 3, 2, runs)
+                t += consumeRuns(c, 0, 2, 3, runs)
+                t += consumeRuns(c, 0, 1, 5, runs)
             } else {
-                t += consumeRuns(c, 0, 3, 2)
-                t += consumeRuns(c, 0, 2, 3)
-                t += consumeRuns(c, 0, 1, 5)
+                t += consumeRuns(c, 0, 3, 2, runs)
+                t += consumeRuns(c, 0, 2, 3, runs)
+                t += consumeRuns(c, 0, 1, 5, runs)
                 t += consumeTriples(c, 0)
             }
             var beat = 0
+            for (packed in runs) {
+                val m = packed ushr 16
+                val s = (packed ushr 8) and 0xFF
+                val len = packed and 0xFF
+                if (oppBeatsRun(m, s, len, enemyA, enemyB)) beat++
+            }
             for (r in 3..17) {
                 val n = c[r]
                 if (n <= 0) continue
@@ -955,6 +1015,34 @@ internal object MasterSearch {
                 t += pairs + singles
             }
             return t + beat
+        }
+
+        /**
+         * 对手是否能压住一段顺子/连对/飞机（m=每点张数，s=起始点数，len=段长）。
+         * 压法：同型同长、最小点数更大（整体平移 1 位起），或对手握有炸弹/王炸。
+         * 注意顺子/连对/飞机必须出自【同一家】手牌 —— 地主的敌人是两家农民时，
+         * 必须分别在 enemyA、enemyB 各自手牌里检查，不能把两家牌拼起来算。
+         */
+        private fun oppBeatsRun(m: Int, s: Int, len: Int, a: Long, b: Long): Boolean {
+            var start = s + 1
+            while (start + len - 1 <= 14) {   // 2 和王不进顺子，最高到 A(14)
+                var okA = true
+                var okB = true
+                for (r in start until start + len) {
+                    if (cnt(a, r) < m) okA = false
+                    if (cnt(b, r) < m) okB = false
+                    if (!okA && !okB) break
+                }
+                if (okA || okB) return true
+                start++
+            }
+            return oppHasBomb(a) || oppHasBomb(b)
+        }
+
+        private fun oppHasBomb(h: Long): Boolean {
+            if (cnt(h, 16) > 0 && cnt(h, 17) > 0) return true
+            for (r in 3..15) if (cnt(h, r) == 4) return true
+            return false
         }
 
         private fun oppBeatsSingle(r: Int, a: Long, b: Long): Boolean {
@@ -1019,8 +1107,9 @@ internal object MasterSearch {
             return t
         }
 
-        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长；[off]=scratch 基址 */
-        private fun consumeRuns(c: IntArray, off: Int, m: Int, minLen: Int): Int {
+        /** 吃掉连续结构：[m]=每点数张数（3=飞机/2=连对/1=顺子），[minLen]=最短段长；[off]=scratch 基址。
+         *  [rec] 非空时把拆出的每段记录为 (m shl 16) or (start shl 8) or len，供评估判断「可被对手压住」 */
+        private fun consumeRuns(c: IntArray, off: Int, m: Int, minLen: Int, rec: MutableList<Int>? = null): Int {
             var plays = 0
             var r = 3
             while (r <= 14) {
@@ -1032,6 +1121,7 @@ internal object MasterSearch {
                 while (e <= 14 && c[off + e] >= m) e++
                 if (e - r >= minLen) {
                     for (k in r until e) c[off + k] -= m
+                    rec?.add((m shl 16) or (r shl 8) or (e - r))
                     plays++
                 }
                 r = e
@@ -1074,6 +1164,24 @@ internal object MasterSearch {
             if (cnt(hand, 16) > 0 && cnt(hand, 17) > 0) s += 5
             for (r in 3..15) if (cnt(hand, r) == 4) s += 8
             return s
+        }
+
+        /**
+         * 终局胜负分带层数（WIN - ply / -WIN + ply），而置换表键（[stateKey]）不含 ply。
+         * 存储时把分折算成「相对本节点的胜负距离」（与 ply 无关），读取时再按当前 ply 还原，
+         * 避免不同路径长度复用同一条目时把别处的 ply 带进来污染估值。
+         * 以 WIN/2 为阈值区分终局分与静态评估分（评估分量级远小于 WIN/2）。
+         */
+        private fun toTT(v: Int, ply: Int): Int = when {
+            v > WIN / 2 -> v + ply
+            v < -WIN / 2 -> v - ply
+            else -> v
+        }
+
+        private fun fromTT(v: Int, ply: Int): Int = when {
+            v > WIN / 2 -> v - ply
+            v < -WIN / 2 -> v + ply
+            else -> v
         }
 
         private fun stateKey(turn: Int, last: Move?, lastPlayer: Int): Long {

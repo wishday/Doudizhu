@@ -26,6 +26,18 @@ import com.doudizhu.game.model.PlayerRole
  *
  * 线程安全：本 object 无可变状态；[MasterSearch.Solver] 的所有可变状态都在其实例内，
  * 因此可在后台线程构造并求解（见 [GameEngine] 的 MASTER 分支），不触碰 [AIDecision] 的共享可变上下文。
+ *
+ * 仿真与调参（改动本文件或 [MasterSearch] 后应重跑）：
+ *  - 仓库自带 JVM 仿真 harness：sim/SimMain.kt，局型为「AI地主(大师+人类建模) vs
+ *    人类农民(humanPolicy 走子) + AI农民(大师)」，确定性发牌 + 配对种子，可直接对比
+ *    不同 [LANDLORD_HUMAN_MODEL_WEIGHT] 下的地主胜率。
+ *  - 用法：`./sim/run-sim.sh [games] [deadlineMs] [nodeLimit] [threads] [w0,w1,...] [baseSeed] [panicBombLdSize]`
+ *    示例：`./sim/run-sim.sh 360 50 150000 3 0,200,400,600,800,1000`
+ *  - 速度说明：单局耗时主要由 deadlineMs（每次决策的搜索预算）决定，而非 nodeLimit
+ *    （中局通常打不到节点上限）；扫参时可用 20~30ms deadline 提速，再用 50ms 复核。
+ *  - 确定性模式：deadlineMs=0 时纯 nodeLimit 收口、不读墙钟（见 [MasterSearch.Solver]），
+ *    同参数同种子结果完全可复现，调参对比应优先用它（建议 nodeLimit 30000~60000），
+ *    例如 `./sim/run-sim.sh 360 0 40000 3 0,400,800`。
  */
 object MasterAIDecision {
 
@@ -80,9 +92,12 @@ object MasterAIDecision {
      * 地主搜索对人类农民做对手建模时的「次优概率」权重（0..1000，对应 0%..100%）。
      * 仅当地主根且对手含人类时生效。以该概率假设人类农民按可预测的次优策略走子（可被设套），
      * 其余概率仍按最优 minimizer 走子（保住最坏情况下限，避免过拟合真实人类）。
-     * 取值约 0.8：仿真显示对「类模型」真实人类地主胜率可提升约 7 个百分点（45%→53%），
-     * 而对不同风格/接近最优的真实人类胜率稳定在 ~38% 与 ~22%（不劣于不建模的 20% 下限），
-     * 即「只赚不赔」。保留 20% 最优下限作为保险。
+     *
+     * 取值 800：由 sim/SimMain 仿真标定（2026-10-29，每权重 n=360 配对种子，
+     * 人类农民按 humanPolicy 走子，含门板意识/不压队友/残局开炸）。
+     * 两组实验峰值位置不同（开炸阈值2@50ms：600 峰 40.0%；阈值5@35ms：1000 峰 40.3%），
+     * 800 在两组中都接近峰值（39.4%~40.6%）且保留 20% 最优下限保险，跨设置最稳健。
+     * 改动 humanPolicy 后必须用 sim/run-sim.sh 重新标定本常量。
      * 农民根 / 普通模式恒为 0（pModel<=0 退化为普通 min 节点），完全不受影响。
      */
     private const val LANDLORD_HUMAN_MODEL_WEIGHT = 800
@@ -148,9 +163,15 @@ object MasterAIDecision {
             if (result.move != null) moveToCardGroup(result.move, hand) else null
         } catch (e: Throwable) {
             // 任何异常（不应发生）都回退到启发式，保证不会抛到引擎层导致卡死
+            // 农民局且上一手是队友出的：兜底也不能压队友（能一手走完除外）
+            val lastFromTeammate = snapshot.role == PlayerRole.FARMER &&
+                snapshot.lastPlayerIndex >= 0 &&
+                snapshot.lastPlayerIndex != snapshot.myIndex &&
+                snapshot.lastPlayerIndex != snapshot.landlordIndex
             fallbackDecision(
                 snapshot.hands[snapshot.myIndex].orEmpty(),
-                snapshot.lastPlay
+                snapshot.lastPlay,
+                lastFromTeammate
             )
         }
     }
@@ -210,8 +231,14 @@ object MasterAIDecision {
     /**
      * 启发式兜底：搜索异常或折算失败时，用 [CardRuleEngine.findAllValidPlays] 找一手合法牌。
      * 自由出牌优先一手走完、否则领最小非炸弹；跟牌优先最小非炸弹压制、否则最小炸弹、否则过牌。
+     * @param lastFromTeammate 上一手是否队友所出（仅农民局可能为 true）：
+     *        队友的牌不压——除非能一手走完直接获胜，否则过牌，避免兜底路径内斗。
      */
-    private fun fallbackDecision(hand: List<Card>, lastPlay: CardGroup?): CardGroup? {
+    private fun fallbackDecision(
+        hand: List<Card>,
+        lastPlay: CardGroup?,
+        lastFromTeammate: Boolean = false
+    ): CardGroup? {
         val candidates = CardRuleEngine.findAllValidPlays(hand, lastPlay)
         if (candidates.isEmpty()) return null
         val nonBombs = candidates.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
@@ -221,6 +248,9 @@ object MasterAIDecision {
             candidates.firstOrNull { it.size == hand.size }   // 能一手走完直接走
                 ?: nonBombs.minByOrNull { it.mainRank }
                 ?: candidates.minByOrNull { it.mainRank }
+        } else if (lastFromTeammate) {
+            // 队友的牌：只在一手制胜时接手，否则过牌让队友继续
+            candidates.firstOrNull { it.size == hand.size }
         } else {
             // 跟牌：非炸弹优先，保留炸弹
             nonBombs.minByOrNull { it.mainRank }
