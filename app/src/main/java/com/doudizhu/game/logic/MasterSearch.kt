@@ -473,7 +473,11 @@ internal object MasterSearch {
         return best
     }
 
-    private class TTEntry(val value: Int, val depth: Int, val flag: Int)
+    /**
+     * 置换表条目。[bestMove] 记录该局面下已证明最优/引发截断的走法，
+     * 再遇同局面时提到候选列表最前，显著提升 alpha-beta 剪枝效率（仅影响展开顺序，不影响估值）。
+     */
+    private class TTEntry(val value: Int, val depth: Int, val flag: Int, val bestMove: Move?)
 
     /** 求解结果：[move] 为 null 表示「过牌」 */
     class Result(val move: Move?, val value: Int, val depth: Int, val complete: Boolean)
@@ -509,6 +513,13 @@ internal object MasterSearch {
         private val tt = HashMap<Long, TTEntry>()
         // 长度 54：turnsOrdered 内部会成对递归调用，需要各自的计数工作区，避免相互踩踏
         private val scratch = IntArray(54)
+
+        // —— 走法排序启发（仅提升同预算下的有效深度，不改变任何估值语义）——
+        // killer：每层引发 β 截断的走法，下次同层优先尝试
+        private val killers = Array(MAX_DEPTH + 2) { arrayOfNulls<Move>(2) }
+        // history：按「玩家 × 走法指纹」累计截断贡献（depth²），高频截断走法提前展开。
+        // 走法指纹 key < 16384（CardType.ordinal≤12 shl 10 | mainRank≤17 shl 5 | length≤12）
+        private val history = IntArray(3 * 16384)
 
         private var nodes = 0
         private var aborted = false
@@ -660,6 +671,7 @@ internal object MasterSearch {
             var beta = betaIn
             val key = stateKey(turnIn, last, lastPlayer)
             val hit = tt[key]
+            val ttBest = hit?.bestMove
             if (hit != null && hit.depth >= depth) {
                 // 终局分含 ply（WIN - ply / -WIN + ply），而置换表键不含 ply；
                 // 读取时按当前 ply 还原，避免不同路径长度复用同一条目造成分数污染
@@ -685,11 +697,17 @@ internal object MasterSearch {
             if (!freeLead && !hasFinish) actions.add(null)
             if (actions.isEmpty()) return evaluate(turnIn, last, lastPlayer)
             for (a in actions) if (a != null) a.ord = orderScore(a, hand, handSize)
-            if (actions.size > 1) actions.sortByDescending { it?.ord ?: PASS_ORDER }
+            // 置换表最佳走法最优先（命中同局面时已证明的最优/截断走法）
+            if (ttBest != null) moveToFront(actions, ttBest)
+            if (actions.size > 1) {
+                for (a in actions) if (a != null) a.ord += orderBonus(a, turnIn, ply)
+                actions.sortByDescending { it?.ord ?: PASS_ORDER }
+            }
 
             val maximizing = isRootSide(turnIn)
             val next = (turnIn + 1) % 3
             var best = if (maximizing) -INF else INF
+            var bestAction: Move? = null
 
             for (a in actions) {
                 var v: Int
@@ -708,13 +726,17 @@ internal object MasterSearch {
                 }
                 if (aborted) return 0
                 if (maximizing) {
-                    if (v > best) best = v
+                    if (v > best) { best = v; bestAction = a }
                     if (best > alpha) alpha = best
                 } else {
-                    if (v < best) best = v
+                    if (v < best) { best = v; bestAction = a }
                     if (best < beta) beta = best
                 }
-                if (alpha >= beta) break
+                if (alpha >= beta) {
+                    // β 截断：记录 killer / history（纯排序启发）
+                    recordCutoff(a, turnIn, ply, depth)
+                    break
+                }
             }
 
             if (tt.size < TT_LIMIT) {
@@ -724,7 +746,7 @@ internal object MasterSearch {
                     else -> FLAG_EXACT
                 }
                 // 终局分含 ply，存储时折算成与 ply 无关的形式（见 fromTT）
-                tt[key] = TTEntry(toTT(best, ply), depth, flag)
+                tt[key] = TTEntry(toTT(best, ply), depth, flag, bestAction)
             }
             return best
         }
@@ -795,13 +817,16 @@ internal object MasterSearch {
                 }
                 return best
             }
-            // —— pModel > 0：expectimax 混合。两个分支都必须是【精确值】才能混合 ——
-            // 旧实现有两处把「界」当「值」用：
-            //  ① hv 带 (alpha, beta) 窗口计算，fail-low 时只是上界，却被当作确定性人类走法的真实值；
-            //  ② min 分支带 (a0, b0) 窗口且允许 fail-low 提前 break，optBest 只是「≤真实min」的上界，
-            //     与 hv 加权混合会系统性低估局面（修复点⑤只修了 pModel==0 分支的同类问题）。
-            // 因此这里两个分支都用全开窗口（-INF, INF）求精确值。人类节点仅存在于地主根，
-            // 数量有限，放弃此处剪枝换来的精确性是值得的。
+            // —— pModel > 0：expectimax 混合 M = (p·hv + (1000−p)·optBest) / 1000 ——
+            // 其中 hv = 人类策略线的值（精确），optBest = 最优 min 值。
+            // 关键不变量：optBest ≤ hv 恒成立（min 的候选集包含人类走法本身），故 M ≤ hv 恒成立。
+            //
+            // 剪枝（fail-soft 安全）：把父窗口 alpha 仿射换算成 optBest 的 alphaT：
+            //   optBest ≤ alphaT ⟹ M ≤ alpha（整数除法截断方向已留安全余量）。
+            // 此时返回的是 M 的【上界】——与普通 min 节点 fail-low 返回上界完全同构，
+            // fail-soft alpha-beta 的不变量（上界 ≤ alpha 的子节点必然立刻触发父节点 β 截断，
+            // 永不参与父节点"精确值"的存储）保证它不会污染父级置换表条目。
+            // |alpha| ≥ WIN 时乘法溢出不可换算，退化为全开窗口（仅出现在根迭代首个走法）。
             val hm = humanPolicy(hands[turnIn], effLast, effLastPlayer, turnIn, landlord, sizes[landlord])
             val hv = if (hm == null) {
                 // 人类农民（敌方节点）压不上只能过：敌方过牌不施加惩罚
@@ -813,18 +838,31 @@ internal object MasterSearch {
                 v
             }
             if (aborted) return 0
+            // 人类策略线已不优于父窗口：M ≤ hv ≤ alpha，直接返回上界（省掉整个 opt 循环，
+            // 这是建模节点最常见的剪枝形态——人类策略线对地主越差，剪得越早）
+            if (hv <= alpha) return hv
+            if (pModel >= 1000) return hv
+            // optBest ≤ alphaT ⟹ M ≤ alpha（公式已按整数截断方向留余量）
+            val alphaT = if (alpha > -WIN && alpha < WIN)
+                (1000 * alpha - pModel * hv - (1000 - pModel)) / (1000 - pModel)
+            else -INF
             // 最优分支：人类农民尽力压低地主胜率（min）。对确定性走法直接复用 hv，不再重复展开。
             var optBest = INF
+            var b = INF
             for (a in moves) {
                 if (hm != null && a.packed == hm.packed) {
                     if (hv < optBest) optBest = hv
+                    if (optBest < b) b = optBest
+                    if (alphaT >= b) break
                     continue
                 }
                 apply(turnIn, a)
-                val v = search(next, a, turnIn, depth - 1, -INF, INF, ply + 1)
+                val v = search(next, a, turnIn, depth - 1, alphaT, b, ply + 1)
                 undo(turnIn, a)
                 if (aborted) return 0
                 if (v < optBest) optBest = v
+                if (optBest < b) b = optBest
+                if (alphaT >= b) break
             }
             // 期望混合（整数权重，避免浮点）
             return (hv * pModel + optBest * (1000 - pModel)) / 1000
@@ -881,6 +919,56 @@ internal object MasterSearch {
                 p += 500
             }
             return p
+        }
+
+        /**
+         * 把与 [m] 同一物理走法（packed + key 相等）的候选项移到列表最前。
+         * 用于置换表最佳走法优先展开：同局面下已证明最优/引发截断的走法大概率仍是好棋。
+         */
+        private fun moveToFront(actions: MutableList<Move?>, m: Move) {
+            var idx = -1
+            for (i in actions.indices) {
+                val a = actions[i] ?: continue
+                if (a.packed == m.packed && a.key == m.key) { idx = i; break }
+            }
+            if (idx > 0) actions.add(0, actions.removeAt(idx))
+        }
+
+        /**
+         * killer / history 排序加成。加成封顶 7000，远低于 FINISH_ORDER(100_000)，
+         * 不会把普通走法挤进「一手走完」档，保证制胜走法仍然最优先。
+         */
+        private fun orderBonus(a: Move, turn: Int, ply: Int): Int {
+            var s = 0
+            val k = killers[ply]
+            val k0 = k[0]
+            if (k0 != null && k0.packed == a.packed && k0.key == a.key) {
+                s += 4000
+            } else {
+                val k1 = k[1]
+                if (k1 != null && k1.packed == a.packed && k1.key == a.key) s += 2000
+            }
+            val h = history[turn * 16384 + a.key]
+            s += if (h > 3000) 3000 else h
+            return s
+        }
+
+        /** β 截断时记录 killer / history（纯排序启发，不影响估值与取舍语义） */
+        private fun recordCutoff(m: Move?, turn: Int, ply: Int, depth: Int) {
+            if (m == null) return
+            val k = killers[ply]
+            val k0 = k[0]
+            if (k0 == null || k0.packed != m.packed || k0.key != m.key) {
+                k[1] = k0
+                k[0] = m
+            }
+            val idx = turn * 16384 + m.key
+            val nv = history[idx] + depth * depth
+            history[idx] = nv
+            if (nv > 1_000_000) {
+                // 防饱和：整体减半，保持相对序
+                for (i in history.indices) history[i] = history[i] ushr 1
+            }
         }
 
         // ---------- 静态评估 ----------
@@ -952,6 +1040,12 @@ internal object MasterSearch {
             var v = (minF - ldT) * 20
             v += (maxF - minF) * 3
             v += (control(hands[landlord]) - maxOf(control(hands[f0]), control(hands[f1]))) * 6
+            // 炸弹 tempo：炸弹不止是一手牌，更是「保底夺回一次出牌权」的资源——
+            // 竞速胶着（|差|≤2）时一次强制夺权常直接决定胜负，权重放大；差距悬殊时权重小。
+            // 与 control() 的静态控牌分有部分重叠，故只做小权重修正，由仿真标定取舍。
+            val race = minF - ldT
+            v += (bombCount(hands[landlord]) - maxOf(bombCount(hands[f0]), bombCount(hands[f1]))) *
+                (if (race in -2..2) 6 else 2)
             val holder = if (last == null) turn else lastPlayer
             val holderSize = sizes[holder]
             val initW = when {
@@ -1003,15 +1097,15 @@ internal object MasterSearch {
                 val m = packed ushr 16
                 val s = (packed ushr 8) and 0xFF
                 val len = packed and 0xFF
-                if (oppBeatsRun(m, s, len, enemyA, enemyB)) beat++
+                if (oppBeatsRun(m, s, len, enemyA, enemyB, hand)) beat++
             }
             for (r in 3..17) {
                 val n = c[r]
                 if (n <= 0) continue
                 val pairs = n / 2
                 val singles = n % 2
-                if (pairs > 0 && oppBeatsPair(r, enemyA, enemyB)) beat += pairs
-                if (singles > 0 && oppBeatsSingle(r, enemyA, enemyB)) beat += 1
+                if (pairs > 0 && oppBeatsPair(r, enemyA, enemyB, hand)) beat += pairs
+                if (singles > 0 && oppBeatsSingle(r, enemyA, enemyB, hand)) beat += 1
                 t += pairs + singles
             }
             return t + beat
@@ -1019,11 +1113,12 @@ internal object MasterSearch {
 
         /**
          * 对手是否能压住一段顺子/连对/飞机（m=每点张数，s=起始点数，len=段长）。
-         * 压法：同型同长、最小点数更大（整体平移 1 位起），或对手握有炸弹/王炸。
-         * 注意顺子/连对/飞机必须出自【同一家】手牌 —— 地主的敌人是两家农民时，
-         * 必须分别在 enemyA、enemyB 各自手牌里检查，不能把两家牌拼起来算。
+         * 自然压法：同型同长、最小点数更大（整体平移 1 位起），且必须出自【同一家】手牌 ——
+         * 地主的敌人是两家农民时，必须在 enemyA、enemyB 各自手牌里分别检查，不能把两家牌拼起来算。
+         * 炸弹/王炸压制附加「反炸」判定：我方（[mine]）若持有更大的炸弹/王炸，可立刻反压夺回
+         * 出牌权（我方炸弹本就计为一手），该段被炸不构成净 tempo 损失，不视为被压。
          */
-        private fun oppBeatsRun(m: Int, s: Int, len: Int, a: Long, b: Long): Boolean {
+        private fun oppBeatsRun(m: Int, s: Int, len: Int, a: Long, b: Long, mine: Long): Boolean {
             var start = s + 1
             while (start + len - 1 <= 14) {   // 2 和王不进顺子，最高到 A(14)
                 var okA = true
@@ -1036,7 +1131,8 @@ internal object MasterSearch {
                 if (okA || okB) return true
                 start++
             }
-            return oppHasBomb(a) || oppHasBomb(b)
+            if (oppHasBomb(a) || oppHasBomb(b)) return !canCounterBomb(mine, a, b)
+            return false
         }
 
         private fun oppHasBomb(h: Long): Boolean {
@@ -1045,19 +1141,42 @@ internal object MasterSearch {
             return false
         }
 
-        private fun oppBeatsSingle(r: Int, a: Long, b: Long): Boolean {
+        /**
+         * 对手能否压住我方（[mine]）的单张尾巴 [r]。自然压法：任一对手有更大的单牌
+         * （含双王，单张之间天然克制）。只剩炸弹能压时附加「反炸」判定（见 [oppBeatsRun]）。
+         */
+        private fun oppBeatsSingle(r: Int, a: Long, b: Long, mine: Long): Boolean {
             for (k in (r + 1)..17) if (cnt(a, k) > 0 || cnt(b, k) > 0) return true
-            if (cnt(a, 16) > 0 && cnt(a, 17) > 0) return true
-            if (cnt(b, 16) > 0 && cnt(b, 17) > 0) return true
-            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return true
+            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return !canCounterBomb(mine, a, b)
             return false
         }
-        private fun oppBeatsPair(r: Int, a: Long, b: Long): Boolean {
+
+        /** 对手能否压住我方的对子尾巴 [r]：更大的对子，或炸弹/王炸（附加反炸判定） */
+        private fun oppBeatsPair(r: Int, a: Long, b: Long, mine: Long): Boolean {
             for (k in (r + 1)..15) if (cnt(a, k) >= 2 || cnt(b, k) >= 2) return true
+            // 王炸可压对子且无法反压（王炸唯一，对手持有时我方不可能持有）
             if (cnt(a, 16) > 0 && cnt(a, 17) > 0) return true
             if (cnt(b, 16) > 0 && cnt(b, 17) > 0) return true
-            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return true
+            for (k in 3..15) if (cnt(a, k) == 4 || cnt(b, k) == 4) return !canCounterBomb(mine, a, b)
             return false
+        }
+
+        /**
+         * 我方（mine）能否反压对手（a/b 合计）用来压尾巴的最小炸弹：
+         * 对手经济上会先用最小炸弹吃尾巴，我方最大炸弹更大即可反压夺回出牌权。
+         * 王炸可反压任何普通炸弹；若对手只有王炸（无普通炸弹），王炸不可反压。
+         */
+        private fun canCounterBomb(mine: Long, a: Long, b: Long): Boolean {
+            if (cnt(mine, 16) > 0 && cnt(mine, 17) > 0) return true
+            var myMax = -1
+            for (r in 3..15) if (cnt(mine, r) == 4) myMax = r
+            if (myMax < 0) return false
+            var oppMin = 16
+            for (r in 3..15) {
+                if (cnt(a, r) == 4 && r < oppMin) oppMin = r
+                if (cnt(b, r) == 4 && r < oppMin) oppMin = r
+            }
+            return oppMin <= 15 && myMax > oppMin
         }
 
         /**
@@ -1164,6 +1283,13 @@ internal object MasterSearch {
             if (cnt(hand, 16) > 0 && cnt(hand, 17) > 0) s += 5
             for (r in 3..15) if (cnt(hand, r) == 4) s += 8
             return s
+        }
+
+        /** 手牌中的炸弹数量（含王炸），衡量「保底夺回一次出牌权」的次数 */
+        private fun bombCount(h: Long): Int {
+            var n = if (cnt(h, 16) > 0 && cnt(h, 17) > 0) 1 else 0
+            for (r in 3..15) if (cnt(h, r) == 4) n++
+            return n
         }
 
         /**
