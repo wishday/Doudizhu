@@ -120,6 +120,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 故在此统一赋值，既随屏缩放又不会污染游戏内 HUD 的共享字号
         modeNamePaint.textSize = 66f * scale
         modeStatPaint.textSize = 34f * scale
+        modeStatBoldPaint.textSize = 34f * scale
     }
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
@@ -224,6 +225,11 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 主界面难度按钮：统计信息（小/不加粗，浅灰）；字号整体放大2号 */
     private val modeStatPaint = Paint().apply {
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
+        color = Color.parseColor("#E0E0E0"); textSize = 34f
+    }
+    /** 同上，但标准加粗（DEFAULT_BOLD，普通填充不加描边）：专用于「总胜率 / 总积分」两行，与分角色行形成层级区分 */
+    private val modeStatBoldPaint = Paint().apply {
+        isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
         color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
     /** 错误提示弹窗背景（深红半透明圆角底） */
@@ -476,7 +482,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private val dragHandled = mutableSetOf<Int>()
 
     /** 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立） */
-    private data class ModeStat(var score: Int = 0, var games: Int = 0, var wins: Int = 0)
+    // 与 MainActivity.GameStats 镜像：score/games/wins 为总桶，landlord*/farmer* 为分角色子桶。
+    // 子桶默认 0，存量数据（无子桶）加载后自然为 0，向后兼容。
+    private data class ModeStat(
+        var score: Int = 0, var games: Int = 0, var wins: Int = 0,
+        var landlordGames: Int = 0, var landlordWins: Int = 0,
+        var farmerGames: Int = 0, var farmerWins: Int = 0
+    )
     private val modeStats = mutableMapOf(
         Difficulty.NORMAL to ModeStat(),
         Difficulty.MASTER to ModeStat()
@@ -905,12 +917,19 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         refresh()
     }
 
-    /** 设置某模式的统计（积分/局数/胜场） */
-    fun setModeStats(diff: Difficulty, score: Int, games: Int, wins: Int) {
+    /** 设置某模式的统计：总桶（积分/局数/胜场）+ 分角色子桶（地主/农民局数与胜场） */
+    fun setModeStats(
+        diff: Difficulty, score: Int, games: Int, wins: Int,
+        landlordGames: Int, landlordWins: Int, farmerGames: Int, farmerWins: Int
+    ) {
         modeStats[diff]?.let {
             it.score = score
             it.games = games
             it.wins = wins
+            it.landlordGames = landlordGames
+            it.landlordWins = landlordWins
+            it.farmerGames = farmerGames
+            it.farmerWins = farmerWins
         }
     }
 
@@ -2326,8 +2345,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                     drawSettingsWindow(canvas, target, showButtons = true)
                 } else {
                     // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
-                    // 按钮尺寸随 uiScale 缩放，与游戏内牌面/字体统一（Pad 不再偏小）
-                    val dW = ((btnW * 2f + 40f) / 2f) * uiScale
+                    // 按钮尺寸随 uiScale 缩放，与游戏内牌面/字体统一（Pad 不再偏小）。
+                    // 宽度在出牌按钮 1 倍基础上放宽（+600 而非 +40），以容纳分角色文本行；并预留汇总行加粗 + 放大 1.1 倍后：
+                    // 「总胜率:50000/50000 (100%)」这类 5 位数局数（加粗放大后约 600px）不裁切（scale=1 时框宽 640px）
+                    val dW = ((btnW * 2f + 600f) / 2f) * uiScale
                     val dH = (btnH * 2f + 24f) * uiScale
                     val dGap = gap * 2f * uiScale
                     val normalColor = Palette.btnGreen
@@ -2637,24 +2658,40 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         val stat = modeStats[mode] ?: ModeStat()
         val rate = if (stat.games > 0) (stat.wins * 100.0 / stat.games) else 0.0
-        val rateLine = "胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
-        val scoreLine = "积分:${stat.score}"
+        val totalRateLine = "总胜率:${stat.wins}/${stat.games} (${"%.0f".format(rate)}%)"
+        val scoreLine = "总积分:${stat.score}"
+        // 分角色子桶胜率：玩家当地主 / 当农民时的胜率（存量无子桶时显示 0/0 (0%)，与总桶一致）
+        val ldRate = if (stat.landlordGames > 0) (stat.landlordWins * 100.0 / stat.landlordGames) else 0.0
+        val fmRate = if (stat.farmerGames > 0) (stat.farmerWins * 100.0 / stat.farmerGames) else 0.0
+        val landlordLine = "地主胜率:${stat.landlordWins}/${stat.landlordGames} (${"%.0f".format(ldRate)}%)"
+        val farmerLine = "农民胜率:${stat.farmerWins}/${stat.farmerGames} (${"%.0f".format(fmRate)}%)"
 
-        // 内部文字行高布局随 uiScale 等比（否则按钮框放大后上下留白失衡、字相对框偏小）
+        // 内部文字行高布局随 uiScale 等比（否则按钮框放大后上下留白失衡、字相对框偏小）。
+        // 行数：模式名 + 总胜率 + 总积分 + （空白留白）+ 地主胜率 + 农民胜率 = 5 行内容 + 1 段留白。
         val nameH = 64f * uiScale
-        val statH = 32f * uiScale
-        val lineGap = 14f * uiScale
-        val totalH = nameH + statH * 2 + lineGap * 2
+        val statH = 34f * uiScale          // 汇总行字号放大 1.1 倍，行距预留避免与相邻行重叠（内容高 260 ≤ 框 284）
+        val lineGap = 12f * uiScale
+        val blankGap = 12f * uiScale       // 总积分与地主胜率之间的额外空白行间距
+        val totalH = nameH + statH * 4 + lineGap * 4 + blankGap
         val blockTop = y + (h - totalH) / 2f
-        val c0 = blockTop + nameH / 2f
-        val c1 = blockTop + nameH + lineGap + statH / 2f
-        val c2 = blockTop + nameH + lineGap + statH + lineGap + statH / 2f
+        val c0 = blockTop + nameH / 2f                                                     // 模式名
+        val c1 = blockTop + nameH + lineGap + statH / 2f                                   // 总胜率
+        val c2 = blockTop + nameH + lineGap + statH + lineGap + statH / 2f                 // 总积分
+        val c3 = blockTop + nameH + statH * 2 + lineGap * 3 + blankGap + statH / 2f        // 地主胜率（含留白）
+        val c4 = c3 + lineGap + statH                                                      // 农民胜率
         canvas.drawText(
             if (mode == Difficulty.MASTER) "大师" else "普通",
             x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
         )
-        canvas.drawText(rateLine, x + w / 2f, c1 + statH * 0.32f, modeStatPaint)
-        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
+        // 汇总行（总胜率/总积分）用标准加粗画笔（DEFAULT_BOLD，普通填充）+ 放大 1.1 倍突出层级；
+        // modeStatBoldPaint 仅用于本函数内两汇总行，临时放大并复位，不影响其它绘制
+        modeStatBoldPaint.textSize = 34f * uiScale * 1.1f
+        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
+        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
+        modeStatBoldPaint.textSize = 34f * uiScale   // 复位：分角色行用常规字号
+        // 总积分与地主胜率之间的空白行（c2 与 c3 之间）不绘制任何文字
+        canvas.drawText(landlordLine, x + w / 2f, c3 + statH * 0.32f, modeStatPaint)
+        canvas.drawText(farmerLine, x + w / 2f, c4 + statH * 0.32f, modeStatPaint)
     }
 
     /** 主界面右下角设置图标（齿轮），位置向左上偏移便于点击；尺寸/边距随 uiScale 缩放 */
