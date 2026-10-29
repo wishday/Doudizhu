@@ -120,7 +120,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 故在此统一赋值，既随屏缩放又不会污染游戏内 HUD 的共享字号
         modeNamePaint.textSize = 66f * scale
         modeStatPaint.textSize = 34f * scale
-        modeStatBoldPaint.textSize = 34f * scale
     }
 
     // ====== 语义化色板（集中管理主题色，便于统一调色与暗/亮主题扩展） ======
@@ -225,11 +224,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 主界面难度按钮：统计信息（小/不加粗，浅灰）；字号整体放大2号 */
     private val modeStatPaint = Paint().apply {
         isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT
-        color = Color.parseColor("#E0E0E0"); textSize = 34f
-    }
-    /** 同上，但加粗：专用于「总胜率 / 总积分」两行，与分角色行形成层级区分 */
-    private val modeStatBoldPaint = Paint().apply {
-        isAntiAlias = true; textAlign = Paint.Align.CENTER; typeface = Typeface.DEFAULT_BOLD
         color = Color.parseColor("#E0E0E0"); textSize = 34f
     }
     /** 错误提示弹窗背景（深红半透明圆角底） */
@@ -2346,8 +2340,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 } else {
                     // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
                     // 按钮尺寸随 uiScale 缩放，与游戏内牌面/字体统一（Pad 不再偏小）。
-                    // 宽度在出牌按钮 1 倍基础上放宽（+440 而非 +40），以容纳分角色较长文本行：
-                    // 预留到「地主胜率:50000/50000 (100%)」这类 5 位数局数不裁切（scale=1 时框宽 560px，文本约 490px）
+                    // 宽度在出牌按钮 1 倍基础上放宽（+440 而非 +40），以容纳分角色文本行；并预留汇总行放大 1.1 倍后：
+                    // 「总胜率:50000/50000 (100%)」这类 5 位数局数（放大后约 539px）不裁切（scale=1 时框宽 560px）
                     val dW = ((btnW * 2f + 440f) / 2f) * uiScale
                     val dH = (btnH * 2f + 24f) * uiScale
                     val dGap = gap * 2f * uiScale
@@ -2669,7 +2663,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 内部文字行高布局随 uiScale 等比（否则按钮框放大后上下留白失衡、字相对框偏小）。
         // 行数：模式名 + 总胜率 + 总积分 + （空白留白）+ 地主胜率 + 农民胜率 = 5 行内容 + 1 段留白。
         val nameH = 64f * uiScale
-        val statH = 30f * uiScale          // 略缩，使 5 行 + 留白仍稳落进原按钮框内
+        val statH = 34f * uiScale          // 汇总行字号放大 1.1 倍，行距预留避免与相邻行重叠（内容高 260 ≤ 框 284）
         val lineGap = 12f * uiScale
         val blankGap = 12f * uiScale       // 总积分与地主胜率之间的额外空白行间距
         val totalH = nameH + statH * 4 + lineGap * 4 + blankGap
@@ -2683,8 +2677,12 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (mode == Difficulty.MASTER) "大师" else "普通",
             x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
         )
-        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
-        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
+        // 汇总行（总胜率/总积分）字号放大 1.1 倍以突出层级（不另加粗：小字号 bold 肉眼几乎无差别）；
+        // modeStatPaint 仅用于本函数内四行，故临时放大并复位，不影响其它绘制
+        modeStatPaint.textSize = 34f * uiScale * 1.1f
+        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatPaint)
+        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatPaint)
+        modeStatPaint.textSize = 34f * uiScale   // 复位：分角色行用常规字号
         // 总积分与地主胜率之间的空白行（c2 与 c3 之间）不绘制任何文字
         canvas.drawText(landlordLine, x + w / 2f, c3 + statH * 0.32f, modeStatPaint)
         canvas.drawText(farmerLine, x + w / 2f, c4 + statH * 0.32f, modeStatPaint)
