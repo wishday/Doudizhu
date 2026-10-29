@@ -37,8 +37,14 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 游戏绘制视图 */
     private lateinit var gameSurfaceView: GameSurfaceView
 
-    /** 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立） */
-    private data class GameStats(var score: Int = 0, var games: Int = 0, var wins: Int = 0)
+    // 按模式分别统计：积分 / 局数 / 胜场（普通、大师各自独立）。
+    // 子桶 landlord*/farmer* 为「玩家当地主 / 当农民」的分角色胜率统计，自本次升级起累计；
+    // 默认 0，因此历史存量数据（无这些字段）加载后自然为 0，向后兼容。
+    private data class GameStats(
+        var score: Int = 0, var games: Int = 0, var wins: Int = 0,
+        var landlordGames: Int = 0, var landlordWins: Int = 0,
+        var farmerGames: Int = 0, var farmerWins: Int = 0
+    )
     private val stats = mutableMapOf(
         Difficulty.NORMAL to GameStats(),
         Difficulty.MASTER to GameStats()
@@ -55,6 +61,11 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             st.score = statsPrefs.getInt(statKey(mode, "score"), 0)
             st.games = statsPrefs.getInt(statKey(mode, "games"), 0)
             st.wins = statsPrefs.getInt(statKey(mode, "wins"), 0)
+            // 子桶缺省为 0：旧版本未写入这些键时读出来是 0，不影响存量总胜率/总积分
+            st.landlordGames = statsPrefs.getInt(statKey(mode, "lg"), 0)
+            st.landlordWins = statsPrefs.getInt(statKey(mode, "lw"), 0)
+            st.farmerGames = statsPrefs.getInt(statKey(mode, "fg"), 0)
+            st.farmerWins = statsPrefs.getInt(statKey(mode, "fw"), 0)
         }
     }
 
@@ -64,6 +75,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 putInt(statKey(mode, "score"), st.score)
                 putInt(statKey(mode, "games"), st.games)
                 putInt(statKey(mode, "wins"), st.wins)
+                putInt(statKey(mode, "lg"), st.landlordGames)
+                putInt(statKey(mode, "lw"), st.landlordWins)
+                putInt(statKey(mode, "fg"), st.farmerGames)
+                putInt(statKey(mode, "fw"), st.farmerWins)
             }
             apply()
         }
@@ -119,7 +134,8 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
     /** 组装备份 JSON（设置 + 双模式统计） */
     private fun buildBackupJson(): String {
         val root = JSONObject()
-        root.put("schema", 1)
+        // schema=2 起新增 landlord*/farmer* 分角色子桶；旧 schema=1 备份不含子桶，导入时按 0 处理
+        root.put("schema", 2)
         root.put("appVersion", BuildConfig.VERSION_NAME)
         root.put("exportedAt", SimpleDateFormat("yyyyMMddHHmm", Locale.getDefault()).format(Date()))
         val settings = JSONObject()
@@ -133,6 +149,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
             o.put("score", st.score)
             o.put("games", st.games)
             o.put("wins", st.wins)
+            o.put("lg", st.landlordGames)
+            o.put("lw", st.landlordWins)
+            o.put("fg", st.farmerGames)
+            o.put("fw", st.farmerWins)
             statsObj.put(mode.name, o)
         }
         root.put("stats", statsObj)
@@ -147,7 +167,10 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
 
     private fun parseBackupJson(text: String): ImportedBackup {
         val root = JSONObject(text)
-        if (root.optInt("schema", 1) != 1) throw IllegalArgumentException("不支持的备份格式")
+        // 兼容：schema=1 为旧备份（仅含总胜率/总积分，无分角色子桶）；
+        // schema=2 新增 landlord*/farmer* 子桶。两者均支持导入。
+        val schema = root.optInt("schema", 1)
+        if (schema !in 1..2) throw IllegalArgumentException("不支持的备份格式")
         val settings = root.getJSONObject("settings")
         val farmer = Difficulty.valueOf(settings.optString("farmer_teammate_strategy", Difficulty.NORMAL.name))
         val hint = Difficulty.valueOf(settings.optString("player_hint_strategy", Difficulty.NORMAL.name))
@@ -157,7 +180,11 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         for (mode in listOf(Difficulty.NORMAL, Difficulty.MASTER)) {
             if (statsObj.has(mode.name)) {
                 val o = statsObj.getJSONObject(mode.name)
-                imported[mode] = GameStats(o.optInt("score", 0), o.optInt("games", 0), o.optInt("wins", 0))
+                // optInt 缺省 0：旧 schema=1 备份无子桶字段时，分角色统计自然从 0 开始
+                imported[mode] = GameStats(
+                    o.optInt("score", 0), o.optInt("games", 0), o.optInt("wins", 0),
+                    o.optInt("lg", 0), o.optInt("lw", 0), o.optInt("fg", 0), o.optInt("fw", 0)
+                )
             }
         }
         return ImportedBackup(farmer, hint, sec, imported)
@@ -218,7 +245,7 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameEngine.masterDeadlineMs = data.sec * 1000L
         gameSurfaceView.setMasterStrategy(data.farmer, data.hint)
         gameSurfaceView.setMasterThinkSeconds(data.sec)
-        for ((m, st) in stats) gameSurfaceView.setModeStats(m, st.score, st.games, st.wins)
+        for ((m, st) in stats) gameSurfaceView.setModeStats(m, st.score, st.games, st.wins, st.landlordGames, st.landlordWins, st.farmerGames, st.farmerWins)
         toast("已导入备份")
     }
 
@@ -256,15 +283,20 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
         gameEngine.callback = this
         gameSurfaceView.gameEngine = gameEngine
         for ((mode, st) in stats) {
-            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins)
+            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins, st.landlordGames, st.landlordWins, st.farmerGames, st.farmerWins)
         }
         gameSurfaceView.setDisplayMode(Difficulty.NORMAL)
 
         // 主界面设置：重置某模式统计数据（清零并持久化）
         gameSurfaceView.onResetStats = { mode ->
-            stats[mode]?.let { it.score = 0; it.games = 0; it.wins = 0 }
+            stats[mode]?.let {
+                it.score = 0; it.games = 0; it.wins = 0
+                it.landlordGames = 0; it.landlordWins = 0
+                it.farmerGames = 0; it.farmerWins = 0
+            }
             saveStats()
-            gameSurfaceView.setModeStats(mode, 0, 0, 0)
+            // 重置必须把子桶也显式清零（不依赖默认值），否则分角色统计会残留
+            gameSurfaceView.setModeStats(mode, 0, 0, 0, 0, 0, 0, 0)
             gameSurfaceView.refresh()
         }
 
@@ -547,10 +579,18 @@ class MainActivity : AppCompatActivity(), GameEngineCallback {
                 scoreDelta = if (isHumanWin) humanGain.toInt() else -humanGain.toInt(),
                 multiplierText = multiplierText)
 
-            // 统计该模式的游戏局数与胜场
+            // 统计该模式的游戏局数与胜场（总桶）
             st.games++
             if (isHumanWin) st.wins++
-            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins)
+            // 分角色统计：玩家当地主 / 当农民时的局数与胜场（子桶自升级后起累计）
+            if (isHumanLandlord) {
+                st.landlordGames++
+                if (isHumanWin) st.landlordWins++
+            } else {
+                st.farmerGames++
+                if (isHumanWin) st.farmerWins++
+            }
+            gameSurfaceView.setModeStats(mode, st.score, st.games, st.wins, st.landlordGames, st.landlordWins, st.farmerGames, st.farmerWins)
             gameSurfaceView.setDisplayMode(mode)
             gameSurfaceView.refresh()
             saveStats()
