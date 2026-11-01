@@ -619,7 +619,7 @@ class SoundEngine {
     }
 
     private fun synth(key: Sfx): DoubleArray = when (key) {
-        Sfx.PRESS -> note(660.0, 0.05, 0.4)
+        Sfx.PRESS -> tones(listOf(660.0 to 0.05))
         Sfx.TAP_SELECT -> tones(listOf(980.0 to 0.05, 1320.0 to 0.06))
         Sfx.TAP_DESELECT -> tones(listOf(760.0 to 0.05))
         Sfx.CARD_PLAY -> sweepNoise(durSec = 0.13, fStart = 5200.0, fEnd = 1500.0, gain = 0.5) +
