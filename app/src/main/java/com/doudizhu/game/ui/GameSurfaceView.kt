@@ -2693,25 +2693,25 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val nameH = 64f * uiScale
         val statH = 40f * uiScale          // 汇总行字号放大 1.2 倍，行高同步放大避免与相邻行重叠（内容高 284 ≤ 框 308）
         val lineGap = 12f * uiScale
-        val blankGap = 12f * uiScale       // 总积分与地主胜率之间的额外空白行间距
+        val blankGap = 12f * uiScale       // 末行汇总（总胜率）与地主胜率之间的额外空白：分隔「两汇总行」与「分角色行」
         val totalH = nameH + statH * 4 + lineGap * 4 + blankGap
         val blockTop = y + (h - totalH) / 2f
         val c0 = blockTop + nameH / 2f                                                     // 模式名
-        val c1 = blockTop + nameH + lineGap + statH / 2f                                   // 总胜率
-        val c2 = blockTop + nameH + lineGap + statH + lineGap + statH / 2f                 // 总积分
+        val c1 = blockTop + nameH + lineGap + statH / 2f                                   // 总积分（调整顺序：先总积分）
+        val c2 = blockTop + nameH + lineGap + statH + lineGap + statH / 2f                 // 总胜率（调整顺序：后总胜率）
         val c3 = blockTop + nameH + statH * 2 + lineGap * 3 + blankGap + statH / 2f        // 地主胜率（含留白）
         val c4 = c3 + lineGap + statH                                                      // 农民胜率
         canvas.drawText(
             if (mode == Difficulty.MASTER) "大师" else "普通",
             x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
         )
-        // 汇总行（总胜率/总积分）用标准加粗画笔（DEFAULT_BOLD，普通填充）+ 放大 1.2 倍突出层级；
+        // 汇总行（总积分/总胜率）用标准加粗画笔（DEFAULT_BOLD，普通填充）+ 放大 1.2 倍突出层级；
         // modeStatBoldPaint 仅用于本函数内两汇总行，临时放大并复位，不影响其它绘制
         modeStatBoldPaint.textSize = 34f * uiScale * 1.2f
-        canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
-        canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
+        canvas.drawText(scoreLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
+        canvas.drawText(totalRateLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
         modeStatBoldPaint.textSize = 34f * uiScale   // 复位：分角色行用常规字号
-        // 总积分与地主胜率之间的空白行（c2 与 c3 之间）不绘制任何文字
+        // 总胜率（c2）与地主胜率（c3）之间的空白行不绘制任何文字
         canvas.drawText(landlordLine, x + w / 2f, c3 + statH * 0.32f, modeStatPaint)
         canvas.drawText(farmerLine, x + w / 2f, c4 + statH * 0.32f, modeStatPaint)
     }
