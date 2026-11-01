@@ -1,7 +1,9 @@
 #!/bin/bash
 # 大师模式仿真 harness 编译+运行脚本（纯 JVM，不需要 Android SDK / Gradle）
-# 用法: ./sim/run-sim.sh [games] [deadlineMs] [nodeLimit] [threads] [w0,w1,...] [baseSeed]
-# 示例: ./sim/run-sim.sh 240 50 150000 3 0,400,600,800,1000
+# 用法: ./sim/run-sim.sh [games] [deadlineMs] [nodeLimit] [threads] [pModel] [baseSeed] [panicBombLdSize] \
+#                        [effTurnsBeatCoef] [controlWeight] [initWEndgameSize] [bombTempoNear] [bombTempoFar]
+# 示例(确定性基线): ./sim/run-sim.sh 300 0 3000000 6 800 20261029 2 1.0 6 6 6 2
+#   deadlineMs=0 → 确定性模式（纯 nodeLimit 收口、不读墙钟），同参数同种子完全可复现
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
