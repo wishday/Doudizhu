@@ -5,6 +5,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.ToneGenerator
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.ExecutorService
@@ -43,8 +44,19 @@ import kotlin.random.Random
  *     后立刻 `release()`，音频线程可能正阻塞在 `write()` 里，两线程同时操作同一
  *     AudioTrack —— 数据竞争会让 AudioFlinger 侧 track 泄漏，累积耗尽每 uid 配额，
  *     此后所有新建都返回 STATE_UNINITIALIZED，永久嘟嘟。
- *  3. **写入用非阻塞 + 代次检查**：新音效可立刻顶掉还在播的旧音效（不排队成长尾），
- *     也不会因 `write()` 永久阻塞而卡住 `release()`。
+ *  3. **写入用非阻塞 + 代次检查，队列里有残留才 pause+flush**：代次只能拦住「还没写进
+ *     缓冲」的数据，已经进队列的部分撤不回来——不清空的话，新音效只能排在上一声后面，
+ *     听感是「按了没反应，下一次按才响」。但 pause/flush/play 是三次跨进程调用，还会让
+ *     混合器重新接纳这条 track（每声多 20~50ms），所以只在真有残留时清，空闲时直写。
+ *     非阻塞写入同时保证 `write()` 不会把 `release()` 永久卡住。
+ *
+ *  ## 延迟：三件事决定「按下到出声」
+ *
+ *  1. **通路**：deep buffer 混音器每声固定多 100ms 上下，fast mixer 只有 20~30ms。
+ *     所以请求 `PERFORMANCE_MODE_LOW_LATENCY`、缓冲只要 `minBuf`（不放大）、采样率取
+ *     设备原生值（不自找一次重采样），三者都是为进快通路服务的。
+ *  2. **是否重启 track**：空闲时直接写，不 pause/flush/play。
+ *  3. **首次开销**：合成与建 track 都提前到 init 的后台任务里做掉，不留给第一次点击。
  *
  * 降级策略：AudioTrack 不可用时退回 ToneGenerator 提示音——宁可音色差，也不要没声音。
  */
@@ -52,13 +64,12 @@ class SoundEngine {
 
     private companion object {
         const val TAG = "DouDizhu-Audio"
-        const val SAMPLE_RATE = 44100
         /** 单声道 16bit：每帧 2 字节。缓冲大小必须按帧对齐，否则可能被系统拒收 */
         const val FRAME_BYTES = 2
         /** 创建 AudioTrack 的最大连续失败次数：达到即封存为提示音，本次运行不再尝试 */
         const val CREATE_ATTEMPTS = 3
         /** 非阻塞写入的轮询间隔，同时决定「新音效顶掉旧音效」的响应粒度 */
-        const val WRITE_POLL_MS = 4L
+        const val WRITE_POLL_MS = 2L
         /** 释放时等待音频线程退出的上限 */
         const val RELEASE_WAIT_MS = 400L
         /** 单段音频写入的最长耗时（安全阀：track 卡死时不会永久占住音频线程） */
@@ -68,6 +79,19 @@ class SoundEngine {
          * 单个音效可以在 [Sfx] 里覆盖它（目前只有出牌唰声下调到 0.3）。
          */
         const val DEFAULT_GAIN = 1.2
+    }
+
+    /**
+     * 输出采样率：取设备原生采样率，不写死 44100。
+     *
+     * 48000 的机器上写 44100 会先被重采样一遍，多一层延迟；有些机型还要求「原生采样率 +
+     * 小缓冲」才肯把 track 放进 fast mixer。合成算法全部按秒计算时长，换采样率不影响音色。
+     */
+    private val sampleRate: Int = try {
+        AudioTrack.getNativeOutputSampleRate(AudioManager.STREAM_MUSIC)
+            .takeIf { it in 8_000..192_000 } ?: 44_100
+    } catch (_: Exception) {
+        44_100
     }
 
     /** 播放路径。选定之后不再反复摇摆，成功就一路用到底。 */
@@ -96,6 +120,15 @@ class SoundEngine {
         val minGapMs: Long,
         val gain: Double = DEFAULT_GAIN
     ) {
+        /**
+         * 按钮按下的"嗒"：0.4，峰值约 -21dBFS，比选牌点击轻 9dB。
+         *
+         * 只在 ACTION_DOWN 放，作用是把听觉和触觉对齐——振动在按下就给了，动作音却要等
+         * 手指抬起（80~120ms 后）才响，那段时间正是「按了没反应」的来源。所以这一声刻意
+         * 做得极轻、极短（50ms），只当触感的听觉影子，不与后面的动作音抢戏。
+         */
+        PRESS(ToneGenerator.TONE_PROP_ACK, 25, 60, gain = 0.4),
+
         TAP_SELECT(ToneGenerator.TONE_PROP_ACK, 40, 110),
         TAP_DESELECT(ToneGenerator.TONE_PROP_NACK, 30, 110),
 
@@ -121,6 +154,12 @@ class SoundEngine {
     @Volatile private var released = false
 
     @Volatile private var track: AudioTrack? = null
+
+    /**
+     * 自上次清空缓冲起写进去的帧数。与 `playbackHeadPosition` 相减就是「队列里还剩多少没播」，
+     * 用来判断这一声要不要抢断（仅音频线程访问，`stop()` 里在锁内清零）。
+     */
+    private var framesQueued = 0L
 
     /**
      * 播放代次：每发起一个新音效自增。音频线程在写入循环里比对它，
@@ -155,16 +194,25 @@ class SoundEngine {
     }
 
     init {
-        // 预热最常见的两个音效，避免第一次出牌时才在音频线程上做合成。
-        // 这里**不**创建 AudioTrack：推迟到首次播放，避免在 View 构造（主线程、
-        // 进程刚起）时跟系统抢音频服务，那时恰恰是最容易失败的时机。
+        // 预合成全部音效 + 预热 track，都在音频线程上做，不占主线程。
+        //
+        // 预合成：WIN / BOMB 这类长音效要在音频线程上跑几十万次 sin()，首次触发时
+        // 那段时间正好落在「按下按钮 → 出声」的路径里；提前算掉，播放时就只剩写入。
+        // 预热 track：新建 AudioTrack 要走一次音频服务握手（10~50ms），放在开场做掉，
+        // 第一次点击就不会显得迟钝。
+        //
+        // 预热失败**不计入** createFailures：进程刚起时音频服务可能还没就绪，那不该算作
+        // 「这台设备不支持合成音」，留给首次真实播放去判定。
         submit {
-            pcmFor(Sfx.CARD_PLAY)
-            pcmFor(Sfx.TAP_SELECT)
+            for (s in Sfx.values()) pcmFor(s)
+            warmUpTrack()
         }
     }
 
     // ==================== 对外音效接口（均异步，调用线程零开销） ====================
+
+    /** 按钮按下：极轻的一声"嗒"，与触感同时到（动作音仍在 ACTION_UP） */
+    fun press() = play(Sfx.PRESS)
 
     /** 轻触选牌：两声上行短"嗒"音，干脆清晰 */
     fun tapSelect() = play(Sfx.TAP_SELECT)
@@ -254,6 +302,7 @@ class SoundEngine {
             }
             createFailures = 0
             track = created
+            framesQueued = 0
             if (path != Path.TRACK) {
                 path = Path.TRACK
                 Log.i(TAG, "音频路径锁定：AudioTrack 合成音")
@@ -270,34 +319,83 @@ class SoundEngine {
                 .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build()
             val fmt = AudioFormat.Builder()
-                .setSampleRate(SAMPLE_RATE)
+                .setSampleRate(sampleRate)
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                 .build()
             val minBuf = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
+                sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
             )
-            // getMinBufferSize 返回「字节」，出错时返回负的错误码。
-            // 取 2 倍最小缓冲（通常 40~80ms）：足够防 underrun，又不拖长延迟。
-            // 旧实现是 coerceAtLeast(sampleRate / 4) = 11025 字节 = 5512.5 帧 ≈ 125ms，
-            // 既把延迟下限抬到 125ms，又因为有半帧余量而可能被系统拒收——这是「几乎每次
-            // 都嘟嘟声」最可能的直接原因。这里改为「兜底值 + 按帧对齐」，不再出现奇数字节。
-            val base = if (minBuf > 0) minBuf else SAMPLE_RATE / 25 * FRAME_BYTES   // 兜底 40ms
-            val bufBytes = ((base * 2) / FRAME_BYTES * FRAME_BYTES)
-                .coerceAtLeast(FRAME_BYTES * 1024)   // 至少 1024 帧 ≈ 23ms
-            val t = AudioTrack(
-                attrs, fmt, bufBytes, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE
-            )
-            if (t.state == AudioTrack.STATE_INITIALIZED) {
-                Log.i(TAG, "AudioTrack 就绪：minBuf=$minBuf bytes, buffer=$bufBytes bytes")
+            // 缓冲按 **20ms** 定，不跟 minBuf 走、更不乘 2：缓冲越大越容易被判给 deep buffer
+            // 通路，那条通路每声固定多出 100ms 上下的启动延迟。写入端是非阻塞 + 2ms 轮询、
+            // 且始终跑在播放头前面（见 writeAll），不依赖大缓冲防 underrun。
+            // 20ms 若小于系统最小值，AudioTrack 会自动抬到 minBuf——日志里的
+            // `bufferSizeInFrames` 才是实际值，以它为准。
+            val bufBytes = (sampleRate / 50 * FRAME_BYTES)
+                .coerceAtLeast(FRAME_BYTES * 512)   // 下限 512 帧（48k 时约 10ms）
+            val t = buildTrack(attrs, fmt, bufBytes)
+            if (t != null && t.state == AudioTrack.STATE_INITIALIZED) {
+                Log.i(
+                    TAG, "AudioTrack 就绪：${sampleRate}Hz, minBuf=$minBuf bytes, " +
+                            "buffer=$bufBytes bytes/${t.bufferSizeInFrames} 帧, " +
+                            "低延迟=${lowLatencyActive(t)}"
+                )
                 return t
             }
-            Log.w(TAG, "AudioTrack 未初始化（state=${t.state}, buffer=$bufBytes），降级为提示音")
-            try { t.release() } catch (_: Exception) {}
+            Log.w(TAG, "AudioTrack 未初始化（state=${t?.state}, buffer=$bufBytes），降级为提示音")
+            try { t?.release() } catch (_: Exception) {}
             return null
         } catch (e: Exception) {
             Log.w(TAG, "AudioTrack 创建失败，降级为提示音：${e.javaClass.simpleName}: ${e.message}")
             return null
+        }
+    }
+
+    /**
+     * 建 track：先请求低延迟通路，被拒再退回普通构造。
+     *
+     * 低延迟模式只是「请求」——系统不支持时会静默降成普通通路，不会失败，所以不需要额外的
+     * 探测状态。个别机型对参数挑剔（Builder 抛 UnsupportedOperationException），退回普通
+     * 构造即可，音色一致、只是延迟大一点，好过没声音。
+     */
+    private fun buildTrack(attrs: AudioAttributes, fmt: AudioFormat, bufBytes: Int): AudioTrack? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                return AudioTrack.Builder()
+                    .setAudioAttributes(attrs)
+                    .setAudioFormat(fmt)
+                    .setBufferSizeInBytes(bufBytes)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    .build()
+            } catch (e: Exception) {
+                Log.w(TAG, "低延迟通路建 track 失败，退回普通构造：${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        return try {
+            AudioTrack(attrs, fmt, bufBytes, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
+        } catch (e: Exception) {
+            Log.w(TAG, "普通构造建 track 失败：${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    /** 低延迟通路是否真的生效（系统可能静默降级，只能事后读回来判断） */
+    private fun lowLatencyActive(t: AudioTrack): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                t.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
+
+    /** 预热：只尝试建一次 track，失败不封存，也不改变 [path] 的判定结果 */
+    private fun warmUpTrack() {
+        synchronized(lock) {
+            if (released || track != null || path == Path.FALLBACK) return
+            val t = createTrack() ?: return
+            track = t
+            framesQueued = 0
+            if (path != Path.TRACK) {
+                path = Path.TRACK
+                Log.i(TAG, "音频路径锁定：AudioTrack 合成音（预热）")
+            }
         }
     }
 
@@ -306,6 +404,7 @@ class SoundEngine {
         synchronized(lock) {
             val t = track ?: return
             track = null
+            framesQueued = 0
             Log.w(TAG, "AudioTrack 丢弃（$reason）")
             try { t.pause(); t.flush(); t.release() } catch (_: Exception) {}
         }
@@ -314,8 +413,6 @@ class SoundEngine {
     /**
      * 把整段 PCM 写进 AudioTrack。
      *
-     * 旧实现是「先 play() 再阻塞 write()」：起播瞬间缓冲是空的，必然 underrun 一次，
-     * 表现为每声之前有一小段静音。这里改为先写满缓冲再起播。
      * 写入用 WRITE_NON_BLOCKING + 轮询，既能在被新音效取代时立刻退出（代次变了），
      * 也不会把 `release()` 卡死在一个永不返回的 `write()` 上。
      *
@@ -323,27 +420,31 @@ class SoundEngine {
      */
     private fun writeAll(t: AudioTrack, buf: ShortArray, gen: Int): Boolean {
         try {
-            // 非播放状态下先清空残留缓冲。
+            // 抢断上一声：只有队列里确实还有没播完的数据时才 pause + flush。
             //
-            // pause / stop 期间写入的数据 AudioTrack 不会消费，会一直堆在环形缓冲里，
-            // 等下一次 play() 成功时连同新音效一起播出来——听感就是「这一声没响，
-            // 下一次连响两声」。播放中不能 flush（会把正在发声的波形截断成爆音），
-            // 但非播放状态下缓冲里的都是「卡住没播」的死数据，清掉正是目的。
-            if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                try { t.flush() } catch (_: Exception) {}
+            // AudioTrack 的数据一旦写进去就撤不回来——代次检查只能拦住「还没写进缓冲」
+            // 的部分，而短音效（100~220ms）的整段 PCM 在 1ms 内就会全部进队列。不清空的话，
+            // 新音效只能排在上一声后面：按下去没声音，再按一下才连着响两次。
+            //
+            // 但 pause → flush → play 是三次跨进程调用，还会让混合器重新接纳这条 track，
+            // 每声白白多 20~50ms 的启动延迟。所以先算队列里还剩多少没播（已写帧数 − 播放头）：
+            // 上一声已经播完时，track 仍停在播放态、缓冲是空的，直接写就会立刻出声，这是能
+            // 做到的最低延迟，也是绝大多数按钮点击的实际路径。
+            val head = t.playbackHeadPosition.toLong() and 0xFFFF_FFFFL
+            val pending = framesQueued - head
+            if (pending < 0) framesQueued = head   // flush 没重置播放头时自校正，避免一直判成空闲
+            if (pending > 0 || t.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                if (t.playState == AudioTrack.PLAYSTATE_PLAYING) t.pause()
+                t.flush()   // PLAYING 状态下是 no-op，必须先 pause
+                framesQueued = 0
             }
             var off = 0
             val startMs = SystemClock.uptimeMillis()
             while (off < buf.size) {
-                // 被更新的音效取代：补一段淡出再退出。直接 return 会让波形从中间断掉，
-                // 听感上是一声「啪」的爆音；淡出 12ms 后自然收尾。
-                if (released || gen != generation.get()) {
-                    if (off > 0) fadeOut(t, buf, off)
-                    return true
-                }
+                // 被更新的音效取代：直接退出，由下一声的 pause+flush 接管。
+                if (released || gen != generation.get()) return true
                 if (SystemClock.uptimeMillis() - startMs > MAX_WRITE_MS) {
                     Log.w(TAG, "写入超时（${buf.size} 采样），放弃剩余部分")
-                    if (off > 0) fadeOut(t, buf, off)
                     return true
                 }
                 val n = t.write(buf, off, buf.size - off, AudioTrack.WRITE_NON_BLOCKING)
@@ -353,11 +454,11 @@ class SoundEngine {
                 }
                 if (n > 0) {
                     off += n
+                    framesQueued += n   // 单声道：一个 short 即一帧
                     continue
                 }
                 // 缓冲已满：没起播就先起播，已起播就等消费者腾出空间。
-                // 这里**不能** flush：flush 会把上一声还没播完的部分直接砍掉（爆音）。
-                // 「后来者优先」由上面的代次检查实现，它最多让新音效晚一个缓冲（约 40~80ms）。
+                // 这里是本段自己的数据在等播放，不能 flush（会把自己刚写的前半段砍掉）。
                 // 每次都查实时 playState：stop() 可能在中途把 track 暂停，
                 // 缓存的状态会让这里一直 sleep 到超时
                 if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
@@ -389,37 +490,11 @@ class SoundEngine {
     private fun startPlayback(t: AudioTrack) {
         try {
             t.play()
-            // 部分设备 play() 不立即生效（playState 仍停在 PAUSED）：短等一次再试。否则本段
-            // 数据留在缓冲不播，下一次 play 成功时连着播出来就成了「快速响两声」。
             if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                Thread.sleep(16)
-                t.play()
-                if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                    Log.w(TAG, "AudioTrack.play 仍未生效，playState=${t.playState}")
-                }
+                Log.w(TAG, "AudioTrack.play 未生效，playState=${t.playState}")
             }
         } catch (e: Exception) {
             Log.w(TAG, "AudioTrack.play 异常：${e.javaClass.simpleName}: ${e.message}")
-        }
-    }
-
-    /** 把 buf 从 from 起的一小段按线性包络降到 0 后写入（约 12ms），用于中途收尾防爆音 */
-    private fun fadeOut(t: AudioTrack, buf: ShortArray, from: Int) {
-        val n = minOf(buf.size - from, SAMPLE_RATE / 80)
-        if (n <= 0) return
-        val tail = ShortArray(n)
-        for (i in 0 until n) {
-            tail[i] = (buf[from + i] * (1.0 - i.toDouble() / n)).toInt().toShort()
-        }
-        var off = 0
-        while (off < n) {
-            val w = try {
-                t.write(tail, off, n - off, AudioTrack.WRITE_NON_BLOCKING)
-            } catch (_: Exception) {
-                return
-            }
-            if (w <= 0) return
-            off += w
         }
     }
 
@@ -452,29 +527,6 @@ class SoundEngine {
 
     // ==================== 生命周期 ====================
 
-    /**
-     * 预热 AudioTrack：提前建好并起播，使首声不必再等「创建 + 起播」延迟。
-     *
-     * 根本原因：[play] 懒创建 track，而新建 track 的 [AudioTrack.play] 有启动延迟——
-     * 首声数据写进缓冲却还没被播放管线消费，下一次点击把新数据续写在它后面，
-     * 听感正是「首声没响、第二声一次放俩」。这里在 surface 就绪（已前台、音频服务可用）
-     * 时就建好并起播 track，首声直接写进已 PLAYING 的轨道，立即出声。
-     *
-     * 失败无害：真正的首声会再次尝试，连续失败才会封存提示音；本方法不计入连续失败计数。
-     */
-    fun prime() {
-        if (released) return
-        submit {
-            val t = obtainTrack()
-            if (t == null) {
-                // 预热失败只是时机未到（音频服务尚在初始化），不计入连续失败，避免误封提示音
-                synchronized(lock) { createFailures = 0 }
-            } else if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                startPlayback(t)
-            }
-        }
-    }
-
     /** 暂停播放并清空缓冲（切后台调用）。保留 track 实例，回前台无需重建。 */
     fun stop() {
         generation.incrementAndGet()   // 让音频线程放弃当前音效
@@ -484,6 +536,7 @@ class SoundEngine {
                     if (t.playState == AudioTrack.PLAYSTATE_PLAYING) t.pause()
                     t.flush()
                 }
+                framesQueued = 0   // 否则回前台会误判「有残留」，白做一次 pause+flush
             } catch (_: Exception) {}
         }
     }
@@ -518,7 +571,7 @@ class SoundEngine {
         if (released) return
         released = true
         generation.incrementAndGet()
-        // 顺序很重要：先让音频线程自己退出（它每 4ms 检查一次 released），再动 track。
+        // 顺序很重要：先让音频线程自己退出（它每 2ms 检查一次 released），再动 track。
         // 旧实现是「先 pause+flush 再 await」，那时音频线程可能正卡在 write() 里，
         // pause/flush 与它并发操作同一段缓冲——虽然 AudioTrack 本身线程安全，
         // 但这是没必要的竞争，也是上一版 track 泄漏的同类隐患。
@@ -566,12 +619,13 @@ class SoundEngine {
     }
 
     private fun synth(key: Sfx): DoubleArray = when (key) {
+        Sfx.PRESS -> note(660.0, 0.05, 0.4)
         Sfx.TAP_SELECT -> tones(listOf(980.0 to 0.05, 1320.0 to 0.06))
         Sfx.TAP_DESELECT -> tones(listOf(760.0 to 0.05))
         Sfx.CARD_PLAY -> sweepNoise(durSec = 0.13, fStart = 5200.0, fEnd = 1500.0, gain = 0.5) +
                 thud(150.0, 0.09, 0.5)
         Sfx.BOMB -> {
-            val boom = DoubleArray((SAMPLE_RATE * 0.55).toInt())
+            val boom = DoubleArray((sampleRate * 0.55).toInt())
             addInto(boom, thud(55.0, 0.45, 0.95))     // 低频冲击
             addInto(boom, thud(110.0, 0.30, 0.55))
             addInto(boom, noiseBurst(0.45, 0.6, decayFast = true))   // 爆炸噪声（前重后轻）
@@ -623,11 +677,11 @@ class SoundEngine {
 
     /** 单个音符：基频 + 两次泛音，指数衰减包络，柔和起音防爆音 */
     private fun note(freq: Double, durSec: Double, gain: Double): DoubleArray {
-        val n = (SAMPLE_RATE * durSec).toInt()
+        val n = (sampleRate * durSec).toInt()
         val out = DoubleArray(n)
         val tau = durSec / 5.0
         for (i in 0 until n) {
-            val t = i / SAMPLE_RATE.toDouble()
+            val t = i / sampleRate.toDouble()
             val env = exp(-t / tau) * (1.0 - exp(-t / 0.004))
             val s = sin(2 * PI * freq * t) +
                     0.35 * sin(2 * PI * freq * 2 * t) +
@@ -646,11 +700,11 @@ class SoundEngine {
 
     /** 低频闷响（无高频成分，像拍桌子）。注意：低于约 200Hz 的成分在手机小扬声器上几乎放不出 */
     private fun thud(freq: Double, durSec: Double, gain: Double): DoubleArray {
-        val n = (SAMPLE_RATE * durSec).toInt()
+        val n = (sampleRate * durSec).toInt()
         val out = DoubleArray(n)
         val tau = durSec / 6.0
         for (i in 0 until n) {
-            val t = i / SAMPLE_RATE.toDouble()
+            val t = i / sampleRate.toDouble()
             out[i] = sin(2 * PI * freq * t) * exp(-t / tau) * (1.0 - exp(-t / 0.003)) * gain
         }
         return out
@@ -663,7 +717,7 @@ class SoundEngine {
      * 单靠 thud 可能糊成一片或者干脆听不见。8ms 足够被感知为"起音"，又不至于变成爆音。
      */
     private fun tick(durSec: Double, gain: Double): DoubleArray {
-        val n = (SAMPLE_RATE * durSec).toInt()
+        val n = (sampleRate * durSec).toInt()
         val out = DoubleArray(n)
         for (i in 0 until n) {
             val k = i / n.toDouble()
@@ -673,11 +727,11 @@ class SoundEngine {
     }
 
     /** 纯静音段，用于两声音之间留白（比用 [offset] 跳段安全：不会因为越界而整段消失） */
-    private fun silence(durSec: Double): DoubleArray = DoubleArray((SAMPLE_RATE * durSec).toInt())
+    private fun silence(durSec: Double): DoubleArray = DoubleArray((sampleRate * durSec).toInt())
 
     /** 噪声下滑音：模拟纸牌摩擦空气的"唰" */
     private fun sweepNoise(durSec: Double, fStart: Double, fEnd: Double, gain: Double): DoubleArray {
-        val n = (SAMPLE_RATE * durSec).toInt()
+        val n = (sampleRate * durSec).toInt()
         val out = DoubleArray(n)
         var lp = 0.0
         var phase = 0.0
@@ -686,9 +740,9 @@ class SoundEngine {
             val env = sin(PI * k) // 起收皆淡
             // 一阶低通随频率下移，白噪声过带通近似"嘶——"
             val white = Random.Default.nextDouble() * 2.0 - 1.0
-            val alpha = (2 * PI * (fStart + (fEnd - fStart) * k * k) / SAMPLE_RATE).coerceAtMost(0.5)
+            val alpha = (2 * PI * (fStart + (fEnd - fStart) * k * k) / sampleRate).coerceAtMost(0.5)
             lp += alpha * (white - lp)
-            phase += 2 * PI * 180.0 / SAMPLE_RATE
+            phase += 2 * PI * 180.0 / sampleRate
             out[i] = (lp * 2.2 + 0.15 * sin(phase)) * env * gain
         }
         return out
@@ -696,7 +750,7 @@ class SoundEngine {
 
     /** 噪声爆炸（decayFast：前半段能量集中） */
     private fun noiseBurst(durSec: Double, gain: Double, decayFast: Boolean): DoubleArray {
-        val n = (SAMPLE_RATE * durSec).toInt()
+        val n = (sampleRate * durSec).toInt()
         val out = DoubleArray(n)
         var lp = 0.0
         for (i in 0 until n) {
@@ -718,9 +772,6 @@ class SoundEngine {
         System.arraycopy(b, 0, out, a.size, b.size)
         return out
     }
-
-    private fun offset(a: DoubleArray, skip: Int): DoubleArray =
-        if (skip <= 0) a else if (skip >= a.size) DoubleArray(0) else a.copyOfRange(skip, a.size)
 
     /** 多轨并集叠加（给 WIN 的尾音和声用）。同样不做中途限幅，交给出口 [softLimit] */
     private fun mix(parts: List<DoubleArray>): DoubleArray {

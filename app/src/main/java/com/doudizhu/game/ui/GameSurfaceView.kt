@@ -587,9 +587,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun initAudio() {
         try {
             if (soundEngine == null) soundEngine = SoundEngine()
-            // 提前预热 AudioTrack：surface 已就绪（已前台、音频服务可用），此刻建好并起播轨道，
-            // 避免首声因「创建 + 起播」延迟而丢失、与次声叠加成「一次放两声」。
-            soundEngine?.prime()
             // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -706,7 +703,6 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         recalcSizes()
         initAudio()
         soundEngine?.onForeground()   // 回前台清除失败冷却：后台可能已被系统回收 track
-        soundEngine?.prime()          // 回前台重新预热轨道，确保起播延迟已消化，首声即时出声
         startRendering()    // 重新进入应用时启动 vsync 渲染（首帧由 Choreographer 触发，避免静态界面黑屏）
     }
 
@@ -1040,8 +1036,13 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 for (btn in currentButtons) {
                     if (btn.rect.contains(x, y)) {
                         pressedAction = btn.action
-                        // “提示”按钮不振动
+                        // “提示”按钮不振动（沿用原有约定，避免误触时震一下）
                         if (btn.action != "hint") hapticButtonPress()
+                        // 按下音只补给自己有音效的按钮：出牌（唰）、提示（叮）。不出 / 重开 /
+                        // 返回 / 设置原本就是纯振动，给它们补一声等于凭空多个声音，不做。
+                        // 理由：动作音要等 ACTION_UP 且要过合法性校验，而触感在按下就给了，
+                        // 中间 80~120ms 正是「按了好像没反应」的来源；这一声只负责对齐触感。
+                        if (btn.action == "play" || btn.action == "hint") sfx { it.press() }
                         refresh()
                         return true
                     }
