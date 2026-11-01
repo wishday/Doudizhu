@@ -389,8 +389,14 @@ class SoundEngine {
     private fun startPlayback(t: AudioTrack) {
         try {
             t.play()
+            // 部分设备 play() 不立即生效（playState 仍停在 PAUSED）：短等一次再试。否则本段
+            // 数据留在缓冲不播，下一次 play 成功时连着播出来就成了「快速响两声」。
             if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                Log.w(TAG, "AudioTrack.play 未生效，playState=${t.playState}")
+                Thread.sleep(16)
+                t.play()
+                if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                    Log.w(TAG, "AudioTrack.play 仍未生效，playState=${t.playState}")
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "AudioTrack.play 异常：${e.javaClass.simpleName}: ${e.message}")
@@ -445,6 +451,29 @@ class SoundEngine {
     }
 
     // ==================== 生命周期 ====================
+
+    /**
+     * 预热 AudioTrack：提前建好并起播，使首声不必再等「创建 + 起播」延迟。
+     *
+     * 根本原因：[play] 懒创建 track，而新建 track 的 [AudioTrack.play] 有启动延迟——
+     * 首声数据写进缓冲却还没被播放管线消费，下一次点击把新数据续写在它后面，
+     * 听感正是「首声没响、第二声一次放俩」。这里在 surface 就绪（已前台、音频服务可用）
+     * 时就建好并起播 track，首声直接写进已 PLAYING 的轨道，立即出声。
+     *
+     * 失败无害：真正的首声会再次尝试，连续失败才会封存提示音；本方法不计入连续失败计数。
+     */
+    fun prime() {
+        if (released) return
+        submit {
+            val t = obtainTrack()
+            if (t == null) {
+                // 预热失败只是时机未到（音频服务尚在初始化），不计入连续失败，避免误封提示音
+                synchronized(lock) { createFailures = 0 }
+            } else if (t.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                startPlayback(t)
+            }
+        }
+    }
 
     /** 暂停播放并清空缓冲（切后台调用）。保留 track 实例，回前台无需重建。 */
     fun stop() {

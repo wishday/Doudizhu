@@ -587,6 +587,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     private fun initAudio() {
         try {
             if (soundEngine == null) soundEngine = SoundEngine()
+            // 提前预热 AudioTrack：surface 已就绪（已前台、音频服务可用），此刻建好并起播轨道，
+            // 避免首声因「创建 + 起播」延迟而丢失、与次声叠加成「一次放两声」。
+            soundEngine?.prime()
             // Android 12+ (API 31) 优先使用 VibratorManager，获取失败则回退旧 API
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val vm = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
@@ -703,6 +706,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         recalcSizes()
         initAudio()
         soundEngine?.onForeground()   // 回前台清除失败冷却：后台可能已被系统回收 track
+        soundEngine?.prime()          // 回前台重新预热轨道，确保起播延迟已消化，首声即时出声
         startRendering()    // 重新进入应用时启动 vsync 渲染（首帧由 Choreographer 触发，避免静态界面黑屏）
     }
 
