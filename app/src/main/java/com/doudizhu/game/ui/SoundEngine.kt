@@ -76,7 +76,7 @@ class SoundEngine {
         const val MAX_WRITE_MS = 5000L
         /**
          * 音效基准音量（线性）。1.2 让全部音效比原始合成电平高约 1.6dB。
-         * 单个音效可以在 [Sfx] 里覆盖它（目前只有出牌唰声下调到 0.3）。
+         * 单个音效可以在 [Sfx] 里覆盖它（目前只有出牌唰声下调到 0.2）。
          */
         const val DEFAULT_GAIN = 1.2
     }
@@ -133,12 +133,12 @@ class SoundEngine {
         TAP_DESELECT(ToneGenerator.TONE_PROP_NACK, 30, 110),
 
         /**
-         * 出牌"唰"声：0.3，相对基准 1.2 只有 0.25 倍。
+         * 出牌"唰"声：0.2，相对基准 1.2 只有 0.167 倍。
          *
          * 它是全部音效里合成电平最响的一个——`lp * 2.2` 的噪声补偿把峰值顶到接近满幅
          * （比选牌点击高 13dB），几乎没有余量，听感上明显压过其它音效，所以单独压下来。
          */
-        CARD_PLAY(ToneGenerator.TONE_PROP_BEEP, 80, 0, gain = 0.3),
+        CARD_PLAY(ToneGenerator.TONE_PROP_BEEP, 80, 0, gain = 0.2),
 
         BOMB(ToneGenerator.TONE_CDMA_ABBR_ALERT, 300, 0),
         WIN(ToneGenerator.TONE_CDMA_PIP, 200, 0),
