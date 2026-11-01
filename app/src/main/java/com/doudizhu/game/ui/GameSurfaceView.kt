@@ -702,6 +702,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         screenHeight = height
         recalcSizes()
         initAudio()
+        soundEngine?.onForeground()   // 回前台清除失败冷却：后台可能已被系统回收 track
         startRendering()    // 重新进入应用时启动 vsync 渲染（首帧由 Choreographer 触发，避免静态界面黑屏）
     }
 
@@ -714,9 +715,25 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         stopRendering()
+        // 只暂停+清缓冲，不 release：切前后台会反复走 surfaceDestroyed/surfaceCreated，
+        // 若每次都重建 AudioTrack，仍可能与阻塞中的 write 竞态泄漏 AudioFlinger 侧 track，
+        // 逐次累积耗尽每 uid 的 track 配额后，新建一律失败 → 从此永久降级为嘟嘟声。
+        // 引擎改为随窗口存活，仅在 onDetachedFromWindow（视图真正离开窗口 / Activity 销毁）时释放。
         soundEngine?.stop()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        // 视图重新挂载（如被移除后复用）：音效引擎在 onDetachedFromWindow 已释放，这里补建
+        initAudio()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        // 音频生命周期跟着 View 走（Activity 销毁才算真正结束），与 Surface 无关
         soundEngine?.release()
         soundEngine = null
+        vibrator = null
     }
 
     fun startRendering() {
@@ -2346,10 +2363,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 } else {
                     // 难度按钮宽度缩小为原来一半（原 2 倍出牌按钮宽 -> 1 倍），上方居中显示「请选择难度」
                     // 按钮尺寸随 uiScale 缩放，与游戏内牌面/字体统一（Pad 不再偏小）。
-                    // 宽度在出牌按钮 1 倍基础上放宽（+600 而非 +40），以容纳分角色文本行；并预留汇总行加粗 + 放大 1.1 倍后：
-                    // 「总胜率:50000/50000 (100%)」这类 5 位数局数（加粗放大后约 600px）不裁切（scale=1 时框宽 640px）
-                    val dW = ((btnW * 2f + 600f) / 2f) * uiScale
-                    val dH = (btnH * 2f + 24f) * uiScale
+                    // 宽度在出牌按钮 1 倍基础上放宽（+720 而非 +40），以容纳分角色文本行；并预留汇总行加粗 + 放大 1.2 倍后：
+                    // 「总胜率:50000/50000 (100%)」这类 5 位数局数（加粗放大后约 660px）不裁切（scale=1 时框宽 700px）
+                    val dW = ((btnW * 2f + 720f) / 2f) * uiScale
+                    val dH = (btnH * 2f + 48f) * uiScale
                     val dGap = gap * 2f * uiScale
                     val normalColor = Palette.btnGreen
                     val normalPressed = Palette.btnGreenDark
@@ -2669,7 +2686,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 内部文字行高布局随 uiScale 等比（否则按钮框放大后上下留白失衡、字相对框偏小）。
         // 行数：模式名 + 总胜率 + 总积分 + （空白留白）+ 地主胜率 + 农民胜率 = 5 行内容 + 1 段留白。
         val nameH = 64f * uiScale
-        val statH = 34f * uiScale          // 汇总行字号放大 1.1 倍，行距预留避免与相邻行重叠（内容高 260 ≤ 框 284）
+        val statH = 40f * uiScale          // 汇总行字号放大 1.2 倍，行高同步放大避免与相邻行重叠（内容高 284 ≤ 框 308）
         val lineGap = 12f * uiScale
         val blankGap = 12f * uiScale       // 总积分与地主胜率之间的额外空白行间距
         val totalH = nameH + statH * 4 + lineGap * 4 + blankGap
@@ -2683,9 +2700,9 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             if (mode == Difficulty.MASTER) "大师" else "普通",
             x + w / 2f, c0 + nameH * 0.32f, modeNamePaint
         )
-        // 汇总行（总胜率/总积分）用标准加粗画笔（DEFAULT_BOLD，普通填充）+ 放大 1.1 倍突出层级；
+        // 汇总行（总胜率/总积分）用标准加粗画笔（DEFAULT_BOLD，普通填充）+ 放大 1.2 倍突出层级；
         // modeStatBoldPaint 仅用于本函数内两汇总行，临时放大并复位，不影响其它绘制
-        modeStatBoldPaint.textSize = 34f * uiScale * 1.1f
+        modeStatBoldPaint.textSize = 34f * uiScale * 1.2f
         canvas.drawText(totalRateLine, x + w / 2f, c1 + statH * 0.32f, modeStatBoldPaint)
         canvas.drawText(scoreLine, x + w / 2f, c2 + statH * 0.32f, modeStatBoldPaint)
         modeStatBoldPaint.textSize = 34f * uiScale   // 复位：分角色行用常规字号
