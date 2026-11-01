@@ -336,7 +336,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 当前按下的按钮动作（按下时记录，释放时执行，避免按钮列表重建导致索引错位） */
     private var pressedAction: String? = null
 
-    /** 所有玩家的桌面出牌展示（0=人类, 1=左AI/电脑B, 2=右AI/电脑A）；同一时刻仅展示最新一手 */
+    /** 所有玩家的桌面出牌展示（0=人类, 1=右AI, 2=左AI）；同一时刻仅展示最新一手 */
     private val tablePlayedCards = arrayOfNulls<List<Card>>(3)
     /** 退场动画：出牌瞬间捕获"桌上正在展示的那一手"（无论属于哪个槽位）作为退场对象，
      *  在其自身槽位坐标处下移 + 淡出，与新牌入场同步（覆盖"下家出牌、上家旧牌退出"的常见场景） */
@@ -1438,8 +1438,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 横屏布局：AI在左右两侧（主界面不显示电脑A/电脑B信息框）
         if (gameEngine.stateMachine.phase != GamePhase.MENU) {
-            drawAIPlayer(canvas, 1, 260f * uiScale, 100f)                  // 左侧AI（电脑B）
-            drawAIPlayer(canvas, 2, screenWidth - 260f * uiScale, 100f)   // 右侧AI（电脑A）
+            drawAIPlayer(canvas, 1, screenWidth - 260f * uiScale, 100f)   // 右侧AI
+            drawAIPlayer(canvas, 2, 260f * uiScale, 100f)                  // 左侧AI
         }
 
         // 桌面中央展示所有玩家出的牌
@@ -1447,8 +1447,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
 
         // 电脑思考中提示（画在出牌区之后，避免被中央牌面遮挡）
         if (gameEngine.stateMachine.phase != GamePhase.MENU) {
-            drawAiTurnTip(canvas, 1, 260f * uiScale, 100f)
-            drawAiTurnTip(canvas, 2, screenWidth - 260f * uiScale, 100f)
+            drawAiTurnTip(canvas, 1, screenWidth - 260f * uiScale, 100f)
+            drawAiTurnTip(canvas, 2, 260f * uiScale, 100f)
         }
 
         // 叫分阶段：在两台电脑玩家下方分别显示其叫分情况（开始发牌时清除）
@@ -1810,8 +1810,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         if (!::gameEngine.isInitialized) return
         if (gameEngine.stateMachine.phase != GamePhase.BIDDING) return
         // 与 drawAIPlayer / drawAiTurnTip 的槽位坐标保持一致
-        drawAiBidTip(canvas, 1, 260f * uiScale, 100f)
-        drawAiBidTip(canvas, 2, screenWidth - 260f * uiScale, 100f)
+        drawAiBidTip(canvas, 1, screenWidth - 260f * uiScale, 100f)
+        drawAiBidTip(canvas, 2, 260f * uiScale, 100f)
     }
 
     private fun drawAiBidTip(canvas: Canvas, playerIndex: Int, centerX: Float, topY: Float) {
@@ -1852,10 +1852,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 退场旧牌：先于新手牌绘制（不同槽位，互不遮挡），在其自身坐标处下移 + 淡出
         drawOutgoingCards(canvas)
 
-        // 左侧AI出的牌（电脑B / 玩家1）
-        tablePlayedCards[1]?.let { cards ->
+        // 左侧AI出的牌
+        tablePlayedCards[2]?.let { cards ->
             if (cards.isNotEmpty()) {
-                drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY, slot = 1)
+                drawPlayedCardsAt(canvas, cards, screenWidth * 0.30f, centerY, slot = 2)
                 textPaint.textSize = 36f * uiScale
                 textPaint.color = Palette.textGreen
                 canvas.drawText("电脑B", screenWidth * 0.30f, centerY - tableCardH / 2 - 20f, textPaint)
@@ -1872,10 +1872,10 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
             }
         }
 
-        // 右侧AI出的牌（电脑A / 玩家2）
-        tablePlayedCards[2]?.let { cards ->
+        // 右侧AI出的牌
+        tablePlayedCards[1]?.let { cards ->
             if (cards.isNotEmpty()) {
-                drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY, slot = 2)
+                drawPlayedCardsAt(canvas, cards, screenWidth * 0.70f, centerY, slot = 1)
                 textPaint.textSize = 36f * uiScale
                 textPaint.color = Palette.textGreen
                 canvas.drawText("电脑A", screenWidth * 0.70f, centerY - tableCardH / 2 - 20f, textPaint)
@@ -1894,8 +1894,8 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         // 退场牌沿用其原槽位的屏幕坐标（与 drawTablePlayedCards 各槽位一致）
         val (cx, cyBase) = when (outSlot) {
             0 -> screenWidth * 0.50f to screenHeight * 0.38f + 50f
-            1 -> screenWidth * 0.30f to screenHeight * 0.38f
-            else -> screenWidth * 0.70f to screenHeight * 0.38f
+            1 -> screenWidth * 0.70f to screenHeight * 0.38f
+            else -> screenWidth * 0.30f to screenHeight * 0.38f
         }
         val pTotalW = tableSpacing * (cards.size - 1) + tableCardW
         val pStartX = cx - pTotalW / 2f
@@ -2216,15 +2216,15 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
         val centerGap = 100f   // 中线处两条牌带之间留一个“底牌大小”的缝隙
         val bandW = screenWidth / 2f    // 左右各占半屏，避免两侧重叠
 
-        // 左侧AI（电脑B / 玩家1）剩余牌：贴左边缘起排，向右延伸到中线缝隙左缘为止
+        // 左侧AI（电脑B）剩余牌：贴左边缘起排，向右延伸到中线缝隙左缘为止
         drawRemainingRow(
-            canvas, gameEngine.players[1].handCards,
+            canvas, gameEngine.players[2].handCards,
             bandLeft = margin, bandRight = bandW - centerGap / 2f,
             backY, miniW, miniH, miniGap, "电脑B剩余", leftAlign = true
         )
-        // 右侧AI（电脑A / 玩家2）剩余牌：贴右边缘排布，向左延伸到中线缝隙右缘为止
+        // 右侧AI（电脑A）剩余牌：贴右边缘排布，向左延伸到中线缝隙右缘为止
         drawRemainingRow(
-            canvas, gameEngine.players[2].handCards,
+            canvas, gameEngine.players[1].handCards,
             bandLeft = bandW + centerGap / 2f, bandRight = screenWidth - margin,
             backY, miniW, miniH, miniGap, "电脑A剩余", leftAlign = false
         )
@@ -2278,7 +2278,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
      *  坐标与 drawAIPlayer 严格一致：中心 x 在左右边缘各内缩 260f*uiScale、顶 y=100f、
      *  面板固定 320x180；牌背宽随 uiScale(aiBackW/aiBackH) 变化，故框也随之缩放。 */
     private fun aiInfoBounds(playerIndex: Int): RectF {
-        val centerX = if (playerIndex == 1) 260f * uiScale else screenWidth - 260f * uiScale
+        val centerX = if (playerIndex == 1) screenWidth - 260f * uiScale else 260f * uiScale
         val topY = 100f
         val panelW = aiPanelW
         val panelH = aiPanelH
@@ -2325,14 +2325,14 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
                 )
             }
             1 -> {
-                // 左侧AI（电脑B）高亮：框严格包裹其信息区（随 uiScale 缩放）
+                // 右侧AI高亮：框严格包裹其信息区（随 uiScale 缩放）
                 val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 120 + 60).toInt()
                 highlightPaint.color = Color.argb(pulseAlpha, 255, 152, 0)
                 highlightPaint.strokeWidth = 6f
                 canvas.drawRoundRect(aiInfoBounds(1), 20f, 20f, highlightPaint)
             }
             2 -> {
-                // 右侧AI（电脑A）高亮：框严格包裹其信息区（随 uiScale 缩放）
+                // 左侧AI高亮：框严格包裹其信息区（随 uiScale 缩放）
                 val pulseAlpha = ((abs(highlightFrame - 30) / 30.0f) * 120 + 60).toInt()
                 highlightPaint.color = Color.argb(pulseAlpha, 255, 152, 0)
                 highlightPaint.strokeWidth = 6f
@@ -2650,7 +2650,7 @@ class GameSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Ca
     /** 思考中动态省略号：随时间循环 . .. ... */
     private fun thinkingTip(playerIndex: Int): String {
         val dots = ".".repeat(((animTime / 400L) % 3L).toInt() + 1)
-        return (if (playerIndex == 1) "电脑B思考中" else "电脑A思考中") + dots
+        return (if (playerIndex == 1) "电脑A思考中" else "电脑B思考中") + dots
     }
 
     /**
