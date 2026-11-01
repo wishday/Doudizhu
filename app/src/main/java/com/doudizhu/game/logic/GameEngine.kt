@@ -57,8 +57,8 @@ class GameEngine {
     /** 三位玩家 */
     val players = listOf(
         Player(0, "你", isHuman = true),
-        Player(1, "电脑A", isHuman = false, difficulty = Difficulty.NORMAL),
-        Player(2, "电脑B", isHuman = false, difficulty = Difficulty.NORMAL)
+        Player(1, "电脑B", isHuman = false, difficulty = Difficulty.NORMAL),
+        Player(2, "电脑A", isHuman = false, difficulty = Difficulty.NORMAL)
     )
 
     /** 游戏状态机 */
@@ -169,7 +169,7 @@ class GameEngine {
      * 本方法只做「随机选人 + 状态机置为叫分」，**不立即开始叫分**：由 UI 先用与
      * 「xx成为地主」相同的中央提示框展示「xx开始叫地主」，保持 1s 关闭后再调用
      * [beginBiddingAfterFirstBidderPopup] 正式进入叫分流程。
-     * @return 首个叫分玩家索引（0=人类 / 1=电脑A / 2=电脑B）
+     * @return 首个叫分玩家索引（0=人类 / 1=电脑B / 2=电脑A）
      */
     fun prepareFirstBidder(): Int {
         val firstBidder = (0..2).random()
