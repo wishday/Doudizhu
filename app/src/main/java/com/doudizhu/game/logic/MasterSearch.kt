@@ -506,7 +506,13 @@ internal object MasterSearch {
         private val passPenalty: Int,
         private val humanFarmer: Int = -1,
         private val pModel: Int = 0,
-        private val evalMode: Int = 0
+        private val evalMode: Int = 0,
+        // —— ① 评估重标定旋钮（默认=基线，生产 MasterAIDecision 不传则行为不变）——
+        private val effTurnsBeatCoef: Double = 1.0,  // effTurns 牌质 tempo 系数（每处被压尾巴 +1 tempo 的权重）
+        private val controlWeight: Int = 6,          // control() 控牌资源权重
+        private val initWEndgameSize: Int = 6,       // initW 残局抢权阈值（↑=更早抢控制权，"前移"）
+        private val bombTempoNear: Int = 6,          // 竞速胶着(|差|≤2)时炸弹 tempo 权重
+        private val bombTempoFar: Int = 2            // 差距悬殊时炸弹 tempo 权重
     ) {
         private val hands = initialHands.copyOf()
         private val sizes = IntArray(3) { sizeOf(hands[it]) }
@@ -1039,17 +1045,17 @@ internal object MasterSearch {
 
             var v = (minF - ldT) * 20
             v += (maxF - minF) * 3
-            v += (control(hands[landlord]) - maxOf(control(hands[f0]), control(hands[f1]))) * 6
+            v += (control(hands[landlord]) - maxOf(control(hands[f0]), control(hands[f1]))) * controlWeight
             // 炸弹 tempo：炸弹不止是一手牌，更是「保底夺回一次出牌权」的资源——
             // 竞速胶着（|差|≤2）时一次强制夺权常直接决定胜负，权重放大；差距悬殊时权重小。
             // 与 control() 的静态控牌分有部分重叠，故只做小权重修正，由仿真标定取舍。
             val race = minF - ldT
             v += (bombCount(hands[landlord]) - maxOf(bombCount(hands[f0]), bombCount(hands[f1]))) *
-                (if (race in -2..2) 6 else 2)
+                (if (race in -2..2) bombTempoNear else bombTempoFar)
             val holder = if (last == null) turn else lastPlayer
             val holderSize = sizes[holder]
             val initW = when {
-                holderSize <= 6 -> 25
+                holderSize <= initWEndgameSize -> 25
                 holderSize >= 16 -> 2
                 holderSize >= 12 -> 8
                 else -> 8 + (25 - 8) * (12 - holderSize) / 6
@@ -1108,7 +1114,7 @@ internal object MasterSearch {
                 if (singles > 0 && oppBeatsSingle(r, enemyA, enemyB, hand)) beat += 1
                 t += pairs + singles
             }
-            return t + beat
+            return (t + beat * effTurnsBeatCoef).toInt()
         }
 
         /**

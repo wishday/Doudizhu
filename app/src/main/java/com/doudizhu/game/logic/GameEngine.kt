@@ -713,6 +713,58 @@ class GameEngine {
      *  - 普通模式：使用普通 AI 启发式 [AIDecision]
      * 底牌/跟牌兜底逻辑保持一致。
      */
+
+    /**
+     * 提示兜底：判断一手可压牌对原有牌组的破坏等级（0=不破坏, 1=拆对/三张, 2=拆顺子/连对/飞机）。
+     * 忠实移植自 [AIDecision.groupDisruption]：优先用「不拆牌组」的牌去跟，没有再兜底拆牌组。
+     * 仅用于 getHint 的兜底分支（AI 决策已自带分层），保证玩家点提示时不会在「手上有可压散牌」时
+     * 反而去拆一个牌组取更小点数。
+     */
+    private fun groupDisruptionTier(g: CardGroup, hand: List<Card>): Int {
+        val counts = hand.groupBy { it.rank }.mapValues { it.value.size }
+        val inRunSegment: (Int, Int, Int) -> Boolean = { rank, m, minLen ->
+            if (rank !in 3..14) false
+            else if ((counts[rank] ?: 0) < m) false
+            else {
+                var len = 1
+                var r = rank - 1
+                while (r in 3..14 && (counts[r] ?: 0) >= m) { len++; r-- }
+                r = rank + 1
+                while (r in 3..14 && (counts[r] ?: 0) >= m) { len++; r++ }
+                len >= minLen
+            }
+        }
+        return when (g.type) {
+            CardType.SINGLE -> {
+                val n = counts[g.mainRank] ?: 0
+                when {
+                    inRunSegment(g.mainRank, 1, 5) -> 2   // 拆顺子
+                    n == 1 -> 0                            // 真散牌
+                    n == 2 || n == 3 -> 1                  // 拆对子/三张
+                    else -> 2
+                }
+            }
+            CardType.PAIR -> {
+                val n = counts[g.mainRank] ?: 0
+                when {
+                    inRunSegment(g.mainRank, 2, 3) || inRunSegment(g.mainRank, 3, 2) -> 2  // 拆连对/飞机
+                    n == 2 -> 0                            // 完整对子
+                    n == 3 -> 1                            // 拆三张
+                    else -> 2
+                }
+            }
+            CardType.TRIPLE, CardType.TRIPLE_ONE, CardType.TRIPLE_TWO -> {
+                val n = counts[g.mainRank] ?: 0
+                when {
+                    n == 3 -> 0                            // 完整三张
+                    inRunSegment(g.mainRank, 3, 2) -> 2     // 拆飞机
+                    else -> 0
+                }
+            }
+            else -> 0   // 顺子/连对/飞机/炸弹/火箭：本身即结构牌，不再计破坏
+        }
+    }
+
     fun getHint(): List<Card>? {
         val hand = players[0].handCards
         val lastPlay = stateMachine.lastPlayedGroup
@@ -742,12 +794,15 @@ class GameEngine {
             return decision.cards
         }
         // AI 决策返回 null（如保存炸弹不跟）但玩家手上确实有可出的牌时，
-        // 提示一个最小的合法出牌（优先非炸弹），避免误报「没有能出的牌」
+        // 提示一个最小的合法出牌（优先非炸弹），避免误报「没有能出的牌」。
+        // 选牌规则：优先用「不拆牌组」的可压牌（破坏等级 0），没有再兜底拆牌组取最小可压牌——
+        // 例如手上有 4,4(对子)+7(散牌)、上家出单张 3 时，应提示散牌 7 而非拆对子出 4。
         if (lastPlay != null && lastPlay.type != CardType.INVALID) {
             val legal = CardRuleEngine.findAllValidPlays(hand, lastPlay)
             if (legal.isNotEmpty()) {
                 val nonBomb = legal.filter { it.type != CardType.BOMB && it.type != CardType.ROCKET }
-                val pick = nonBomb.minByOrNull { it.mainRank }
+                val pick = nonBomb.filter { groupDisruptionTier(it, hand) == 0 }.minByOrNull { it.mainRank }
+                    ?: nonBomb.minByOrNull { it.mainRank }
                     ?: legal.filter { it.type == CardType.BOMB || it.type == CardType.ROCKET }.minByOrNull { it.mainRank }
                 if (pick != null) return pick.cards
             }
